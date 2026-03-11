@@ -24,6 +24,7 @@ enum class LinkCableMode {
     Off = 0,
     Loopback = 1,
     Noise = 2,
+    Socket = 3,
 };
 
 enum class DisplayPaletteMode {

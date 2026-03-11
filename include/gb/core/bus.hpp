@@ -44,11 +44,17 @@ public:
         u8 serialSb = 0x00;
         u8 serialSc = 0x7E;
         bool serialTransferRequested = false;
+        bool bootRomEnabled = false;
         u8 ie = 0;
         u8 iflag = 0xE1;
     };
 
     struct MemoryReadEvent {
+        u16 address = 0;
+        u8 value = 0;
+    };
+
+    struct MemoryWriteEvent {
         u16 address = 0;
         u8 value = 0;
     };
@@ -66,6 +72,9 @@ public:
     bool trySpeedSwitch();
     bool consumeSerialTransfer(u8& outData);
     void completeSerialTransfer(u8 inData);
+    void setBootRomData(const std::vector<u8>& data);
+    void clearBootRom();
+    [[nodiscard]] bool bootRomEnabled() const;
 
     void requestInterrupt(int bit);
     [[nodiscard]] u8 interruptEnable() const;
@@ -77,12 +86,14 @@ public:
     [[nodiscard]] Joypad& joypad();
     [[nodiscard]] APU& apu();
     [[nodiscard]] std::vector<MemoryReadEvent> snapshotRecentReads(std::size_t maxItems) const;
+    [[nodiscard]] std::vector<MemoryWriteEvent> snapshotRecentWrites(std::size_t maxItems) const;
     [[nodiscard]] State state() const;
     void loadState(const State& state);
 
 private:
     u8 readInternal(u16 address) const;
     void logRead(u16 address, u8 value);
+    void logWrite(u16 address, u8 value);
     void doOamDma(u8 page);
     void doHdmaTransfer(u16 lengthBytes);
     [[nodiscard]] u8 wramBankValue() const;
@@ -123,10 +134,15 @@ private:
     u8 serialSb_ = 0x00;
     u8 serialSc_ = 0x7E;
     bool serialTransferRequested_ = false;
+    std::vector<u8> bootRom_{};
+    bool bootRomEnabled_ = false;
 
     std::array<MemoryReadEvent, 512> readLog_{};
     std::size_t readLogHead_ = 0;
     std::size_t readLogCount_ = 0;
+    std::array<MemoryWriteEvent, 512> writeLog_{};
+    std::size_t writeLogHead_ = 0;
+    std::size_t writeLogCount_ = 0;
 };
 
 } // namespace gb

@@ -1,4 +1,5 @@
 #include <filesystem>
+#include <vector>
 
 #include "gb/core/gameboy.hpp"
 
@@ -129,6 +130,23 @@ TEST_CASE("bus", "read_log_tracks_read_not_peek") {
     T_EQ(events.size(), static_cast<std::size_t>(1));
     T_EQ(events[0].address, 0xC000);
     T_EQ(events[0].value, 0x12);
+}
+
+TEST_CASE("bus", "write_log_tracks_writes_newest_first") {
+    gb::GameBoy gb;
+    tests::ScopedPath cleanup;
+    loadBlankRom(gb, cleanup, false);
+
+    gb.bus().write(0xC000, 0x11);
+    gb.bus().write(0xC001, 0x22);
+    gb.bus().write(0xC002, 0x33);
+
+    const auto events = gb.bus().snapshotRecentWrites(2);
+    T_EQ(events.size(), static_cast<std::size_t>(2));
+    T_EQ(events[0].address, 0xC002);
+    T_EQ(events[0].value, 0x33);
+    T_EQ(events[1].address, 0xC001);
+    T_EQ(events[1].value, 0x22);
 }
 
 TEST_CASE("bus", "read_log_orders_newest_first_and_respects_limit") {
@@ -289,6 +307,20 @@ TEST_CASE("bus", "serial_state_roundtrip_restores_pending_transfer") {
     gb::u8 outData = 0;
     T_REQUIRE(gb.bus().consumeSerialTransfer(outData));
     T_EQ(outData, 0xC3);
+}
+
+TEST_CASE("bus", "boot_rom_overrides_cartridge_until_ff50") {
+    gb::GameBoy gb;
+    tests::ScopedPath cleanup;
+    loadBlankRom(gb, cleanup, false);
+
+    gb.bus().setBootRomData(std::vector<gb::u8>{0xEA, 0x00, 0x00});
+    T_REQUIRE(gb.bus().bootRomEnabled());
+    T_EQ(gb.bus().read(0x0000), 0xEA);
+
+    gb.bus().write(0xFF50, 0x01);
+    T_REQUIRE(!gb.bus().bootRomEnabled());
+    T_EQ(gb.bus().read(0x0000), 0x00);
 }
 
 TEST_CASE("bus", "ppu_register_passthrough") {

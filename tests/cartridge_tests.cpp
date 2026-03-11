@@ -480,6 +480,20 @@ TEST_CASE("cartridge", "mbc7_fallback_exposes_small_persistent_ram") {
     T_EQ(cart.read(0xA000), 0x5A);
 }
 
+TEST_CASE("cartridge", "mbc7_sensor_register_window_read_write") {
+    tests::RomSpec spec{};
+    spec.name = "cart_mbc7_sensor";
+    spec.cartridgeType = 0x22;
+    spec.ramCode = 0x00;
+
+    tests::ScopedPath cleanup;
+    auto cart = loadCartridgeOrThrow(spec, cleanup);
+
+    cart.write(0x0000, 0x0A);
+    cart.write(0xA000, 0x77);
+    T_EQ(cart.read(0xA000), 0x77);
+}
+
 TEST_CASE("cartridge", "camera_fallback_uses_mbc5_like_banking") {
     tests::RomSpec spec{};
     spec.name = "cart_camera_alias";
@@ -495,4 +509,27 @@ TEST_CASE("cartridge", "camera_fallback_uses_mbc5_like_banking") {
 
     cart.write(0x2000, 0x05);
     T_EQ(cart.read(0x4000), 0x05);
+}
+
+TEST_CASE("cartridge", "camera_mapper_register_mode_and_ram_mode") {
+    tests::RomSpec spec{};
+    spec.name = "cart_camera_regs";
+    spec.cartridgeType = 0xFC;
+    spec.romBanks = 4;
+    spec.fillBanksWithIndex = true;
+
+    tests::ScopedPath cleanup;
+    auto cart = loadCartridgeOrThrow(spec, cleanup);
+
+    cart.write(0x0000, 0x0A);
+
+    // modo registrador camera
+    cart.write(0x4000, 0x10);
+    cart.write(0xA000, 0x66);
+    T_EQ(cart.read(0xA000), 0x66);
+
+    // modo RAM normal
+    cart.write(0x4000, 0x00);
+    cart.write(0xA000, 0x33);
+    T_EQ(cart.read(0xA000), 0x33);
 }

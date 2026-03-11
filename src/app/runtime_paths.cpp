@@ -23,10 +23,36 @@ std::string buildStatesPath(const std::string& romPath, const std::string& exten
     return p.string();
 }
 
+std::string buildStateSlotPath(const std::string& romPath, int slot, const std::string& extension) {
+    if (slot < 0) {
+        slot = 0;
+    }
+    if (slot > 9) {
+        slot = 9;
+    }
+    std::error_code ec;
+    std::filesystem::create_directories("states", ec);
+    std::filesystem::path p = std::filesystem::path("states")
+        / (romStemOrDefault(romPath) + ".slot" + std::to_string(slot) + extension);
+    return p.string();
+}
+
 } // namespace
 
 std::string statePathForRom(const std::string& romPath) {
     return buildStatesPath(romPath, ".state");
+}
+
+std::string stateSlotPathForRom(const std::string& romPath, int slot) {
+    return buildStateSlotPath(romPath, slot, ".state");
+}
+
+std::string stateSlotMetaPathForRom(const std::string& romPath, int slot) {
+    return buildStateSlotPath(romPath, slot, ".meta");
+}
+
+std::string stateSlotThumbnailPathForRom(const std::string& romPath, int slot) {
+    return buildStateSlotPath(romPath, slot, ".ppm");
 }
 
 std::string legacyStatePathForRom(const std::string& romPath) {

@@ -17,6 +17,10 @@ public:
     };
 
     bool loadRom(const std::string& path);
+    bool loadBootRomFromFile(const std::string& path);
+    void clearBootRom();
+    void setPreciseTiming(bool enabled);
+    [[nodiscard]] bool preciseTiming() const;
 
     u32 step();
     void runFrame();
@@ -41,6 +45,7 @@ private:
     Cartridge cartridge_;
     Bus bus_{cartridge_};
     CPU cpu_{bus_};
+    bool preciseTiming_ = false;
 };
 
 } // namespace gb

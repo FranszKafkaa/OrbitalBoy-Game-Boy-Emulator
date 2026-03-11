@@ -77,12 +77,14 @@ bool Cartridge::loadFromFile(const std::string& path) {
         mapper_ = cartridge_mapper::makeMbc2Mapper(rom_, ram_);
     } else if (type >= 0x0F && type <= 0x13) {
         mapper_ = cartridge_mapper::makeMbc3Mapper(rom_, ram_);
-    } else if (type == 0xFE) { // HuC3 (tratado como MBC3+RTC)
-        mapper_ = cartridge_mapper::makeMbc3Mapper(rom_, ram_);
-    } else if (type == 0xFF) { // HuC1 (tratado como MBC1)
-        mapper_ = cartridge_mapper::makeMbc1Mapper(rom_, ram_);
-    } else if (type == 0x22 || type == 0xFC) { // MBC7 / Pocket Camera fallback
-        mapper_ = cartridge_mapper::makeMbc5Mapper(rom_, ram_);
+    } else if (type == 0xFE) { // HuC3
+        mapper_ = cartridge_mapper::makeHuC3Mapper(rom_, ram_);
+    } else if (type == 0xFF) { // HuC1
+        mapper_ = cartridge_mapper::makeHuC1Mapper(rom_, ram_);
+    } else if (type == 0x22) { // MBC7
+        mapper_ = cartridge_mapper::makeMbc7Mapper(rom_, ram_);
+    } else if (type == 0xFC) { // Pocket Camera
+        mapper_ = cartridge_mapper::makePocketCameraMapper(rom_, ram_);
     } else if (type >= 0x19 && type <= 0x1E) {
         mapper_ = cartridge_mapper::makeMbc5Mapper(rom_, ram_);
     } else {

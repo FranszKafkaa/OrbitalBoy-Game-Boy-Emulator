@@ -10,7 +10,7 @@ namespace gb {
 namespace {
 
 constexpr std::uint32_t SaveMagic = 0x31534247; // GBS1
-constexpr std::uint32_t SaveVersion = 3;
+constexpr std::uint32_t SaveVersion = 4;
 
 template <typename T>
 bool writePod(std::ostream& os, const T& value) {
@@ -217,10 +217,11 @@ bool writeBusState(std::ostream& os, const Bus::State& s) {
         && writePod(os, s.hdma4) && writePod(os, s.hdma5) && writeBool(os, s.hdmaActive)
         && writePod(os, s.serialSb) && writePod(os, s.serialSc)
         && writeBool(os, s.serialTransferRequested)
+        && writeBool(os, s.bootRomEnabled)
         && writePod(os, s.ie) && writePod(os, s.iflag);
 }
 
-bool readBusState(std::istream& is, Bus::State& s, bool hasSerialState) {
+bool readBusState(std::istream& is, Bus::State& s, bool hasSerialState, bool hasBootRomFlag) {
     const bool ok = readArray(is, s.vram) && readArray(is, s.vramBank1)
         && readArray(is, s.wram) && readArray(is, s.wramExt) && readArray(is, s.oam)
         && readArray(is, s.hram) && readTimerState(is, s.timer)
@@ -244,6 +245,13 @@ bool readBusState(std::istream& is, Bus::State& s, bool hasSerialState) {
         s.serialSb = 0x00;
         s.serialSc = 0x7E;
         s.serialTransferRequested = false;
+    }
+    if (hasBootRomFlag) {
+        if (!readBool(is, s.bootRomEnabled)) {
+            return false;
+        }
+    } else {
+        s.bootRomEnabled = false;
     }
     return readPod(is, s.ie) && readPod(is, s.iflag);
 }
@@ -296,13 +304,13 @@ bool GameBoy::loadStateFromFile(const std::string& path) {
     if (!readPod(in, magic) || !readPod(in, version)) {
         return false;
     }
-    if (magic != SaveMagic || (version != 2 && version != SaveVersion)) {
+    if (magic != SaveMagic || (version != 2 && version != 3 && version != SaveVersion)) {
         return false;
     }
 
     SaveState s{};
     if (!readCartridgeState(in, s.cartridge)
-        || !readBusState(in, s.bus, version >= 3)
+        || !readBusState(in, s.bus, version >= 3, version >= 4)
         || !readCpuState(in, s.cpu)) {
         return false;
     }

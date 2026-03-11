@@ -17,9 +17,19 @@
 
 namespace {
 
-bool loadGame(gb::GameBoy& gb, const std::string& romPath) {
-    if (!gb.loadRom(romPath)) {
-        std::cerr << "falha ao carregar ROM: " << romPath << "\n";
+bool loadGame(gb::GameBoy& gb, const gb::AppOptions& options) {
+    if (!options.bootRomPath.empty()) {
+        if (!gb.loadBootRomFromFile(options.bootRomPath)) {
+            std::cerr << "falha ao carregar boot ROM: " << options.bootRomPath << "\n";
+            return false;
+        }
+    } else {
+        gb.clearBootRom();
+    }
+    gb.setPreciseTiming(options.preciseTiming);
+
+    if (!gb.loadRom(options.romPath)) {
+        std::cerr << "falha ao carregar ROM: " << options.romPath << "\n";
         return false;
     }
 
@@ -30,11 +40,11 @@ bool loadGame(gb::GameBoy& gb, const std::string& romPath) {
         std::cout << "modo DMG: ROM compativel com CGB detectada (.gb)\n";
     }
 
-    const std::string batteryPath = gb::batteryRamPathForRom(romPath);
+    const std::string batteryPath = gb::batteryRamPathForRom(options.romPath);
     if (gb.loadBatteryRamFromFile(batteryPath)) {
         std::cout << "save interno carregado: " << batteryPath << "\n";
     }
-    const std::string rtcPath = gb::rtcPathForRom(romPath);
+    const std::string rtcPath = gb::rtcPathForRom(options.romPath);
     if (gb.loadRtcFromFile(rtcPath)) {
         std::cout << "rtc carregado: " << rtcPath << "\n";
     }
@@ -69,13 +79,16 @@ bool openRomSelector(gb::AppOptions& options) {
 int runRealtimeFlow(gb::AppOptions& options) {
     while (true) {
         gb::GameBoy gb;
-        if (!loadGame(gb, options.romPath)) {
+        if (!loadGame(gb, options)) {
             return 1;
         }
 
         const std::string batteryPath = gb::batteryRamPathForRom(options.romPath);
+        const std::string controlsPath = gb::controlsPathForRom(options.romPath);
+        const std::string cheatsPath = gb::cheatsPathForRom(options.romPath);
         const std::string palettePath = gb::palettePathForRom(options.romPath);
         const std::string rtcPath = gb::rtcPathForRom(options.romPath);
+        const std::string replayPath = gb::replayPathForRom(options.romPath);
         const std::string filtersPath = gb::filtersPathForRom(options.romPath);
         const std::string captureDir = gb::captureDirForRom(options.romPath);
         const int rc = gb::runRealtime(
@@ -85,10 +98,17 @@ int runRealtimeFlow(gb::AppOptions& options) {
             gb::statePathForRom(options.romPath),
             gb::legacyStatePathForRom(options.romPath),
             batteryPath,
+            controlsPath,
+            cheatsPath,
             palettePath,
             rtcPath,
+            replayPath,
             filtersPath,
-            captureDir
+            captureDir,
+            options.linkConnect,
+            options.linkHostPort,
+            options.netplayConnect,
+            options.netplayHostPort
         );
 
         if (rc == 2) {
@@ -154,7 +174,7 @@ int main(int argc, char** argv) {
 #endif
 
     gb::GameBoy gb;
-    if (!loadGame(gb, options.romPath)) {
+    if (!loadGame(gb, options)) {
         return 1;
     }
 

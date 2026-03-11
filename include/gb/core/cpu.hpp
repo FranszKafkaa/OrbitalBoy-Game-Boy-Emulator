@@ -1,5 +1,8 @@
 #pragma once
 
+#include <array>
+#include <cstdint>
+
 #include "gb/core/bus.hpp"
 #include "gb/core/types.hpp"
 
@@ -49,6 +52,9 @@ public:
     [[nodiscard]] bool isHalted() const;
     [[nodiscard]] u16 lastExecutedPc() const;
     [[nodiscard]] u8 lastExecutedOpcode() const;
+    [[nodiscard]] const std::array<std::uint64_t, 256>& opcodeHistogram() const;
+    [[nodiscard]] std::uint64_t totalInstructions() const;
+    void resetProfiler();
     [[nodiscard]] State state() const;
     void loadState(const State& state);
     void setHardwareMode(bool cgbMode);
@@ -95,6 +101,8 @@ private:
     bool haltBug_ = false;
     u16 lastPc_ = 0x0100;
     u8 lastOpcode_ = 0x00;
+    std::array<std::uint64_t, 256> opcodeHistogram_{};
+    std::uint64_t totalInstructions_ = 0;
 };
 
 } // namespace gb

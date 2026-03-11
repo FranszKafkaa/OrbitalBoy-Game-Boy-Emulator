@@ -200,6 +200,35 @@ TEST_CASE("state", "rtc_roundtrip_file_via_gameboy") {
     T_EQ(reader.bus().read(0xA000), 0x1C);
 }
 
+TEST_CASE("state", "boot_rom_file_maps_until_ff50_disable") {
+    tests::RomSpec spec{};
+    spec.name = "boot_rom_mapping";
+    spec.program = {0x76};
+
+    const auto bootPath = tests::makeTempPath("bootrom", ".bin");
+    tests::ScopedPath cleanupBoot(bootPath);
+    T_REQUIRE(tests::writeBinaryFile(bootPath, {0xEA, 0x00, 0x00}));
+
+    gb::GameBoy gb;
+    T_REQUIRE(gb.loadBootRomFromFile(bootPath.string()));
+
+    tests::ScopedPath cleanupRom;
+    loadRomOrThrow(gb, spec, cleanupRom);
+    T_EQ(gb.bus().read(0x0000), 0xEA);
+
+    gb.bus().write(0xFF50, 0x01);
+    T_EQ(gb.bus().read(0x0000), 0x00);
+}
+
+TEST_CASE("state", "precise_timing_flag_updates_runtime_mode") {
+    gb::GameBoy gb;
+    T_REQUIRE(!gb.preciseTiming());
+    gb.setPreciseTiming(true);
+    T_REQUIRE(gb.preciseTiming());
+    gb.setPreciseTiming(false);
+    T_REQUIRE(!gb.preciseTiming());
+}
+
 TEST_CASE("options", "defaults_when_no_args") {
     gb::AppOptions options;
     std::string error;
@@ -208,6 +237,12 @@ TEST_CASE("options", "defaults_when_no_args") {
     T_EQ(options.romPath, std::string(""));
     T_REQUIRE(!options.headless);
     T_REQUIRE(!options.chooseRom);
+    T_REQUIRE(!options.preciseTiming);
+    T_EQ(options.bootRomPath, std::string(""));
+    T_EQ(options.linkConnect, std::string(""));
+    T_EQ(options.netplayConnect, std::string(""));
+    T_EQ(options.linkHostPort, 0);
+    T_EQ(options.netplayHostPort, 0);
     T_EQ(options.frames, 120);
     T_EQ(options.scale, 4);
     T_EQ(options.audioBuffer, 1024);
@@ -324,6 +359,46 @@ TEST_CASE("options", "rom_suite_option_enables_headless") {
     T_REQUIRE(options.headless);
 }
 
+TEST_CASE("options", "boot_rom_precise_and_link_flags_parse") {
+    gb::AppOptions options;
+    std::string error;
+
+    T_REQUIRE(parseArgs(
+        {"gbemu", "--boot-rom", "boot.bin", "--precise-timing", "--link-host", "6000", "--link-connect", "127.0.0.1:6001"},
+        options,
+        error
+    ));
+    T_EQ(options.bootRomPath, std::string("boot.bin"));
+    T_REQUIRE(options.preciseTiming);
+    T_EQ(options.linkHostPort, 6000);
+    T_EQ(options.linkConnect, std::string("127.0.0.1:6001"));
+}
+
+TEST_CASE("options", "netplay_flags_parse") {
+    gb::AppOptions options;
+    std::string error;
+
+    T_REQUIRE(parseArgs({"gbemu", "--netplay-host", "6100", "--netplay-connect", "10.0.0.2:6100"}, options, error));
+    T_EQ(options.netplayHostPort, 6100);
+    T_EQ(options.netplayConnect, std::string("10.0.0.2:6100"));
+}
+
+TEST_CASE("options", "invalid_numeric_argument_returns_false") {
+    gb::AppOptions options;
+    std::string error;
+
+    T_REQUIRE(!parseArgs({"gbemu", "--scale", "abc"}, options, error));
+    T_REQUIRE(error.find("valor invalido") != std::string::npos);
+}
+
+TEST_CASE("options", "invalid_port_argument_returns_false") {
+    gb::AppOptions options;
+    std::string error;
+
+    T_REQUIRE(!parseArgs({"gbemu", "--link-host", "99999"}, options, error));
+    T_REQUIRE(error.find("porta invalida") != std::string::npos);
+}
+
 TEST_CASE("state", "rom_suite_runner_executes_manifest_case") {
     tests::RomSpec spec{};
     spec.name = "suite_runner_case";
@@ -343,18 +418,4 @@ TEST_CASE("state", "rom_suite_runner_executes_manifest_case") {
 
     const int rc = gb::runRomCompatibilitySuite(manifestPath.string());
     T_EQ(rc, 0);
-}
-
-TEST_CASE("options", "invalid_numeric_argument_throws_exception") {
-    gb::AppOptions options;
-    std::string error;
-
-    bool threw = false;
-    try {
-        (void)parseArgs({"gbemu", "--scale", "abc"}, options, error);
-    } catch (const std::exception&) {
-        threw = true;
-    }
-
-    T_REQUIRE(threw);
 }

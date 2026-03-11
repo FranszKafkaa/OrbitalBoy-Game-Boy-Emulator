@@ -90,6 +90,8 @@ namespace gb
         lastPc_ = r_.pc;
         const u8 opcode = fetch8();
         lastOpcode_ = opcode;
+        ++totalInstructions_;
+        ++opcodeHistogram_[opcode];
 
         if (opcode >= 0x40 && opcode <= 0x7F)
         {
@@ -805,6 +807,22 @@ namespace gb
     u8 CPU::lastExecutedOpcode() const
     {
         return lastOpcode_;
+    }
+
+    const std::array<std::uint64_t, 256>& CPU::opcodeHistogram() const
+    {
+        return opcodeHistogram_;
+    }
+
+    std::uint64_t CPU::totalInstructions() const
+    {
+        return totalInstructions_;
+    }
+
+    void CPU::resetProfiler()
+    {
+        opcodeHistogram_.fill(0);
+        totalInstructions_ = 0;
     }
 
     CPU::State CPU::state() const

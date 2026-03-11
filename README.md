@@ -1,5 +1,7 @@
 # Game Boy Emulator (C++)
 
+![Preview do emulador](image/image.png)
+
 Emulador de **Game Boy (DMG)** com suporte inicial a **Game Boy Color (CGB)**, escrito em C++17.
 O projeto tem foco em legibilidade, arquitetura modular e ferramentas de debug em tempo real.
 

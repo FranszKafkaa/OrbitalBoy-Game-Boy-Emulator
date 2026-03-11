@@ -39,7 +39,8 @@ const char* linkCableUiName(LinkCableMode mode) {
     switch (mode) {
     case LinkCableMode::Off: return "LINK OFF";
     case LinkCableMode::Loopback: return "LINK LOOP";
-    default: return "LINK NOISE";
+    case LinkCableMode::Noise: return "LINK NOISE";
+    default: return "LINK SOCKET";
     }
 }
 

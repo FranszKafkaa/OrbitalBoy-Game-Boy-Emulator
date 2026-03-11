@@ -1,5 +1,9 @@
 #include "gb/core/gameboy.hpp"
 
+#include <fstream>
+#include <iterator>
+#include <vector>
+
 namespace gb {
 
 bool GameBoy::loadRom(const std::string& path) {
@@ -11,6 +15,37 @@ bool GameBoy::loadRom(const std::string& path) {
     return true;
 }
 
+bool GameBoy::loadBootRomFromFile(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return false;
+    }
+    std::vector<u8> data(
+        std::istreambuf_iterator<char>(in),
+        std::istreambuf_iterator<char>()
+    );
+    if (data.empty()) {
+        return false;
+    }
+    if (data.size() > 0x1000) {
+        data.resize(0x1000);
+    }
+    bus_.setBootRomData(data);
+    return true;
+}
+
+void GameBoy::clearBootRom() {
+    bus_.clearBootRom();
+}
+
+void GameBoy::setPreciseTiming(bool enabled) {
+    preciseTiming_ = enabled;
+}
+
+bool GameBoy::preciseTiming() const {
+    return preciseTiming_;
+}
+
 u32 GameBoy::step() {
     const u32 cpuCycles = cpu_.step();
     bus_.tick(bus_.peripheralCyclesFromCpuCycles(cpuCycles));
@@ -18,6 +53,20 @@ u32 GameBoy::step() {
 }
 
 void GameBoy::runFrame() {
+    if (preciseTiming_) {
+        bool seenVblank = false;
+        while (true) {
+            step();
+            const u8 ly = bus_.peek(0xFF44);
+            if (!seenVblank && ly >= 144) {
+                seenVblank = true;
+            } else if (seenVblank && ly < 144) {
+                break;
+            }
+        }
+        return;
+    }
+
     constexpr u32 frameCycles = 70224;
 
     u32 elapsed = 0;

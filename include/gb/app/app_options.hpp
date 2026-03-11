@@ -7,8 +7,14 @@ namespace gb {
 struct AppOptions {
     std::string romPath;
     std::string romSuiteManifest;
+    std::string bootRomPath;
+    std::string linkConnect;
+    std::string netplayConnect;
     bool headless = false;
     bool chooseRom = false;
+    bool preciseTiming = false;
+    int linkHostPort = 0;
+    int netplayHostPort = 0;
     int frames = 120;
     int scale = 4;
     int audioBuffer = 1024;

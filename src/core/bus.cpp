@@ -36,6 +36,7 @@ constexpr u16 CgbBgpd = 0xFF69;
 constexpr u16 CgbObpi = 0xFF6A;
 constexpr u16 CgbObpd = 0xFF6B;
 constexpr u16 CgbSvbk = 0xFF70;
+constexpr u16 BootRomDisable = 0xFF50;
 constexpr u16 JoypadRegister = 0xFF00;
 constexpr u16 SerialSb = 0xFF01;
 constexpr u16 SerialSc = 0xFF02;
@@ -108,6 +109,7 @@ void Bus::syncCartridgeMode() {
         hdma5_ = 0xFF;
         hdmaActive_ = false;
     }
+    bootRomEnabled_ = !bootRom_.empty();
 }
 
 u8 Bus::read(u16 address) {
@@ -122,6 +124,9 @@ u8 Bus::peek(u16 address) const {
 
 u8 Bus::readInternal(u16 address) const {
     if (address <= RomEnd) {
+        if (bootRomEnabled_ && static_cast<std::size_t>(address) < bootRom_.size()) {
+            return bootRom_[address];
+        }
         return cartridge_.read(address);
     }
     if (inRange(address, VramBegin, VramEnd)) {
@@ -212,6 +217,8 @@ u8 Bus::readInternal(u16 address) const {
 }
 
 void Bus::write(u16 address, u8 value) {
+    logWrite(address, value);
+
     if (address <= RomEnd) {
         cartridge_.write(address, value);
         return;
@@ -363,6 +370,11 @@ void Bus::write(u16 address, u8 value) {
             svbk_ = static_cast<u8>(value & 0x07);
         }
         return;
+    case BootRomDisable:
+        if (value != 0) {
+            bootRomEnabled_ = false;
+        }
+        return;
     default:
         break;
     }
@@ -472,6 +484,20 @@ void Bus::completeSerialTransfer(u8 inData) {
     requestInterrupt(3);
 }
 
+void Bus::setBootRomData(const std::vector<u8>& data) {
+    bootRom_ = data;
+    bootRomEnabled_ = !bootRom_.empty();
+}
+
+void Bus::clearBootRom() {
+    bootRom_.clear();
+    bootRomEnabled_ = false;
+}
+
+bool Bus::bootRomEnabled() const {
+    return bootRomEnabled_;
+}
+
 void Bus::requestInterrupt(int bit) {
     if_ = static_cast<u8>(if_ | (1u << bit));
 }
@@ -534,6 +560,7 @@ Bus::State Bus::state() const {
     s.serialSb = serialSb_;
     s.serialSc = serialSc_;
     s.serialTransferRequested = serialTransferRequested_;
+    s.bootRomEnabled = bootRomEnabled_;
     s.ie = ie_;
     s.iflag = if_;
     return s;
@@ -568,6 +595,7 @@ void Bus::loadState(const State& s) {
     serialSb_ = s.serialSb;
     serialSc_ = s.serialSc;
     serialTransferRequested_ = s.serialTransferRequested;
+    bootRomEnabled_ = s.bootRomEnabled && !bootRom_.empty();
     ie_ = s.ie;
     if_ = s.iflag;
 }
@@ -588,11 +616,35 @@ std::vector<Bus::MemoryReadEvent> Bus::snapshotRecentReads(std::size_t maxItems)
     return out;
 }
 
+std::vector<Bus::MemoryWriteEvent> Bus::snapshotRecentWrites(std::size_t maxItems) const {
+    std::vector<MemoryWriteEvent> out;
+    if (maxItems == 0 || writeLogCount_ == 0) {
+        return out;
+    }
+
+    const std::size_t count = std::min(maxItems, writeLogCount_);
+    out.reserve(count);
+
+    for (std::size_t i = 0; i < count; ++i) {
+        const std::size_t idx = (writeLogHead_ + writeLog_.size() - 1 - i) % writeLog_.size();
+        out.push_back(writeLog_[idx]);
+    }
+    return out;
+}
+
 void Bus::logRead(u16 address, u8 value) {
     readLog_[readLogHead_] = MemoryReadEvent{address, value};
     readLogHead_ = (readLogHead_ + 1) % readLog_.size();
     if (readLogCount_ < readLog_.size()) {
         ++readLogCount_;
+    }
+}
+
+void Bus::logWrite(u16 address, u8 value) {
+    writeLog_[writeLogHead_] = MemoryWriteEvent{address, value};
+    writeLogHead_ = (writeLogHead_ + 1) % writeLog_.size();
+    if (writeLogCount_ < writeLog_.size()) {
+        ++writeLogCount_;
     }
 }
 

@@ -525,3 +525,29 @@ TEST_CASE("cpu", "cgb_stop_switches_double_speed_when_key1_armed") {
     T_REQUIRE((key1 & 0x01) == 0); // arm bit limpo apos STOP
     T_REQUIRE(gb.bus().isDoubleSpeed());
 }
+
+TEST_CASE("cpu", "opcode_profiler_counts_and_reset") {
+    tests::RomSpec rom{};
+    rom.name = "cpu_profiler_counts";
+    rom.program = {
+        0x00, // NOP
+        0x00, // NOP
+        0x76, // HALT
+    };
+
+    const auto path = tests::writeTempRom(rom);
+    tests::ScopedPath cleanup(path);
+
+    gb::GameBoy gb;
+    loadOrThrow(gb, path);
+
+    tests::runUntilHalt(gb);
+    T_EQ(gb.cpu().totalInstructions(), static_cast<std::uint64_t>(3));
+    const auto& histogram = gb.cpu().opcodeHistogram();
+    T_EQ(histogram[0x00], static_cast<std::uint64_t>(2));
+    T_EQ(histogram[0x76], static_cast<std::uint64_t>(1));
+
+    gb.cpu().resetProfiler();
+    T_EQ(gb.cpu().totalInstructions(), static_cast<std::uint64_t>(0));
+    T_EQ(gb.cpu().opcodeHistogram()[0x00], static_cast<std::uint64_t>(0));
+}

@@ -13,11 +13,16 @@
 #include <thread>
 #include <vector>
 
+#include "gb/app/frontend/realtime/cheat_engine.hpp"
+#include "gb/app/frontend/realtime/control_bindings.hpp"
 #include "gb/app/frontend/debug_ui.hpp"
 #include "gb/app/frontend/realtime/audio_ring_buffer.hpp"
 #include "gb/app/frontend/realtime/dropping_queue.hpp"
 #include "gb/app/frontend/realtime/frame_timeline.hpp"
+#include "gb/app/frontend/realtime/link_transport.hpp"
+#include "gb/app/frontend/realtime/replay_io.hpp"
 #include "gb/app/frontend/realtime/session_models.hpp"
+#include "gb/app/frontend/realtime/save_slots.hpp"
 #include "gb/app/frontend/realtime.hpp"
 #include "gb/app/frontend/realtime_support.hpp"
 
@@ -35,14 +40,21 @@ int runRealtime(
     const std::string& statePath,
     const std::string& legacyStatePath,
     const std::string& batteryRamPath,
+    const std::string& controlsPath,
+    const std::string& cheatsPath,
     const std::string& palettePath,
     const std::string& rtcPath,
+    const std::string& replayPath,
     const std::string& filtersPath,
-    const std::string& captureDir
+    const std::string& captureDir,
+    const std::string& linkConnect,
+    int linkHostPort,
+    const std::string& netplayConnect,
+    int netplayHostPort
 ) {
     SDL_SetHint(SDL_HINT_RENDER_VSYNC, "1");
     SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
         std::cerr << "erro SDL_Init: " << SDL_GetError() << "\n";
         return 1;
     }
@@ -117,6 +129,18 @@ int runRealtime(
         SDL_PauseAudioDevice(audioDev, 0);
     }
 
+    SDL_GameController* gamepad = nullptr;
+    const int joysticks = SDL_NumJoysticks();
+    for (int i = 0; i < joysticks; ++i) {
+        if (!SDL_IsGameController(i)) {
+            continue;
+        }
+        gamepad = SDL_GameControllerOpen(i);
+        if (gamepad) {
+            break;
+        }
+    }
+
     bool running = true;
     bool paused = false;
     bool muted = false;
@@ -126,11 +150,19 @@ int runRealtime(
     bool showBreakpointMenu = false;
     bool showScaleMenu = false;
     bool showPaletteMenu = false;
+    bool showControlsMenu = false;
     bool requestCapture = false;
     FullscreenScaleMode fullscreenMode = FullscreenScaleMode::CrispFit;
     LinkCableMode linkCableMode = LinkCableMode::Off;
     VideoFilterMode filterMode = VideoFilterMode::None;
     int scaleMenuIndex = 0;
+    int controlsMenuIndex = 0;
+    bool controlsAwaitKey = false;
+    int activeSaveSlot = 0;
+    bool cheatsEnabled = true;
+    bool replayRecording = false;
+    bool replayPlaying = false;
+    std::size_t replayCursor = 0;
     DisplayPaletteMode paletteMode = DisplayPaletteMode::GameBoyClassic;
     const bool cgbPaletteAvailable = gb.cartridge().cgbSupported();
     if (const auto saved = loadPalettePreference(palettePath); saved.has_value()) {
@@ -141,6 +173,40 @@ int runRealtime(
     }
     if (const auto savedFilter = loadFilterPreference(filtersPath); savedFilter.has_value()) {
         filterMode = savedFilter.value();
+    }
+    ControlBindings controls = defaultControlBindings();
+    (void)loadControlBindings(controlsPath, controls);
+    auto cheatsLoad = loadCheatsFromFile(cheatsPath);
+    std::vector<CheatCode> cheats = std::move(cheatsLoad.cheats);
+    if (!cheatsLoad.errors.empty()) {
+        std::cerr << "aviso: erros ao carregar cheats (" << cheatsPath << ")\n";
+        for (const auto& err : cheatsLoad.errors) {
+            std::cerr << "  - " << err << "\n";
+        }
+    }
+    ReplayData replayData{};
+    replayData.version = 1;
+    replayData.seed = 0;
+    UdpLinkTransport linkTransport{};
+    bool socketLinkAvailable = false;
+    if (linkHostPort > 0) {
+        socketLinkAvailable = linkTransport.openHost(static_cast<std::uint16_t>(linkHostPort));
+    } else if (!linkConnect.empty()) {
+        if (const auto ep = parseLinkEndpoint(linkConnect); ep.has_value()) {
+            socketLinkAvailable = linkTransport.openClient(ep->host, ep->port);
+        }
+    }
+    UdpLinkTransport netplayTransport{};
+    bool netplayEnabled = false;
+    if (netplayHostPort > 0) {
+        netplayEnabled = netplayTransport.openHost(static_cast<std::uint16_t>(netplayHostPort));
+    } else if (!netplayConnect.empty()) {
+        if (const auto ep = parseLinkEndpoint(netplayConnect); ep.has_value()) {
+            netplayEnabled = netplayTransport.openClient(ep->host, ep->port);
+        }
+    }
+    if (socketLinkAvailable) {
+        linkCableMode = LinkCableMode::Socket;
     }
     int paletteMenuIndex = static_cast<int>(paletteMode);
     FrameTimeline timeline(gb);
@@ -162,9 +228,11 @@ int runRealtime(
     std::mutex gbMutex{};
     std::mutex breakpointsMutex{};
     std::mutex queuedWriteMutex{};
+    std::mutex replayMutex{};
     std::atomic<bool> mtRunning{true};
     std::atomic<bool> pausedAtomic{paused};
     std::atomic<bool> fastForwardAtomic{fastForward};
+    std::atomic<bool> cheatsEnabledAtomic{cheatsEnabled};
     std::atomic<bool> watchpointEnabledAtomic{watchpointEnabled};
     std::atomic<gb::u16> watchAddressAtomic{memoryWatch.address};
     std::atomic<bool> watchFreezeAtomic{memoryWatch.freeze};
@@ -193,6 +261,7 @@ int runRealtime(
         pausedAtomic.store(paused, std::memory_order_relaxed);
         fastForwardAtomic.store(fastForward, std::memory_order_relaxed);
         watchpointEnabledAtomic.store(watchpointEnabled, std::memory_order_relaxed);
+        cheatsEnabledAtomic.store(cheatsEnabled, std::memory_order_relaxed);
         watchAddressAtomic.store(memoryWatch.address, std::memory_order_relaxed);
         watchFreezeAtomic.store(memoryWatch.freeze, std::memory_order_relaxed);
         watchFreezeValueAtomic.store(memoryWatch.freezeValue, std::memory_order_relaxed);
@@ -208,6 +277,30 @@ int runRealtime(
         packet.mono = gb.ppu().framebuffer();
         packet.color = gb.ppu().colorFramebuffer();
         rawFrameQueue.push(std::move(packet));
+    };
+
+    const auto joypadMaskFromState = [](const gb::Joypad::State& state) -> std::uint8_t {
+        return packButtons(
+            state.pressed[0],
+            state.pressed[1],
+            state.pressed[2],
+            state.pressed[3],
+            state.pressed[4],
+            state.pressed[5],
+            state.pressed[6],
+            state.pressed[7]
+        );
+    };
+
+    const auto applyJoypadMask = [](gb::Joypad& joypad, std::uint8_t mask) {
+        joypad.setButton(gb::Button::Right, (mask & (1u << 0)) != 0);
+        joypad.setButton(gb::Button::Left, (mask & (1u << 1)) != 0);
+        joypad.setButton(gb::Button::Up, (mask & (1u << 2)) != 0);
+        joypad.setButton(gb::Button::Down, (mask & (1u << 3)) != 0);
+        joypad.setButton(gb::Button::A, (mask & (1u << 4)) != 0);
+        joypad.setButton(gb::Button::B, (mask & (1u << 5)) != 0);
+        joypad.setButton(gb::Button::Select, (mask & (1u << 6)) != 0);
+        joypad.setButton(gb::Button::Start, (mask & (1u << 7)) != 0);
     };
 
     const auto queueMemoryWrite = [&](gb::u16 address, gb::u8 value, const char* source) {
@@ -534,8 +627,42 @@ int runRealtime(
                         watchBefore = gb.bus().peek(watchAddr);
                     }
 
+                    const std::uint64_t frameId = emulatedFrameCounter.load(std::memory_order_relaxed);
+                    std::uint8_t localInputMask = joypadMaskFromState(gb.joypad().state());
+                    bool replayPlayingNow = false;
+                    {
+                        std::lock_guard<std::mutex> replayLock(replayMutex);
+                        replayPlayingNow = replayPlaying;
+                        if (replayPlaying) {
+                            if (replayCursor < replayData.frameInputs.size()) {
+                                localInputMask = replayData.frameInputs[replayCursor++];
+                                applyJoypadMask(gb.joypad(), localInputMask);
+                            } else {
+                                replayPlaying = false;
+                            }
+                        }
+                    }
+                    if (netplayEnabled && !replayPlayingNow) {
+                        std::uint8_t remoteMask = 0;
+                        bool predicted = false;
+                        if (netplayTransport.exchangeNetplayInput(frameId, localInputMask, remoteMask, predicted)) {
+                            applyJoypadMask(gb.joypad(), static_cast<std::uint8_t>(localInputMask | remoteMask));
+                        }
+                    }
+
                     gb.runFrame();
                     emulatedFrameCounter.fetch_add(1, std::memory_order_relaxed);
+
+                    if (cheatsEnabledAtomic.load(std::memory_order_relaxed) && !cheats.empty()) {
+                        applyCheats(cheats, gb.bus());
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> replayLock(replayMutex);
+                        if (replayRecording) {
+                            replayData.frameInputs.push_back(joypadMaskFromState(gb.joypad().state()));
+                        }
+                    }
 
                     gb::u8 outData = 0;
                     if (gb.bus().consumeSerialTransfer(outData)) {
@@ -545,6 +672,11 @@ int runRealtime(
                             inData = outData;
                         } else if (mode == LinkCableMode::Noise) {
                             inData = static_cast<gb::u8>(emuRandByte(emuRng));
+                        } else if (mode == LinkCableMode::Socket) {
+                            std::uint8_t remote = 0xFF;
+                            if (linkTransport.exchangeSerialByte(outData, remote)) {
+                                inData = static_cast<gb::u8>(remote);
+                            }
                         }
                         gb.bus().completeSerialTransfer(inData);
                     }
@@ -674,6 +806,26 @@ int runRealtime(
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) {
                 running = false;
+            }
+            if (ev.type == SDL_CONTROLLERDEVICEADDED && !gamepad) {
+                if (SDL_IsGameController(ev.cdevice.which)) {
+                    gamepad = SDL_GameControllerOpen(ev.cdevice.which);
+                }
+            }
+            if (ev.type == SDL_CONTROLLERDEVICEREMOVED && gamepad) {
+                const SDL_JoystickID id = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gamepad));
+                if (id == ev.cdevice.which) {
+                    SDL_GameControllerClose(gamepad);
+                    gamepad = nullptr;
+                }
+            }
+            if (ev.type == SDL_CONTROLLERBUTTONDOWN || ev.type == SDL_CONTROLLERBUTTONUP) {
+                if (showScaleMenu || showPaletteMenu || memoryEdit.active || breakpointEdit.active || memorySearch.ui.editingValue) {
+                    continue;
+                }
+                std::lock_guard<std::mutex> gbLock(gbMutex);
+                applyGamepadBinding(gb, controls, ev.cbutton.button, ev.type == SDL_CONTROLLERBUTTONDOWN);
+                continue;
             }
             if (ev.type == SDL_KEYDOWN && ev.key.repeat == 0) {
                 if (ev.key.keysym.sym == SDLK_n && fullscreen) {
@@ -910,6 +1062,8 @@ int runRealtime(
                         linkCableMode = LinkCableMode::Loopback;
                     } else if (linkCableMode == LinkCableMode::Loopback) {
                         linkCableMode = LinkCableMode::Noise;
+                    } else if (linkCableMode == LinkCableMode::Noise) {
+                        linkCableMode = socketLinkAvailable ? LinkCableMode::Socket : LinkCableMode::Off;
                     } else {
                         linkCableMode = LinkCableMode::Off;
                     }
@@ -1063,29 +1217,55 @@ int runRealtime(
                     fastForwardAtomic.store(true, std::memory_order_relaxed);
                     uiMessage = "FAST FORWARD";
                     uiMessageFrames = 60;
+                } else if (ev.key.keysym.sym == SDLK_F1) {
+                    activeSaveSlot = normalizeSaveSlot(activeSaveSlot - 1);
+                    char msg[32];
+                    std::snprintf(msg, sizeof(msg), "SLOT %d", activeSaveSlot);
+                    uiMessage = msg;
+                    uiMessageFrames = 90;
+                } else if (ev.key.keysym.sym == SDLK_F2) {
+                    activeSaveSlot = normalizeSaveSlot(activeSaveSlot + 1);
+                    char msg[32];
+                    std::snprintf(msg, sizeof(msg), "SLOT %d", activeSaveSlot);
+                    uiMessage = msg;
+                    uiMessageFrames = 90;
                 } else if (ev.key.keysym.sym == SDLK_F3
                            || (ev.key.keysym.sym == SDLK_s && (ev.key.keysym.mod & KMOD_CTRL))) {
+                    const std::string slotStatePath = saveSlotStatePath(statePath, activeSaveSlot);
+                    const std::string slotMetaPath = saveSlotMetaPath(statePath, activeSaveSlot);
+                    const std::string slotThumbPath = saveSlotThumbnailPath(statePath, activeSaveSlot);
                     bool saved = false;
                     {
                         std::lock_guard<std::mutex> gbLock(gbMutex);
-                        saved = gb.saveStateToFile(statePath);
+                        saved = gb.saveStateToFile(slotStatePath);
                     }
                     if (saved) {
-                        uiMessage = "STATE SAVED";
-                        std::cout << "state salvo: " << statePath << "\n";
+                        SaveSlotMeta meta{};
+                        meta.slot = activeSaveSlot;
+                        meta.title = gb.cartridge().title();
+                        meta.timestamp = nowIso8601Local();
+                        meta.frame = emulatedFrameCounter.load(std::memory_order_relaxed);
+                        writeSaveSlotMeta(slotMetaPath, meta);
+                        saveRgb24Ppm(slotThumbPath, pixels);
+
+                        char msg[40];
+                        std::snprintf(msg, sizeof(msg), "STATE SAVED S%d", activeSaveSlot);
+                        uiMessage = msg;
+                        std::cout << "state salvo: " << slotStatePath << "\n";
                     } else {
                         uiMessage = "SAVE FAIL";
-                        std::cerr << "falha ao salvar state: " << statePath << "\n";
+                        std::cerr << "falha ao salvar state slot: " << slotStatePath << "\n";
                     }
                     uiMessageFrames = 180;
                 } else if (ev.key.keysym.sym == SDLK_F5
                            || (ev.key.keysym.sym == SDLK_l && (ev.key.keysym.mod & KMOD_CTRL))) {
+                    const std::string slotStatePath = saveSlotStatePath(statePath, activeSaveSlot);
                     bool loaded = false;
                     bool loadedLegacy = false;
                     {
                         std::lock_guard<std::mutex> gbLock(gbMutex);
-                        loaded = gb.loadStateFromFile(statePath);
-                        if (!loaded) {
+                        loaded = gb.loadStateFromFile(slotStatePath);
+                        if (!loaded && activeSaveSlot == 0) {
                             loadedLegacy = gb.loadStateFromFile(legacyStatePath);
                         }
                         if (loaded || loadedLegacy) {
@@ -1099,18 +1279,20 @@ int runRealtime(
                         audioRing.clear();
                     }
                     if (loaded || loadedLegacy) {
-                        uiMessage = "STATE LOADED";
+                        char msg[40];
+                        std::snprintf(msg, sizeof(msg), "STATE LOADED S%d", activeSaveSlot);
+                        uiMessage = msg;
                         if (loaded) {
-                            std::cout << "state carregado: " << statePath << "\n";
+                            std::cout << "state carregado: " << slotStatePath << "\n";
                         }
                     } else {
                         uiMessage = "NO STATE";
-                        std::cerr << "state nao encontrado: " << statePath << "\n";
+                        std::cerr << "state nao encontrado: " << slotStatePath << "\n";
                     }
                     uiMessageFrames = 180;
                 } else {
                     std::lock_guard<std::mutex> gbLock(gbMutex);
-                    setButtonFromKey(gb, ev.key.keysym.sym, true);
+                    applyKeyboardBinding(gb, controls, ev.key.keysym.sym, true);
                 }
             }
             if (ev.type == SDL_KEYUP) {
@@ -1128,7 +1310,7 @@ int runRealtime(
                     continue;
                 }
                 std::lock_guard<std::mutex> gbLock(gbMutex);
-                setButtonFromKey(gb, ev.key.keysym.sym, false);
+                applyKeyboardBinding(gb, controls, ev.key.keysym.sym, false);
             }
             if (ev.type == SDL_TEXTINPUT) {
                 if (memoryEdit.active) {
