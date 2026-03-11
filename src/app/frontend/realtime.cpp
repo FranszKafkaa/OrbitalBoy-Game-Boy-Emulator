@@ -1,9 +1,12 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <string>
@@ -11,6 +14,10 @@
 #include <vector>
 
 #include "gb/app/frontend/debug_ui.hpp"
+#include "gb/app/frontend/realtime/audio_ring_buffer.hpp"
+#include "gb/app/frontend/realtime/dropping_queue.hpp"
+#include "gb/app/frontend/realtime/frame_timeline.hpp"
+#include "gb/app/frontend/realtime/session_models.hpp"
 #include "gb/app/frontend/realtime.hpp"
 #include "gb/app/frontend/realtime_support.hpp"
 
@@ -21,92 +28,6 @@
 namespace gb::frontend {
 
 #ifdef GBEMU_USE_SDL2
-class FrameTimeline {
-public:
-    static constexpr std::size_t MaxHistory = 900;
-
-    explicit FrameTimeline(const gb::GameBoy& gb) {
-        reset(gb);
-    }
-
-    void reset(const gb::GameBoy& gb) {
-        history_.clear();
-        history_.reserve(MaxHistory + 8);
-        history_.push_back(gb.saveState());
-        cursor_ = 0;
-    }
-
-    bool stepBack(gb::GameBoy& gb) {
-        if (cursor_ == 0) {
-            return false;
-        }
-        --cursor_;
-        gb.loadState(history_[cursor_]);
-        return true;
-    }
-
-    bool stepForward(gb::GameBoy& gb) {
-        if (cursor_ + 1 >= history_.size()) {
-            return false;
-        }
-        ++cursor_;
-        gb.loadState(history_[cursor_]);
-        return true;
-    }
-
-    void captureCurrent(const gb::GameBoy& gb) {
-        truncateFuture();
-        history_.push_back(gb.saveState());
-        if (history_.size() > MaxHistory) {
-            history_.erase(history_.begin());
-        }
-        cursor_ = history_.size() - 1;
-    }
-
-    [[nodiscard]] std::size_t position() const {
-        return cursor_ + 1;
-    }
-
-    [[nodiscard]] std::size_t size() const {
-        return history_.size();
-    }
-
-private:
-    void truncateFuture() {
-        if (cursor_ + 1 < history_.size()) {
-            history_.erase(history_.begin() + static_cast<std::ptrdiff_t>(cursor_ + 1), history_.end());
-        }
-    }
-
-    std::vector<gb::GameBoy::SaveState> history_{};
-    std::size_t cursor_ = 0;
-};
-
-struct QueuedMemoryWrite {
-    bool active = false;
-    gb::u16 address = 0;
-    gb::u8 value = 0;
-    const char* source = "";
-};
-
-struct BreakpointEditState {
-    bool active = false;
-    std::string addressHex{};
-};
-
-struct MemorySearchState {
-    static constexpr std::size_t MaxStoredMatches = 4096;
-
-    MemorySearchUiState ui{};
-    std::array<gb::u8, 0x10000> snapshot{};
-};
-
-std::string frameTimelineLabel(const FrameTimeline& timeline) {
-    char msg[48];
-    std::snprintf(msg, sizeof(msg), "FRAME %zu/%zu", timeline.position(), timeline.size());
-    return msg;
-}
-
 int runRealtime(
     gb::GameBoy& gb,
     int scale,
@@ -233,21 +154,65 @@ int runRealtime(
     MemoryEditState memoryEdit{};
     MemoryWriteUiState memoryWriteUi{};
     QueuedMemoryWrite queuedWrite{};
-    std::uint64_t emulatedFrameCounter = 0;
+    std::atomic<std::uint64_t> emulatedFrameCounter{0};
     std::string uiMessage;
     int uiMessageFrames = 0;
     std::array<unsigned char, gb::PPU::ScreenWidth * gb::PPU::ScreenHeight * 3> pixels{};
     std::array<unsigned char, gb::PPU::ScreenWidth * gb::PPU::ScreenHeight * 3> sharpPixels{};
-    std::mt19937 rng(std::random_device{}());
-    std::uniform_int_distribution<int> randByte(0, 255);
+    std::mutex gbMutex{};
+    std::mutex breakpointsMutex{};
+    std::mutex queuedWriteMutex{};
+    std::atomic<bool> mtRunning{true};
+    std::atomic<bool> pausedAtomic{paused};
+    std::atomic<bool> fastForwardAtomic{fastForward};
+    std::atomic<bool> watchpointEnabledAtomic{watchpointEnabled};
+    std::atomic<gb::u16> watchAddressAtomic{memoryWatch.address};
+    std::atomic<bool> watchFreezeAtomic{memoryWatch.freeze};
+    std::atomic<gb::u8> watchFreezeValueAtomic{memoryWatch.freezeValue};
+    std::atomic<int> linkCableModeAtomic{static_cast<int>(linkCableMode)};
+    std::atomic<int> paletteModeAtomic{static_cast<int>(paletteMode)};
+    std::atomic<int> filterModeAtomic{static_cast<int>(filterMode)};
+    std::atomic<bool> audioGateAtomic{false};
+    std::atomic<int> pendingPauseReason{0};
+    std::atomic<gb::u16> pendingPauseAddr{0};
+    std::atomic<std::uint64_t> frameSequence{0};
+    std::atomic<bool> forceTitleRefresh{false};
+    DroppingQueue<RawFramePacket, 3> rawFrameQueue{};
+    DroppingQueue<RgbFramePacket, 3> rgbFrameQueue{};
+    AudioRingBuffer audioRing(static_cast<std::size_t>(gb::APU::SampleRate) * 2 * 2);
     updateWindowTitle(window, gb.cartridge().title(), paused, muted);
 #if SDL_VERSION_ATLEAST(2, 0, 12)
     SDL_SetTextureScaleMode(texture, SDL_ScaleModeNearest);
 #endif
-    resetMemoryWatch(memoryWatch, gb.bus());
+    {
+        std::lock_guard<std::mutex> gbLock(gbMutex);
+        resetMemoryWatch(memoryWatch, gb.bus());
+    }
+
+    const auto syncThreadState = [&]() {
+        pausedAtomic.store(paused, std::memory_order_relaxed);
+        fastForwardAtomic.store(fastForward, std::memory_order_relaxed);
+        watchpointEnabledAtomic.store(watchpointEnabled, std::memory_order_relaxed);
+        watchAddressAtomic.store(memoryWatch.address, std::memory_order_relaxed);
+        watchFreezeAtomic.store(memoryWatch.freeze, std::memory_order_relaxed);
+        watchFreezeValueAtomic.store(memoryWatch.freezeValue, std::memory_order_relaxed);
+        linkCableModeAtomic.store(static_cast<int>(linkCableMode), std::memory_order_relaxed);
+        paletteModeAtomic.store(static_cast<int>(paletteMode), std::memory_order_relaxed);
+        filterModeAtomic.store(static_cast<int>(filterMode), std::memory_order_relaxed);
+        audioGateAtomic.store(audioEnabled && !muted && !paused && !fastForward, std::memory_order_relaxed);
+    };
+
+    const auto enqueueRawFrameLocked = [&]() {
+        RawFramePacket packet{};
+        packet.sequence = frameSequence.fetch_add(1, std::memory_order_relaxed) + 1;
+        packet.mono = gb.ppu().framebuffer();
+        packet.color = gb.ppu().colorFramebuffer();
+        rawFrameQueue.push(std::move(packet));
+    };
 
     const auto queueMemoryWrite = [&](gb::u16 address, gb::u8 value, const char* source) {
         if (!likelyWritableAddress(address)) {
+            std::lock_guard<std::mutex> writeLock(queuedWriteMutex);
             if (queuedWrite.active) {
                 memoryWriteUi.pending = true;
                 memoryWriteUi.pendingAddress = queuedWrite.address;
@@ -259,16 +224,19 @@ int runRealtime(
             memoryWriteUi.lastOk = false;
             memoryWriteUi.lastAddress = address;
             memoryWriteUi.lastValue = value;
-            memoryWriteUi.lastFrame = emulatedFrameCounter;
+            memoryWriteUi.lastFrame = emulatedFrameCounter.load(std::memory_order_relaxed);
             memoryWriteUi.lastTag = "ERR READ ONLY";
             uiMessage = "ADDR READ ONLY";
             uiMessageFrames = 90;
             return;
         }
-        queuedWrite.active = true;
-        queuedWrite.address = address;
-        queuedWrite.value = value;
-        queuedWrite.source = source;
+        {
+            std::lock_guard<std::mutex> writeLock(queuedWriteMutex);
+            queuedWrite.active = true;
+            queuedWrite.address = address;
+            queuedWrite.value = value;
+            queuedWrite.source = source;
+        }
         memoryWriteUi.pending = true;
         memoryWriteUi.pendingAddress = address;
         memoryWriteUi.pendingValue = value;
@@ -283,7 +251,7 @@ int runRealtime(
             memoryWriteUi.lastOk = false;
             memoryWriteUi.lastAddress = address;
             memoryWriteUi.lastValue = value;
-            memoryWriteUi.lastFrame = emulatedFrameCounter;
+            memoryWriteUi.lastFrame = emulatedFrameCounter.load(std::memory_order_relaxed);
             memoryWriteUi.lastTag = "ERR READ ONLY";
             if (showToast) {
                 uiMessage = "ADDR READ ONLY";
@@ -291,16 +259,20 @@ int runRealtime(
             }
             return;
         }
-        gb.bus().write(address, value);
-        if (memoryWatch.address == address) {
-            resetMemoryWatch(memoryWatch, gb.bus());
+        {
+            std::lock_guard<std::mutex> gbLock(gbMutex);
+            gb.bus().write(address, value);
+            if (memoryWatch.address == address) {
+                resetMemoryWatch(memoryWatch, gb.bus());
+            }
+            enqueueRawFrameLocked();
         }
         memoryWriteUi.pending = false;
         memoryWriteUi.hasLast = true;
         memoryWriteUi.lastOk = true;
         memoryWriteUi.lastAddress = address;
         memoryWriteUi.lastValue = value;
-        memoryWriteUi.lastFrame = emulatedFrameCounter;
+        memoryWriteUi.lastFrame = emulatedFrameCounter.load(std::memory_order_relaxed);
         memoryWriteUi.lastTag = tag;
         if (showToast) {
             char msg[56];
@@ -314,25 +286,14 @@ int runRealtime(
         if (!memoryWatch.freeze || !likelyWritableAddress(memoryWatch.address)) {
             return;
         }
-        const gb::u8 current = gb.bus().peek(memoryWatch.address);
-        if (current == memoryWatch.freezeValue) {
-            return;
+        {
+            std::lock_guard<std::mutex> gbLock(gbMutex);
+            const gb::u8 current = gb.bus().peek(memoryWatch.address);
+            if (current == memoryWatch.freezeValue) {
+                return;
+            }
         }
         applyWriteNow(memoryWatch.address, memoryWatch.freezeValue, "LOCK", false);
-    };
-
-    const auto processSerialTransfer = [&]() {
-        gb::u8 outData = 0;
-        if (!gb.bus().consumeSerialTransfer(outData)) {
-            return;
-        }
-        gb::u8 inData = 0xFF;
-        if (linkCableMode == LinkCableMode::Loopback) {
-            inData = outData;
-        } else if (linkCableMode == LinkCableMode::Noise) {
-            inData = static_cast<gb::u8>(randByte(rng));
-        }
-        gb.bus().completeSerialTransfer(inData);
     };
 
     const auto stopTextInputIfUnused = [&]() {
@@ -342,6 +303,7 @@ int runRealtime(
     };
 
     const auto toggleBreakpoint = [&](gb::u16 address) {
+        std::lock_guard<std::mutex> bpLock(breakpointsMutex);
         const auto it = std::find(breakpoints.begin(), breakpoints.end(), address);
         if (it != breakpoints.end()) {
             breakpoints.erase(it);
@@ -365,6 +327,7 @@ int runRealtime(
     };
 
     const auto captureSearchSnapshot = [&]() {
+        std::lock_guard<std::mutex> gbLock(gbMutex);
         for (int address = 0; address <= 0xFFFF; ++address) {
             memorySearch.snapshot[static_cast<std::size_t>(address)] = gb.bus().peek(static_cast<gb::u16>(address));
         }
@@ -398,37 +361,40 @@ int runRealtime(
         }
 
         clearSearchResults();
-        for (int address = 0; address <= 0xFFFF; ++address) {
-            const gb::u16 addr = static_cast<gb::u16>(address);
-            if (!likelyWritableAddress(addr)) {
-                continue;
-            }
-            const gb::u8 now = gb.bus().peek(addr);
-            const gb::u8 prev = memorySearch.snapshot[static_cast<std::size_t>(address)];
-            bool match = false;
-            switch (mode) {
-            case MemorySearchMode::Exact:
-                match = now == target.value();
-                break;
-            case MemorySearchMode::Greater:
-                match = now > target.value();
-                break;
-            case MemorySearchMode::Less:
-                match = now < target.value();
-                break;
-            case MemorySearchMode::Changed:
-                match = now != prev;
-                break;
-            case MemorySearchMode::Unchanged:
-                match = now == prev;
-                break;
-            }
-            if (!match) {
-                continue;
-            }
-            ++memorySearch.ui.totalMatches;
-            if (memorySearch.ui.matches.size() < MemorySearchState::MaxStoredMatches) {
-                memorySearch.ui.matches.push_back(addr);
+        {
+            std::lock_guard<std::mutex> gbLock(gbMutex);
+            for (int address = 0; address <= 0xFFFF; ++address) {
+                const gb::u16 addr = static_cast<gb::u16>(address);
+                if (!likelyWritableAddress(addr)) {
+                    continue;
+                }
+                const gb::u8 now = gb.bus().peek(addr);
+                const gb::u8 prev = memorySearch.snapshot[static_cast<std::size_t>(address)];
+                bool match = false;
+                switch (mode) {
+                case MemorySearchMode::Exact:
+                    match = now == target.value();
+                    break;
+                case MemorySearchMode::Greater:
+                    match = now > target.value();
+                    break;
+                case MemorySearchMode::Less:
+                    match = now < target.value();
+                    break;
+                case MemorySearchMode::Changed:
+                    match = now != prev;
+                    break;
+                case MemorySearchMode::Unchanged:
+                    match = now == prev;
+                    break;
+                }
+                if (!match) {
+                    continue;
+                }
+                ++memorySearch.ui.totalMatches;
+                if (memorySearch.ui.matches.size() < MemorySearchState::MaxStoredMatches) {
+                    memorySearch.ui.matches.push_back(addr);
+                }
             }
         }
         memorySearch.ui.scroll = 0;
@@ -438,7 +404,272 @@ int runRealtime(
         uiMessageFrames = 120;
     };
 
+    syncThreadState();
+    {
+        std::lock_guard<std::mutex> gbLock(gbMutex);
+        enqueueRawFrameLocked();
+    }
+
+    std::cout << "[MT] iniciando workers (emu/render/audio)\n";
+
+    std::thread renderThread([&]() {
+        std::cout << "[MT][REN] worker iniciado\n";
+        std::size_t processed = 0;
+        RawFramePacket raw{};
+        while (rawFrameQueue.waitPop(raw)) {
+            RawFramePacket latest = std::move(raw);
+            RawFramePacket pending{};
+            while (rawFrameQueue.tryPopLatest(pending)) {
+                latest = std::move(pending);
+            }
+
+            RgbFramePacket out{};
+            out.sequence = latest.sequence;
+            const auto paletteModeLocal = static_cast<DisplayPaletteMode>(paletteModeAtomic.load(std::memory_order_relaxed));
+            const auto filterModeLocal = static_cast<VideoFilterMode>(filterModeAtomic.load(std::memory_order_relaxed));
+            const bool useCgbPalette = cgbPaletteAvailable && paletteModeLocal == DisplayPaletteMode::GameBoyColor;
+
+            if (useCgbPalette) {
+                for (std::size_t i = 0; i < latest.color.size(); ++i) {
+                    const gb::u16 c = latest.color[i];
+                    const gb::u8 r5 = static_cast<gb::u8>((c >> 0) & 0x1F);
+                    const gb::u8 g5 = static_cast<gb::u8>((c >> 5) & 0x1F);
+                    const gb::u8 b5 = static_cast<gb::u8>((c >> 10) & 0x1F);
+                    out.pixels[i * 3 + 0] = static_cast<unsigned char>((r5 * 255) / 31);
+                    out.pixels[i * 3 + 1] = static_cast<unsigned char>((g5 * 255) / 31);
+                    out.pixels[i * 3 + 2] = static_cast<unsigned char>((b5 * 255) / 31);
+                }
+            } else {
+                const auto& palette = monoPalette(paletteModeLocal);
+                for (std::size_t i = 0; i < latest.mono.size(); ++i) {
+                    const std::size_t shade = static_cast<std::size_t>(latest.mono[i] & 0x03);
+                    out.pixels[i * 3 + 0] = palette[shade][0];
+                    out.pixels[i * 3 + 1] = palette[shade][1];
+                    out.pixels[i * 3 + 2] = palette[shade][2];
+                }
+            }
+
+            applyVideoFilterRgb24(filterModeLocal, out.pixels);
+            rgbFrameQueue.push(std::move(out));
+            ++processed;
+            if ((processed % 360) == 0) {
+                std::cout << "[MT][REN] frames=" << processed
+                          << " dropIn=" << rawFrameQueue.droppedCount()
+                          << " dropOut=" << rgbFrameQueue.droppedCount() << "\n";
+            }
+        }
+        std::cout << "[MT][REN] worker finalizado, dropIn=" << rawFrameQueue.droppedCount()
+                  << " dropOut=" << rgbFrameQueue.droppedCount() << "\n";
+    });
+
+    std::thread audioThread{};
+    if (audioEnabled) {
+        audioThread = std::thread([&]() {
+            std::cout << "[MT][AUD] worker iniciado\n";
+            std::array<int16_t, 4096> chunk{};
+            std::size_t underruns = 0;
+            auto lastLog = std::chrono::steady_clock::now();
+            while (mtRunning.load(std::memory_order_relaxed)) {
+                if (!audioGateAtomic.load(std::memory_order_relaxed)) {
+                    audioRing.clear();
+                    SDL_ClearQueuedAudio(audioDev);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    continue;
+                }
+                const std::size_t count = audioRing.pop(chunk.data(), chunk.size(), 8);
+                if (count == 0) {
+                    ++underruns;
+                    continue;
+                }
+                if (SDL_GetQueuedAudioSize(audioDev) > static_cast<Uint32>(have.freq * have.channels * sizeof(int16_t))) {
+                    SDL_ClearQueuedAudio(audioDev);
+                }
+                SDL_QueueAudio(audioDev, chunk.data(), static_cast<Uint32>(count * sizeof(int16_t)));
+
+                const auto now = std::chrono::steady_clock::now();
+                if (now - lastLog >= std::chrono::seconds(3)) {
+                    std::cout << "[MT][AUD] queued=" << SDL_GetQueuedAudioSize(audioDev)
+                              << " underruns=" << underruns
+                              << " droppedSamples=" << audioRing.droppedCount() << "\n";
+                    lastLog = now;
+                }
+            }
+            SDL_ClearQueuedAudio(audioDev);
+            std::cout << "[MT][AUD] worker finalizado, underruns=" << underruns
+                      << " droppedSamples=" << audioRing.droppedCount() << "\n";
+        });
+    }
+
+    std::thread emuThread([&]() {
+        std::cout << "[MT][EMU] worker iniciado\n";
+        std::mt19937 emuRng(std::random_device{}());
+    std::uniform_int_distribution<int> emuRandByte(0, 255);
+    const auto frameBudget = std::chrono::microseconds(16742);
+    auto nextFrame = std::chrono::steady_clock::now();
+    auto lastLog = std::chrono::steady_clock::now();
+        std::uint64_t logFrames = 0;
+        std::size_t audioDropLogs = 0;
+
+        while (mtRunning.load(std::memory_order_relaxed)) {
+            if (pausedAtomic.load(std::memory_order_relaxed)) {
+                nextFrame = std::chrono::steady_clock::now();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+
+            const bool ff = fastForwardAtomic.load(std::memory_order_relaxed);
+            const int framesToRun = ff ? 6 : 1;
+            for (int i = 0; i < framesToRun && mtRunning.load(std::memory_order_relaxed); ++i) {
+                const bool watchEnabled = watchpointEnabledAtomic.load(std::memory_order_relaxed);
+                const gb::u16 watchAddr = watchAddressAtomic.load(std::memory_order_relaxed);
+                const bool freezeEnabled = watchFreezeAtomic.load(std::memory_order_relaxed);
+                const gb::u8 freezeValue = watchFreezeValueAtomic.load(std::memory_order_relaxed);
+                bool watchTriggered = false;
+                gb::u16 pc = 0;
+                gb::u8 watchBefore = 0;
+
+                {
+                    std::lock_guard<std::mutex> gbLock(gbMutex);
+                    if (watchEnabled) {
+                        watchBefore = gb.bus().peek(watchAddr);
+                    }
+
+                    gb.runFrame();
+                    emulatedFrameCounter.fetch_add(1, std::memory_order_relaxed);
+
+                    gb::u8 outData = 0;
+                    if (gb.bus().consumeSerialTransfer(outData)) {
+                        gb::u8 inData = 0xFF;
+                        const auto mode = static_cast<LinkCableMode>(linkCableModeAtomic.load(std::memory_order_relaxed));
+                        if (mode == LinkCableMode::Loopback) {
+                            inData = outData;
+                        } else if (mode == LinkCableMode::Noise) {
+                            inData = static_cast<gb::u8>(emuRandByte(emuRng));
+                        }
+                        gb.bus().completeSerialTransfer(inData);
+                    }
+
+                    if (freezeEnabled && likelyWritableAddress(watchAddr)) {
+                        if (gb.bus().peek(watchAddr) != freezeValue) {
+                            gb.bus().write(watchAddr, freezeValue);
+                        }
+                    }
+
+                    timeline.captureCurrent(gb);
+                    enqueueRawFrameLocked();
+                    pc = gb.cpu().regs().pc;
+
+                    auto samples = gb.apu().takeSamples();
+                    if (audioEnabled && audioGateAtomic.load(std::memory_order_relaxed) && !samples.empty()) {
+                        const std::size_t written = audioRing.push(samples.data(), samples.size());
+                        if (written < samples.size()) {
+                            ++audioDropLogs;
+                            if ((audioDropLogs % 120) == 1) {
+                                std::cerr << "[MT][AUD] ring cheio, samples descartados=" << (samples.size() - written) << "\n";
+                            }
+                        }
+                    }
+
+                    if (watchEnabled) {
+                        watchTriggered = gb.bus().peek(watchAddr) != watchBefore;
+                    }
+                }
+
+                if (watchTriggered) {
+                    pausedAtomic.store(true, std::memory_order_relaxed);
+                    fastForwardAtomic.store(false, std::memory_order_relaxed);
+                    pendingPauseAddr.store(watchAddr, std::memory_order_relaxed);
+                    pendingPauseReason.store(1, std::memory_order_relaxed);
+                    forceTitleRefresh.store(true, std::memory_order_relaxed);
+                    break;
+                }
+
+                bool breakpointHit = false;
+                {
+                    std::lock_guard<std::mutex> bpLock(breakpointsMutex);
+                    breakpointHit = std::find(breakpoints.begin(), breakpoints.end(), pc) != breakpoints.end();
+                }
+                if (breakpointHit) {
+                    pausedAtomic.store(true, std::memory_order_relaxed);
+                    fastForwardAtomic.store(false, std::memory_order_relaxed);
+                    pendingPauseAddr.store(pc, std::memory_order_relaxed);
+                    pendingPauseReason.store(2, std::memory_order_relaxed);
+                    forceTitleRefresh.store(true, std::memory_order_relaxed);
+                    break;
+                }
+
+                ++logFrames;
+            }
+
+            if (!ff) {
+                nextFrame += frameBudget;
+                std::this_thread::sleep_until(nextFrame);
+                const auto now = std::chrono::steady_clock::now();
+                if (now - nextFrame > std::chrono::milliseconds(100)) {
+                    nextFrame = now;
+                }
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (now - lastLog >= std::chrono::seconds(5)) {
+                const double seconds = std::chrono::duration<double>(now - lastLog).count();
+                const double fps = seconds > 0.0 ? static_cast<double>(logFrames) / seconds : 0.0;
+                std::cout << "[MT][EMU] fps=" << fps
+                          << " frames=" << emulatedFrameCounter.load(std::memory_order_relaxed)
+                          << " ff=" << (fastForwardAtomic.load(std::memory_order_relaxed) ? "on" : "off")
+                          << " paused=" << (pausedAtomic.load(std::memory_order_relaxed) ? "on" : "off") << "\n";
+                lastLog = now;
+                logFrames = 0;
+            }
+        }
+        std::cout << "[MT][EMU] worker finalizado, totalFrames="
+                  << emulatedFrameCounter.load(std::memory_order_relaxed) << "\n";
+    });
+
+    double debugFps = 0.0;
+    auto fpsWindowStart = std::chrono::steady_clock::now();
+    std::uint64_t fpsWindowFrames = emulatedFrameCounter.load(std::memory_order_relaxed);
+
     while (running) {
+        if (paused != pausedAtomic.load(std::memory_order_relaxed)) {
+            paused = pausedAtomic.load(std::memory_order_relaxed);
+            if (paused) {
+                fastForward = false;
+            }
+            updateWindowTitle(window, gb.cartridge().title(), paused, muted);
+        }
+        fastForward = fastForwardAtomic.load(std::memory_order_relaxed);
+        if (forceTitleRefresh.exchange(false, std::memory_order_relaxed)) {
+            updateWindowTitle(window, gb.cartridge().title(), paused, muted);
+        }
+        const int pendingPause = pendingPauseReason.exchange(0, std::memory_order_relaxed);
+        if (pendingPause != 0) {
+            const gb::u16 addr = pendingPauseAddr.load(std::memory_order_relaxed);
+            char msg[48];
+            if (pendingPause == 1) {
+                std::snprintf(msg, sizeof(msg), "WATCH HIT %04X", addr);
+            } else {
+                std::snprintf(msg, sizeof(msg), "BP HIT %04X", addr);
+            }
+            uiMessage = msg;
+            uiMessageFrames = 150;
+            paused = true;
+            fastForward = false;
+            syncThreadState();
+            updateWindowTitle(window, gb.cartridge().title(), paused, muted);
+        }
+
+        syncThreadState();
+        {
+            const auto now = std::chrono::steady_clock::now();
+            const double elapsed = std::chrono::duration<double>(now - fpsWindowStart).count();
+            if (elapsed >= 0.25) {
+                const std::uint64_t framesNow = emulatedFrameCounter.load(std::memory_order_relaxed);
+                debugFps = static_cast<double>(framesNow - fpsWindowFrames) / elapsed;
+                fpsWindowFrames = framesNow;
+                fpsWindowStart = now;
+            }
+        }
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) {
@@ -509,7 +740,10 @@ int runRealtime(
                         const auto val = parseHex8(memoryEdit.valueHex);
                         if (addr.has_value() && val.has_value()) {
                             memoryWatch.address = addr.value();
-                            resetMemoryWatch(memoryWatch, gb.bus());
+                            {
+                                std::lock_guard<std::mutex> gbLock(gbMutex);
+                                resetMemoryWatch(memoryWatch, gb.bus());
+                            }
                             if (memoryWatch.freeze) {
                                 memoryWatch.freezeValue = val.value();
                             }
@@ -642,12 +876,15 @@ int runRealtime(
                     paused = !paused;
                     if (audioEnabled) {
                         SDL_ClearQueuedAudio(audioDev);
+                        audioRing.clear();
                     }
+                    pausedAtomic.store(paused, std::memory_order_relaxed);
                     updateWindowTitle(window, gb.cartridge().title(), paused, muted);
                 } else if (ev.key.keysym.sym == SDLK_p) {
                     muted = !muted;
                     if (audioEnabled && muted) {
                         SDL_ClearQueuedAudio(audioDev);
+                        audioRing.clear();
                     }
                     updateWindowTitle(window, gb.cartridge().title(), paused, muted);
                 } else if (ev.key.keysym.sym == SDLK_i) {
@@ -700,13 +937,22 @@ int runRealtime(
                     SDL_StartTextInput();
                 } else if (showPanel && ev.key.keysym.sym == SDLK_LEFTBRACKET) {
                     memoryWatch.address = static_cast<gb::u16>(memoryWatch.address - 1);
-                    resetMemoryWatch(memoryWatch, gb.bus());
+                    {
+                        std::lock_guard<std::mutex> gbLock(gbMutex);
+                        resetMemoryWatch(memoryWatch, gb.bus());
+                    }
                 } else if (showPanel && ev.key.keysym.sym == SDLK_RIGHTBRACKET) {
                     memoryWatch.address = static_cast<gb::u16>(memoryWatch.address + 1);
-                    resetMemoryWatch(memoryWatch, gb.bus());
+                    {
+                        std::lock_guard<std::mutex> gbLock(gbMutex);
+                        resetMemoryWatch(memoryWatch, gb.bus());
+                    }
                 } else if (showPanel && ev.key.keysym.sym == SDLK_k) {
                     memoryWatch.freeze = !memoryWatch.freeze;
-                    memoryWatch.freezeValue = gb.bus().peek(memoryWatch.address);
+                    {
+                        std::lock_guard<std::mutex> gbLock(gbMutex);
+                        memoryWatch.freezeValue = gb.bus().peek(memoryWatch.address);
+                    }
                     uiMessage = memoryWatch.freeze ? "LOCK ON" : "LOCK OFF";
                     uiMessageFrames = 90;
                 } else if (showPanel && ev.key.keysym.sym == SDLK_w) {
@@ -714,15 +960,30 @@ int runRealtime(
                     uiMessage = watchpointEnabled ? "WATCHPOINT ON" : "WATCHPOINT OFF";
                     uiMessageFrames = 90;
                 } else if (showPanel && ev.key.keysym.sym == SDLK_b) {
-                    toggleBreakpoint(gb.cpu().regs().pc);
+                    gb::u16 pc = 0;
+                    {
+                        std::lock_guard<std::mutex> gbLock(gbMutex);
+                        pc = gb.cpu().regs().pc;
+                    }
+                    toggleBreakpoint(pc);
                 } else if (showPanel && ev.key.keysym.sym == SDLK_EQUALS) {
-                    const gb::u8 next = static_cast<gb::u8>(gb.bus().peek(memoryWatch.address) + 1);
+                    gb::u8 current = 0;
+                    {
+                        std::lock_guard<std::mutex> gbLock(gbMutex);
+                        current = gb.bus().peek(memoryWatch.address);
+                    }
+                    const gb::u8 next = static_cast<gb::u8>(current + 1);
                     if (memoryWatch.freeze) {
                         memoryWatch.freezeValue = next;
                     }
                     queueMemoryWrite(memoryWatch.address, next, "INC");
                 } else if (showPanel && ev.key.keysym.sym == SDLK_MINUS) {
-                    const gb::u8 next = static_cast<gb::u8>(gb.bus().peek(memoryWatch.address) - 1);
+                    gb::u8 current = 0;
+                    {
+                        std::lock_guard<std::mutex> gbLock(gbMutex);
+                        current = gb.bus().peek(memoryWatch.address);
+                    }
+                    const gb::u8 next = static_cast<gb::u8>(current - 1);
                     if (memoryWatch.freeze) {
                         memoryWatch.freezeValue = next;
                     }
@@ -733,21 +994,31 @@ int runRealtime(
                     }
                     queueMemoryWrite(memoryWatch.address, 0x00, "ZERO");
                 } else if (paused && ev.key.keysym.sym == SDLK_LEFT) {
-                    timeline.stepBack(gb);
+                    {
+                        std::lock_guard<std::mutex> gbLock(gbMutex);
+                        timeline.stepBack(gb);
+                        enqueueRawFrameLocked();
+                        resetMemoryWatch(memoryWatch, gb.bus());
+                    }
                     if (audioEnabled) {
-                        gb.apu().takeSamples();
                         SDL_ClearQueuedAudio(audioDev);
+                        audioRing.clear();
                     }
                     uiMessage = frameTimelineLabel(timeline);
                     uiMessageFrames = 120;
                 } else if (paused && ev.key.keysym.sym == SDLK_RIGHT) {
-                    if (!timeline.stepForward(gb)) {
-                        gb.runFrame();
-                        timeline.captureCurrent(gb);
+                    {
+                        std::lock_guard<std::mutex> gbLock(gbMutex);
+                        if (!timeline.stepForward(gb)) {
+                            gb.runFrame();
+                            timeline.captureCurrent(gb);
+                        }
+                        enqueueRawFrameLocked();
+                        resetMemoryWatch(memoryWatch, gb.bus());
                     }
                     if (audioEnabled) {
-                        gb.apu().takeSamples();
                         SDL_ClearQueuedAudio(audioDev);
+                        audioRing.clear();
                     }
                     uiMessage = frameTimelineLabel(timeline);
                     uiMessageFrames = 120;
@@ -789,11 +1060,17 @@ int runRealtime(
                     running = false;
                 } else if (ev.key.keysym.sym == SDLK_TAB) {
                     fastForward = true;
+                    fastForwardAtomic.store(true, std::memory_order_relaxed);
                     uiMessage = "FAST FORWARD";
                     uiMessageFrames = 60;
                 } else if (ev.key.keysym.sym == SDLK_F3
                            || (ev.key.keysym.sym == SDLK_s && (ev.key.keysym.mod & KMOD_CTRL))) {
-                    if (gb.saveStateToFile(statePath)) {
+                    bool saved = false;
+                    {
+                        std::lock_guard<std::mutex> gbLock(gbMutex);
+                        saved = gb.saveStateToFile(statePath);
+                    }
+                    if (saved) {
                         uiMessage = "STATE SAVED";
                         std::cout << "state salvo: " << statePath << "\n";
                     } else {
@@ -803,29 +1080,36 @@ int runRealtime(
                     uiMessageFrames = 180;
                 } else if (ev.key.keysym.sym == SDLK_F5
                            || (ev.key.keysym.sym == SDLK_l && (ev.key.keysym.mod & KMOD_CTRL))) {
-                    if (gb.loadStateFromFile(statePath)) {
-                        timeline.reset(gb);
-                        resetMemoryWatch(memoryWatch, gb.bus());
-                        if (audioEnabled) {
-                            gb.apu().takeSamples();
-                            SDL_ClearQueuedAudio(audioDev);
+                    bool loaded = false;
+                    bool loadedLegacy = false;
+                    {
+                        std::lock_guard<std::mutex> gbLock(gbMutex);
+                        loaded = gb.loadStateFromFile(statePath);
+                        if (!loaded) {
+                            loadedLegacy = gb.loadStateFromFile(legacyStatePath);
                         }
-                        uiMessage = "STATE LOADED";
-                        std::cout << "state carregado: " << statePath << "\n";
-                    } else if (gb.loadStateFromFile(legacyStatePath)) {
-                        timeline.reset(gb);
-                        resetMemoryWatch(memoryWatch, gb.bus());
-                        if (audioEnabled) {
-                            gb.apu().takeSamples();
-                            SDL_ClearQueuedAudio(audioDev);
+                        if (loaded || loadedLegacy) {
+                            timeline.reset(gb);
+                            resetMemoryWatch(memoryWatch, gb.bus());
+                            enqueueRawFrameLocked();
                         }
+                    }
+                    if (audioEnabled) {
+                        SDL_ClearQueuedAudio(audioDev);
+                        audioRing.clear();
+                    }
+                    if (loaded || loadedLegacy) {
                         uiMessage = "STATE LOADED";
+                        if (loaded) {
+                            std::cout << "state carregado: " << statePath << "\n";
+                        }
                     } else {
                         uiMessage = "NO STATE";
                         std::cerr << "state nao encontrado: " << statePath << "\n";
                     }
                     uiMessageFrames = 180;
                 } else {
+                    std::lock_guard<std::mutex> gbLock(gbMutex);
                     setButtonFromKey(gb, ev.key.keysym.sym, true);
                 }
             }
@@ -835,6 +1119,7 @@ int runRealtime(
                 }
                 if (ev.key.keysym.sym == SDLK_TAB) {
                     fastForward = false;
+                    fastForwardAtomic.store(false, std::memory_order_relaxed);
                     uiMessage = "NORMAL SPEED";
                     uiMessageFrames = 45;
                     continue;
@@ -842,6 +1127,7 @@ int runRealtime(
                 if (paused && (ev.key.keysym.sym == SDLK_LEFT || ev.key.keysym.sym == SDLK_RIGHT)) {
                     continue;
                 }
+                std::lock_guard<std::mutex> gbLock(gbMutex);
                 setButtonFromKey(gb, ev.key.keysym.sym, false);
             }
             if (ev.type == SDL_TEXTINPUT) {
@@ -909,9 +1195,13 @@ int runRealtime(
                             continue;
                         }
                     }
-                    const int spriteY = spriteListYFromLayout(showBreakpointMenu);
+                    const int spriteY = spriteListYFromLayout(outputH, showBreakpointMenu);
                     if (my >= spriteY) {
-                        const auto sprites = snapshotSprites(gb.bus());
+                        std::vector<SpriteDebugRow> sprites;
+                        {
+                            std::lock_guard<std::mutex> gbLock(gbMutex);
+                            sprites = snapshotSprites(gb.bus());
+                        }
                         const int maxRows = spriteVisibleLinesForPanel(outputH, showBreakpointMenu);
                         const int maxScrollRows = std::max(0, static_cast<int>(sprites.size()) - maxRows);
                         spriteScrollRows = std::clamp(spriteScrollRows - ev.wheel.y, 0, maxScrollRows);
@@ -967,7 +1257,10 @@ int runRealtime(
                                 const int idx = memorySearch.ui.scroll + (my - listY) / kSearchListLineHeight;
                                 if (idx >= 0 && idx < static_cast<int>(memorySearch.ui.matches.size())) {
                                     memoryWatch.address = memorySearch.ui.matches[static_cast<std::size_t>(idx)];
-                                    resetMemoryWatch(memoryWatch, gb.bus());
+                                    {
+                                        std::lock_guard<std::mutex> gbLock(gbMutex);
+                                        resetMemoryWatch(memoryWatch, gb.bus());
+                                    }
                                     uiMessage = "WATCH FROM SEARCH";
                                     uiMessageFrames = 90;
                                 }
@@ -988,7 +1281,12 @@ int runRealtime(
                                 uiMessage = watchpointEnabled ? "WATCHPOINT ON" : "WATCHPOINT OFF";
                                 uiMessageFrames = 90;
                             } else if (my >= kBreakpointRowYPc && my < kBreakpointRowYPc + kBreakpointRowHeight) {
-                                toggleBreakpoint(gb.cpu().regs().pc);
+                                gb::u16 pc = 0;
+                                {
+                                    std::lock_guard<std::mutex> gbLock(gbMutex);
+                                    pc = gb.cpu().regs().pc;
+                                }
+                                toggleBreakpoint(pc);
                             } else if (my >= kBreakpointRowYAddr && my < kBreakpointRowYAddr + kBreakpointRowHeight) {
                                 memoryEdit.active = false;
                                 breakpointEdit.active = true;
@@ -997,31 +1295,46 @@ int runRealtime(
                             } else if (my >= kBreakpointListStartY
                                        && my < kBreakpointListStartY + kBreakpointListMaxVisible * kBreakpointListLineHeight) {
                                 const int row = (my - kBreakpointListStartY) / kBreakpointListLineHeight;
-                                if (row >= 0 && row < static_cast<int>(breakpoints.size())) {
-                                    const gb::u16 addr = breakpoints[static_cast<std::size_t>(row)];
-                                    breakpoints.erase(breakpoints.begin() + row);
-                                    char msg[40];
-                                    std::snprintf(msg, sizeof(msg), "BP DEL %04X", addr);
-                                    uiMessage = msg;
-                                    uiMessageFrames = 120;
+                                {
+                                    std::lock_guard<std::mutex> bpLock(breakpointsMutex);
+                                    if (row >= 0 && row < static_cast<int>(breakpoints.size())) {
+                                        const gb::u16 addr = breakpoints[static_cast<std::size_t>(row)];
+                                        breakpoints.erase(breakpoints.begin() + row);
+                                        char msg[40];
+                                        std::snprintf(msg, sizeof(msg), "BP DEL %04X", addr);
+                                        uiMessage = msg;
+                                        uiMessageFrames = 120;
+                                    }
                                 }
                             }
                         }
                     }
 
-                    const int readStartY = readStartYFromLayout(showBreakpointMenu);
-                    const int readCount = static_cast<int>(std::min<std::size_t>(gb.bus().snapshotRecentReads(128).size(), static_cast<std::size_t>(kReadLines)));
+                    const int readStartY = readStartYFromLayout(outputH, showBreakpointMenu);
+                    std::vector<gb::Bus::MemoryReadEvent> readsNow;
+                    {
+                        std::lock_guard<std::mutex> gbLock(gbMutex);
+                        readsNow = gb.bus().snapshotRecentReads(128);
+                    }
+                    const int readMaxLines = readVisibleLinesForPanel(outputH, showBreakpointMenu);
+                    const int readCount = static_cast<int>(std::min<std::size_t>(readsNow.size(), static_cast<std::size_t>(readMaxLines)));
                     if (my >= readStartY && my < readStartY + readCount * kReadLineHeight) {
                         const int readIdx = (my - readStartY) / kReadLineHeight;
-                        const auto readsNow = gb.bus().snapshotRecentReads(128);
                         if (readIdx >= 0 && readIdx < static_cast<int>(readsNow.size())) {
                             memoryWatch.address = readsNow[static_cast<std::size_t>(readIdx)].address;
-                            resetMemoryWatch(memoryWatch, gb.bus());
+                            {
+                                std::lock_guard<std::mutex> gbLock(gbMutex);
+                                resetMemoryWatch(memoryWatch, gb.bus());
+                            }
                         }
                     }
 
-                    const auto sprites = snapshotSprites(gb.bus());
-                    const int spriteY = spriteListYFromLayout(showBreakpointMenu);
+                    std::vector<SpriteDebugRow> sprites;
+                    {
+                        std::lock_guard<std::mutex> gbLock(gbMutex);
+                        sprites = snapshotSprites(gb.bus());
+                    }
+                    const int spriteY = spriteListYFromLayout(outputH, showBreakpointMenu);
                     const int spriteMaxLines = spriteVisibleLinesForPanel(outputH, showBreakpointMenu);
                     const int maxScrollRows = std::max(0, static_cast<int>(sprites.size()) - spriteMaxLines);
                     spriteScrollRows = std::clamp(spriteScrollRows, 0, maxScrollRows);
@@ -1037,89 +1350,32 @@ int runRealtime(
             }
         }
 
-        if (!paused) {
-            const int framesToRun = fastForward ? 6 : 1;
-            for (int i = 0; i < framesToRun; ++i) {
-                if (queuedWrite.active) {
-                    applyWriteNow(queuedWrite.address, queuedWrite.value, queuedWrite.source, true);
-                    queuedWrite.active = false;
-                }
-                const gb::u8 watchBefore = watchpointEnabled ? gb.bus().peek(memoryWatch.address) : 0;
-                gb.runFrame();
-                ++emulatedFrameCounter;
-                processSerialTransfer();
-                applyFrameLockIfNeeded();
-                timeline.captureCurrent(gb);
-                if (watchpointEnabled) {
-                    const gb::u8 watchAfter = gb.bus().peek(memoryWatch.address);
-                    if (watchAfter != watchBefore) {
-                        paused = true;
-                        fastForward = false;
-                        char msg[48];
-                        std::snprintf(msg, sizeof(msg), "WATCH HIT %04X", memoryWatch.address);
-                        uiMessage = msg;
-                        uiMessageFrames = 150;
-                        updateWindowTitle(window, gb.cartridge().title(), paused, muted);
-                        break;
-                    }
-                }
-                const gb::u16 pc = gb.cpu().regs().pc;
-                if (std::find(breakpoints.begin(), breakpoints.end(), pc) != breakpoints.end()) {
-                    paused = true;
-                    fastForward = false;
-                    char msg[48];
-                    std::snprintf(msg, sizeof(msg), "BP HIT %04X", pc);
-                    uiMessage = msg;
-                    uiMessageFrames = 150;
-                    updateWindowTitle(window, gb.cartridge().title(), paused, muted);
-                    break;
-                }
-            }
-        } else {
+        syncThreadState();
+
+        QueuedMemoryWrite writeToApply{};
+        {
+            std::lock_guard<std::mutex> writeLock(queuedWriteMutex);
             if (queuedWrite.active) {
-                applyWriteNow(queuedWrite.address, queuedWrite.value, queuedWrite.source, true);
+                writeToApply = queuedWrite;
                 queuedWrite.active = false;
             }
+        }
+        if (writeToApply.active) {
+            applyWriteNow(writeToApply.address, writeToApply.value, writeToApply.source, true);
+        }
+        if (paused) {
             applyFrameLockIfNeeded();
         }
-        sampleMemoryWatch(memoryWatch, gb.bus());
-        if (audioEnabled && !muted && !paused && !fastForward) {
-            auto samples = gb.apu().takeSamples();
-            if (!samples.empty()) {
-                if (SDL_GetQueuedAudioSize(audioDev) > static_cast<Uint32>(have.freq * have.channels * sizeof(int16_t))) {
-                    SDL_ClearQueuedAudio(audioDev);
-                }
-                SDL_QueueAudio(audioDev, samples.data(), static_cast<Uint32>(samples.size() * sizeof(int16_t)));
-            }
-        } else if (audioEnabled) {
-            gb.apu().takeSamples();
-            SDL_ClearQueuedAudio(audioDev);
+
+        {
+            std::lock_guard<std::mutex> gbLock(gbMutex);
+            sampleMemoryWatch(memoryWatch, gb.bus());
         }
 
-        const bool useCgbPalette = cgbPaletteAvailable && paletteMode == DisplayPaletteMode::GameBoyColor;
-        if (useCgbPalette) {
-            const auto& frame = gb.ppu().colorFramebuffer();
-            for (std::size_t i = 0; i < frame.size(); ++i) {
-                const gb::u16 c = frame[i];
-                const gb::u8 r5 = static_cast<gb::u8>((c >> 0) & 0x1F);
-                const gb::u8 g5 = static_cast<gb::u8>((c >> 5) & 0x1F);
-                const gb::u8 b5 = static_cast<gb::u8>((c >> 10) & 0x1F);
-                pixels[i * 3 + 0] = static_cast<unsigned char>((r5 * 255) / 31);
-                pixels[i * 3 + 1] = static_cast<unsigned char>((g5 * 255) / 31);
-                pixels[i * 3 + 2] = static_cast<unsigned char>((b5 * 255) / 31);
-            }
-        } else {
-            const auto& frame = gb.ppu().framebuffer();
-            const auto& palette = monoPalette(paletteMode);
-            for (std::size_t i = 0; i < frame.size(); ++i) {
-                const auto shade = static_cast<std::size_t>(frame[i] & 0x03);
-                pixels[i * 3 + 0] = palette[shade][0];
-                pixels[i * 3 + 1] = palette[shade][1];
-                pixels[i * 3 + 2] = palette[shade][2];
-            }
+        RgbFramePacket latestFrame{};
+        if (rgbFrameQueue.tryPopLatest(latestFrame)) {
+            pixels = latestFrame.pixels;
         }
-
-        applyVideoFilterRgb24(filterMode, pixels);
         if (requestCapture) {
             const std::string capturePath = nextCapturePath(captureDir);
             if (saveRgb24Ppm(capturePath, pixels)) {
@@ -1181,47 +1437,56 @@ int runRealtime(
             1
         );
         if (showPanel) {
-            const auto reads = gb.bus().snapshotRecentReads(128);
-            const auto sprites = snapshotSprites(gb.bus());
-            const int spriteMaxLines = spriteVisibleLinesForPanel(outputH, showBreakpointMenu);
-            const int maxScrollRows = std::max(0, static_cast<int>(sprites.size()) - spriteMaxLines);
-            spriteScrollRows = std::clamp(spriteScrollRows, 0, maxScrollRows);
-            const auto selectedSprite = findSelectedSprite(sprites, selectedSpriteAddr);
-            const int overlayScale = std::max(1, blit.gameDst.w / width);
-            drawSelectedSpriteOverlay(renderer, gb.bus(), selectedSprite, overlayScale, blit.gameDst.x, blit.gameDst.y);
-            const auto& regs = gb.cpu().regs();
-            const gb::u16 execPc = gb.cpu().lastExecutedPc();
-            const gb::u8 execOp = gb.cpu().lastExecutedOpcode();
-            const gb::u16 nextPc = regs.pc;
-            const gb::u8 nextOp = gb.bus().peek(nextPc);
-            const auto disasmLines = buildDisasmWindow(gb.bus(), nextPc, 3);
-            drawMemoryPanel(
-                renderer,
-                outputW - panelWidth,
-                panelWidth,
-                outputH,
-                reads,
-                sprites,
-                spriteScrollRows,
-                memoryWatch,
-                memoryWriteUi,
-                memorySearch.ui,
-                disasmLines,
-                showBreakpointMenu,
-                watchpointEnabled,
-                breakpoints,
-                breakpointEdit.addressHex,
-                breakpointEdit.active,
-                selectedSpriteAddr,
-                gb.bus(),
-                execPc,
-                execOp,
-                nextPc,
-                nextOp,
-                paused,
-                muted
-            );
-            drawMemoryEditOverlay(renderer, outputW - panelWidth, panelWidth, memoryEdit);
+            std::vector<gb::u16> breakpointsSnapshot;
+            {
+                std::lock_guard<std::mutex> bpLock(breakpointsMutex);
+                breakpointsSnapshot = breakpoints;
+            }
+            {
+                std::lock_guard<std::mutex> gbLock(gbMutex);
+                const auto reads = gb.bus().snapshotRecentReads(128);
+                const auto sprites = snapshotSprites(gb.bus());
+                const int spriteMaxLines = spriteVisibleLinesForPanel(outputH, showBreakpointMenu);
+                const int maxScrollRows = std::max(0, static_cast<int>(sprites.size()) - spriteMaxLines);
+                spriteScrollRows = std::clamp(spriteScrollRows, 0, maxScrollRows);
+                const auto selectedSprite = findSelectedSprite(sprites, selectedSpriteAddr);
+                const int overlayScale = std::max(1, blit.gameDst.w / width);
+                drawSelectedSpriteOverlay(renderer, gb.bus(), selectedSprite, overlayScale, blit.gameDst.x, blit.gameDst.y);
+                const auto& regs = gb.cpu().regs();
+                const gb::u16 execPc = gb.cpu().lastExecutedPc();
+                const gb::u8 execOp = gb.cpu().lastExecutedOpcode();
+                const gb::u16 nextPc = regs.pc;
+                const gb::u8 nextOp = gb.bus().peek(nextPc);
+                const auto disasmLines = buildDisasmWindow(gb.bus(), nextPc, 3);
+                drawMemoryPanel(
+                    renderer,
+                    outputW - panelWidth,
+                    panelWidth,
+                    outputH,
+                    reads,
+                    sprites,
+                    spriteScrollRows,
+                    memoryWatch,
+                    memoryWriteUi,
+                    memorySearch.ui,
+                    disasmLines,
+                    showBreakpointMenu,
+                    watchpointEnabled,
+                    breakpointsSnapshot,
+                    breakpointEdit.addressHex,
+                    breakpointEdit.active,
+                    selectedSpriteAddr,
+                    gb.bus(),
+                    execPc,
+                    execOp,
+                    nextPc,
+                    nextOp,
+                    debugFps,
+                    paused,
+                    muted
+                );
+                drawMemoryEditOverlay(renderer, outputW - panelWidth, panelWidth, memoryEdit);
+            }
         }
         if (showScaleMenu && fullscreen) {
             drawFullscreenScaleMenu(renderer, outputW, outputH, scaleMenuIndex);
@@ -1232,6 +1497,23 @@ int runRealtime(
         SDL_RenderPresent(renderer);
 
     }
+
+    mtRunning.store(false, std::memory_order_relaxed);
+    pausedAtomic.store(true, std::memory_order_relaxed);
+    audioGateAtomic.store(false, std::memory_order_relaxed);
+    rawFrameQueue.close();
+    rgbFrameQueue.close();
+    audioRing.close();
+    if (emuThread.joinable()) {
+        emuThread.join();
+    }
+    if (renderThread.joinable()) {
+        renderThread.join();
+    }
+    if (audioThread.joinable()) {
+        audioThread.join();
+    }
+    std::cout << "[MT] workers encerrados\n";
 
     SDL_DestroyTexture(texture);
     if (sharpTexture) {

@@ -102,8 +102,9 @@ std::optional<gb::u16> parseHex16(const std::string& hex);
 std::optional<gb::u8> parseHex8(const std::string& hex);
 bool likelyWritableAddress(gb::u16 addr);
 
-int readStartYFromLayout(bool showBreakpointMenu);
-int spriteListYFromLayout(bool showBreakpointMenu);
+int readStartYFromLayout(int panelHeight, bool showBreakpointMenu);
+int readVisibleLinesForPanel(int panelHeight, bool showBreakpointMenu);
+int spriteListYFromLayout(int panelHeight, bool showBreakpointMenu);
 int spriteVisibleLinesForPanel(int panelHeight, bool showBreakpointMenu);
 int searchVisibleLinesForPanel(int panelHeight);
 std::vector<SpriteDebugRow> snapshotSprites(const gb::Bus& bus);
@@ -144,6 +145,7 @@ void drawMemoryPanel(
     gb::u8 execOp,
     gb::u16 nextPc,
     gb::u8 nextOp,
+    double fps,
     bool paused,
     bool muted
 );

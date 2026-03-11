@@ -78,21 +78,47 @@ std::array<gb::u8, 7> hexGlyph(char c) {
     }
 }
 
-int readStartYFromLayout(bool showBreakpointMenu) {
-    return showBreakpointMenu ? kReadStartYWithBreakpointMenu : kReadStartYWithoutBreakpointMenu;
+int selectedSectionHeightForPanel(int panelHeight) {
+    if (panelHeight < 320) {
+        return 52;
+    }
+    if (panelHeight < 440) {
+        return 68;
+    }
+    if (panelHeight < 560) {
+        return 82;
+    }
+    return kSelectedSectionHeight;
 }
 
-int selectedSectionY(int readStartY) {
+int readStartYFromLayout(int panelHeight, bool showBreakpointMenu) {
+    const int headerBottom = 122;
+    const int menuSpace = showBreakpointMenu ? 86 : 0;
+    const int preferred = showBreakpointMenu ? kReadStartYWithBreakpointMenu : kReadStartYWithoutBreakpointMenu;
+    const int minStart = headerBottom + menuSpace + 6;
+    const int maxStart = std::max(minStart, panelHeight - 220);
+    return std::min(std::max(preferred, minStart), maxStart);
+}
+
+int selectedSectionY(int panelHeight, int readStartY) {
+    (void)panelHeight;
     return readStartY + kReadLines * kReadLineHeight + kSelectedSectionTopGap;
 }
 
-int spriteHeaderYFromLayout(int readStartY) {
-    return selectedSectionY(readStartY) + kSelectedSectionHeight + kSectionGap;
+int spriteHeaderYFromLayout(int panelHeight, int readStartY) {
+    return selectedSectionY(panelHeight, readStartY) + selectedSectionHeightForPanel(panelHeight) + kSectionGap;
 }
 
-int spriteListYFromLayout(bool showBreakpointMenu) {
-    const int readStartY = readStartYFromLayout(showBreakpointMenu);
-    return spriteHeaderYFromLayout(readStartY) + kSpriteSectionTopPad;
+int readVisibleLinesForPanel(int panelHeight, bool showBreakpointMenu) {
+    const int readStartY = readStartYFromLayout(panelHeight, showBreakpointMenu);
+    const int detailY = selectedSectionY(panelHeight, readStartY);
+    const int available = std::max(0, detailY - readStartY - 2);
+    return std::max(1, std::min(kReadLines, available / kReadLineHeight));
+}
+
+int spriteListYFromLayout(int panelHeight, bool showBreakpointMenu) {
+    const int readStartY = readStartYFromLayout(panelHeight, showBreakpointMenu);
+    return spriteHeaderYFromLayout(panelHeight, readStartY) + kSpriteSectionTopPad;
 }
 
 void resetMemoryWatch(MemoryWatch& watch, const gb::Bus& bus) {
@@ -181,7 +207,7 @@ std::vector<SpriteDebugRow> snapshotSprites(const gb::Bus& bus) {
 }
 
 int spriteVisibleLinesForPanel(int panelHeight, bool showBreakpointMenu) {
-    return std::max(1, (panelHeight - spriteListYFromLayout(showBreakpointMenu) - 8) / kSpriteLineHeight);
+    return std::max(1, (panelHeight - spriteListYFromLayout(panelHeight, showBreakpointMenu) - 8) / kSpriteLineHeight);
 }
 
 int searchVisibleLinesForPanel(int panelHeight) {
@@ -338,6 +364,25 @@ void drawHexText(SDL_Renderer* renderer, int x, int y, const std::string& text, 
     }
 }
 
+std::string clippedText(const std::string& text, int maxPixels, int scale) {
+    if (scale <= 0 || maxPixels <= 0) {
+        return {};
+    }
+    const int charPx = 6 * scale;
+    const int maxChars = std::max(0, maxPixels / charPx);
+    if (maxChars <= 0 || static_cast<int>(text.size()) <= maxChars) {
+        return text;
+    }
+    if (maxChars <= 2) {
+        return text.substr(0, static_cast<std::size_t>(maxChars));
+    }
+    return text.substr(0, static_cast<std::size_t>(maxChars - 1)) + "~";
+}
+
+void drawHexTextFit(SDL_Renderer* renderer, int x, int y, int maxPixels, const std::string& text, SDL_Color color, int scale) {
+    drawHexText(renderer, x, y, clippedText(text, maxPixels, scale), color, scale);
+}
+
 SDL_Color memoryRegionColor(gb::u16 address) {
     if (address <= 0x3FFF) return SDL_Color{96, 155, 255, 255};
     if (address <= 0x7FFF) return SDL_Color{60, 120, 220, 255};
@@ -374,6 +419,7 @@ void drawMemoryPanel(
     gb::u8 execOp,
     gb::u16 nextPc,
     gb::u8 nextOp,
+    double fps,
     bool paused,
     bool muted
 ) {
@@ -386,38 +432,56 @@ void drawMemoryPanel(
 
     const SDL_Color active = {220, 225, 235, 255};
     const SDL_Color dim = {120, 125, 140, 255};
-    const int readStartY = readStartYFromLayout(showBreakpointMenu);
+    const int readStartY = readStartYFromLayout(panelHeight, showBreakpointMenu);
+    const int leftX = panelX + 12;
+    const int splitX = panelX + std::clamp(panelWidth / 2 + 4, 122, panelWidth - 96);
+    const int leftW = std::max(36, splitX - leftX - 6);
+    constexpr int kBigTextH = 14;   // 7px glyph * scale 2
+    constexpr int kSmallTextH = 7;  // 7px glyph * scale 1
 
-    drawHexText(renderer, panelX + 12, 12, paused ? "PAUSED" : "RUNNING", active, 2);
-    drawHexText(renderer, panelX + 12, 34, muted ? "MUTED" : "AUDIO-ON", paused ? dim : active, 2);
+    int headerY = 12;
+    drawHexTextFit(renderer, leftX, headerY, leftW, paused ? "PAUSED" : "RUNNING", active, 2);
+    headerY += kBigTextH + 4;
+    drawHexTextFit(renderer, leftX, headerY, leftW, muted ? "MUTED" : "AUDIO-ON", paused ? dim : active, 2);
+    headerY += kBigTextH + 4;
+    char fpsLine[24];
+    std::snprintf(fpsLine, sizeof(fpsLine), "FPS:%05.1f", fps);
+    drawHexTextFit(renderer, leftX, headerY, leftW, fpsLine, fps >= 55.0 ? SDL_Color{140, 220, 170, 255} : SDL_Color{255, 210, 140, 255}, 1);
+    headerY += kSmallTextH + 3;
     char execLine[24];
     std::snprintf(execLine, sizeof(execLine), "PC:%04X OP:%02X", execPc, execOp);
-    drawHexText(renderer, panelX + 12, 50, execLine, active, 1);
+    drawHexTextFit(renderer, leftX, headerY, leftW, execLine, active, 1);
+    headerY += kSmallTextH + 3;
     char nextLine[24];
     std::snprintf(nextLine, sizeof(nextLine), "NP:%04X OP:%02X", nextPc, nextOp);
-    drawHexText(renderer, panelX + 12, 62, nextLine, dim, 1);
-    drawHexText(renderer, panelX + 12, 72, "DISASM", dim, 1);
+    drawHexTextFit(renderer, leftX, headerY, leftW, nextLine, dim, 1);
+    headerY += kSmallTextH + 3;
+    drawHexTextFit(renderer, leftX, headerY, leftW, "DISASM", dim, 1);
+    headerY += kSmallTextH + 2;
     const int disasmCount = std::min<int>(3, static_cast<int>(disasmLines.size()));
     for (int i = 0; i < disasmCount; ++i) {
-        drawHexText(renderer, panelX + 12, 82 + i * 10, disasmLines[static_cast<std::size_t>(i)], active, 1);
+        drawHexTextFit(renderer, leftX, headerY + i * 10, leftW, disasmLines[static_cast<std::size_t>(i)], active, 1);
     }
 
     const gb::u8 watchValue = bus.peek(watch.address);
+    const int watchX = splitX;
+    const int watchW = std::max(58, (panelX + panelWidth - 8) - watchX);
+    const int watchTextW = std::max(16, watchW - 8);
     SDL_SetRenderDrawColor(renderer, 28, 34, 48, 255);
-    SDL_Rect watchBg{panelX + 132, 8, panelWidth - 140, 64};
+    SDL_Rect watchBg{watchX, 8, watchW, 64};
     SDL_RenderFillRect(renderer, &watchBg);
     SDL_SetRenderDrawColor(renderer, 72, 88, 118, 255);
     SDL_RenderDrawRect(renderer, &watchBg);
-    drawHexText(renderer, panelX + 136, 12, "WATCH", active, 1);
+    drawHexTextFit(renderer, watchX + 4, 12, watchTextW, "WATCH", active, 1);
     char watchLine[32];
     std::snprintf(watchLine, sizeof(watchLine), "%04X %02X %03d", watch.address, watchValue, watchValue);
-    drawHexText(renderer, panelX + 136, 24, watchLine, active, 1);
-    drawHexText(renderer, panelX + 136, 32, watch.freeze ? "LOCK ON" : "LOCK OFF", watch.freeze ? SDL_Color{255, 230, 120, 255} : dim, 1);
+    drawHexTextFit(renderer, watchX + 4, 24, watchTextW, watchLine, active, 1);
+    drawHexTextFit(renderer, watchX + 4, 32, watchTextW, watch.freeze ? "LOCK ON" : "LOCK OFF", watch.freeze ? SDL_Color{255, 230, 120, 255} : dim, 1);
 
     if (writeUi.pending) {
         char pendingLine[40];
         std::snprintf(pendingLine, sizeof(pendingLine), "PEND %04X=%02X", writeUi.pendingAddress, writeUi.pendingValue);
-        drawHexText(renderer, panelX + 136, 40, pendingLine, SDL_Color{255, 214, 120, 255}, 1);
+        drawHexTextFit(renderer, watchX + 4, 40, watchTextW, pendingLine, SDL_Color{255, 214, 120, 255}, 1);
     } else if (writeUi.hasLast) {
         if (writeUi.lastOk) {
             char okLine[52];
@@ -429,17 +493,17 @@ void drawMemoryPanel(
                 writeUi.lastValue,
                 static_cast<unsigned long long>(writeUi.lastFrame)
             );
-            drawHexText(renderer, panelX + 136, 40, okLine, SDL_Color{140, 220, 170, 255}, 1);
+            drawHexTextFit(renderer, watchX + 4, 40, watchTextW, okLine, SDL_Color{140, 220, 170, 255}, 1);
         } else {
-            drawHexText(renderer, panelX + 136, 40, writeUi.lastTag.empty() ? "LAST ERR" : writeUi.lastTag, SDL_Color{255, 150, 150, 255}, 1);
+            drawHexTextFit(renderer, watchX + 4, 40, watchTextW, writeUi.lastTag.empty() ? "LAST ERR" : writeUi.lastTag, SDL_Color{255, 150, 150, 255}, 1);
         }
     } else {
-        drawHexText(renderer, panelX + 136, 40, "LAST NONE", dim, 1);
+        drawHexTextFit(renderer, watchX + 4, 40, watchTextW, "LAST NONE", dim, 1);
     }
 
-    const int graphX = panelX + 136;
+    const int graphX = watchX + 4;
     const int graphY = 50;
-    const int graphW = panelWidth - 148;
+    const int graphW = std::max(12, watchW - 8);
     const int graphH = 16;
     SDL_SetRenderDrawColor(renderer, 22, 28, 40, 255);
     SDL_Rect graphBg{graphX, graphY, graphW, graphH};
@@ -463,7 +527,7 @@ void drawMemoryPanel(
         SDL_RenderFillRect(renderer, &bpMenuBg);
         SDL_SetRenderDrawColor(renderer, 60, 72, 98, 255);
         SDL_RenderDrawRect(renderer, &bpMenuBg);
-        drawHexText(renderer, panelX + 12, kBreakpointMenuTopY + 2, "BP/WP MENU", active, 1);
+        drawHexTextFit(renderer, panelX + 12, kBreakpointMenuTopY + 2, panelWidth - 24, "BP/WP MENU", active, 1);
 
         char wpLine[40];
         std::snprintf(wpLine, sizeof(wpLine), "WP %04X %s", watch.address, watchpointEnabled ? "ON" : "OFF");
@@ -471,14 +535,14 @@ void drawMemoryPanel(
             renderer,
             panelX + 12,
             kBreakpointRowYWatch,
-            wpLine,
+            clippedText(wpLine, panelWidth - 24, 1),
             watchpointEnabled ? SDL_Color{255, 230, 120, 255} : dim,
             1
         );
 
         char bpPcLine[40];
         std::snprintf(bpPcLine, sizeof(bpPcLine), "BP PC %04X CLICK", nextPc);
-        drawHexText(renderer, panelX + 12, kBreakpointRowYPc, bpPcLine, active, 1);
+        drawHexTextFit(renderer, panelX + 12, kBreakpointRowYPc, panelWidth - 24, bpPcLine, active, 1);
 
         const std::string bpAddr = breakpointAddressHex.empty() ? "____" : breakpointAddressHex;
         std::string bpAddrLine = std::string("BP ADDR ") + bpAddr;
@@ -489,7 +553,7 @@ void drawMemoryPanel(
             renderer,
             panelX + 12,
             kBreakpointRowYAddr,
-            bpAddrLine,
+            clippedText(bpAddrLine, panelWidth - 24, 1),
             breakpointAddressEditing ? SDL_Color{255, 230, 120, 255} : active,
             1
         );
@@ -498,12 +562,12 @@ void drawMemoryPanel(
         for (int i = 0; i < visibleBp; ++i) {
             char bpLine[24];
             std::snprintf(bpLine, sizeof(bpLine), "BP%02d %04X", i + 1, breakpoints[static_cast<std::size_t>(i)]);
-            drawHexText(renderer, panelX + 12, kBreakpointListStartY + i * kBreakpointListLineHeight, bpLine, active, 1);
+            drawHexTextFit(renderer, panelX + 12, kBreakpointListStartY + i * kBreakpointListLineHeight, panelWidth - 24, bpLine, active, 1);
         }
         if (static_cast<int>(breakpoints.size()) > kBreakpointListMaxVisible) {
             char extraLine[24];
             std::snprintf(extraLine, sizeof(extraLine), "+%d MORE", static_cast<int>(breakpoints.size()) - kBreakpointListMaxVisible);
-            drawHexText(renderer, panelX + 12, kBreakpointListStartY + visibleBp * kBreakpointListLineHeight, extraLine, dim, 1);
+            drawHexTextFit(renderer, panelX + 12, kBreakpointListStartY + visibleBp * kBreakpointListLineHeight, panelWidth - 24, extraLine, dim, 1);
         }
     }
 
@@ -512,7 +576,7 @@ void drawMemoryPanel(
 
     int y = readStartY;
     const int lineHeight = kReadLineHeight;
-    const int readLines = kReadLines;
+    const int readLines = readVisibleLinesForPanel(panelHeight, showBreakpointMenu);
     const int count = static_cast<int>(std::min<std::size_t>(reads.size(), static_cast<std::size_t>(readLines)));
 
     for (int i = 0; i < count; ++i) {
@@ -533,15 +597,16 @@ void drawMemoryPanel(
     }
 
     const auto selectedSprite = findSelectedSprite(sprites, selectedSpriteAddr);
-    const int detailY = selectedSectionY(readStartY);
+    const int detailY = selectedSectionY(panelHeight, readStartY);
+    const int detailHeight = selectedSectionHeightForPanel(panelHeight);
     SDL_SetRenderDrawColor(renderer, 54, 60, 80, 255);
     SDL_RenderDrawLine(renderer, panelX + 8, detailY, panelX + panelWidth - 8, detailY);
-    drawHexText(renderer, panelX + 12, detailY + 4, "SPR SEL", active, 1);
+    drawHexTextFit(renderer, panelX + 12, detailY + 4, panelWidth - 24, "SPR SEL", active, 1);
     if (selectedSprite.has_value()) {
         const auto sp = selectedSprite.value();
         char line1[40];
         std::snprintf(line1, sizeof(line1), "ADR:%04X Y:%02X X:%02X", sp.addr, sp.y, sp.x);
-        drawHexText(renderer, panelX + 12, detailY + 18, line1, active, 1);
+        drawHexTextFit(renderer, panelX + 12, detailY + 18, panelWidth - 24, line1, active, 1);
 
         const int sy = static_cast<int>(sp.y) - 16;
         const int sx = static_cast<int>(sp.x) - 8;
@@ -552,24 +617,31 @@ void drawMemoryPanel(
 
         char line2[48];
         std::snprintf(line2, sizeof(line2), "SY:%02X SX:%02X T:%02X A:%02X", sy & 0xFF, sx & 0xFF, sp.tile, sp.attr);
-        drawHexText(renderer, panelX + 12, detailY + 30, line2, active, 1);
+        drawHexTextFit(renderer, panelX + 12, detailY + 30, panelWidth - 24, line2, active, 1);
 
-        char line3[48];
-        std::snprintf(line3, sizeof(line3), "P:%d YF:%d XF:%d PL:%d", priLow ? 1 : 0, yFlip ? 1 : 0, xFlip ? 1 : 0, pal1 ? 1 : 0);
-        drawHexText(renderer, panelX + 12, detailY + 42, line3, active, 1);
+        if (detailHeight >= 64) {
+            char line3[48];
+            std::snprintf(line3, sizeof(line3), "P:%d YF:%d XF:%d PL:%d", priLow ? 1 : 0, yFlip ? 1 : 0, xFlip ? 1 : 0, pal1 ? 1 : 0);
+            drawHexTextFit(renderer, panelX + 12, detailY + 42, panelWidth - 24, line3, active, 1);
+        }
 
-        drawHexText(renderer, panelX + 12, detailY + 54, "SPRITE", active, 1);
-        drawSpritePreview(renderer, bus, sp, panelX + 12, detailY + 66, 2);
+        if (detailHeight >= 80) {
+            drawHexText(renderer, panelX + 12, detailY + 54, "SPRITE", active, 1);
+            drawSpritePreview(renderer, bus, sp, panelX + 12, detailY + 66, 2);
+        } else if (detailHeight >= 64) {
+            drawHexText(renderer, panelX + 12, detailY + 52, "SPRITE", active, 1);
+            drawSpritePreview(renderer, bus, sp, panelX + 12, detailY + 62, 1);
+        }
     } else {
         drawHexText(renderer, panelX + 12, detailY + 20, "NONE", dim, 1);
     }
 
-    const int spriteHeaderY = spriteHeaderYFromLayout(readStartY);
+    const int spriteHeaderY = spriteHeaderYFromLayout(panelHeight, readStartY);
     drawHexText(renderer, panelX + 12, spriteHeaderY, "SPR OAM", active, 1);
     SDL_SetRenderDrawColor(renderer, 54, 60, 80, 255);
     SDL_RenderDrawLine(renderer, panelX + 8, spriteHeaderY + 12, panelX + panelWidth - 8, spriteHeaderY + 12);
 
-    const int spriteY = spriteListYFromLayout(showBreakpointMenu);
+    const int spriteY = spriteListYFromLayout(panelHeight, showBreakpointMenu);
     const int spriteLineHeight = kSpriteLineHeight;
     const int spriteMaxLines = spriteVisibleLinesForPanel(panelHeight, showBreakpointMenu);
     const int totalSprites = static_cast<int>(sprites.size());
@@ -598,7 +670,7 @@ void drawMemoryPanel(
             sp.tile,
             role.c_str()
         );
-        drawHexText(renderer, panelX + 12, spriteY + i * spriteLineHeight, line, selected ? SDL_Color{255, 230, 120, 255} : active, 1);
+        drawHexTextFit(renderer, panelX + 12, spriteY + i * spriteLineHeight, panelWidth - 24, line, selected ? SDL_Color{255, 230, 120, 255} : active, 1);
     }
 
     if (totalSprites > spriteMaxLines) {
@@ -618,7 +690,9 @@ void drawMemoryPanel(
     }
 
     char footer[40];
-    std::snprintf(footer, sizeof(footer), "SPR %d-%d/%d", scroll + 1, scroll + spriteCount, totalSprites);
+    const int firstSprite = totalSprites > 0 ? (scroll + 1) : 0;
+    const int lastSprite = totalSprites > 0 ? (scroll + spriteCount) : 0;
+    std::snprintf(footer, sizeof(footer), "SPR %d-%d/%d", firstSprite, lastSprite, totalSprites);
     drawHexText(renderer, panelX + 12, panelHeight - 12, footer, dim, 1);
 
     if (search.visible) {
@@ -670,8 +744,8 @@ void drawMemoryPanel(
             search.hasSnapshot ? "ON" : "OFF",
             search.totalMatches
         );
-        drawHexText(renderer, innerX, infoY, infoLine, dim, 1);
-        drawHexText(renderer, innerX, buttonsY, "RUN SNAP CLR", SDL_Color{176, 208, 246, 255}, 1);
+        drawHexTextFit(renderer, innerX, infoY, overlayW - 16, infoLine, dim, 1);
+        drawHexTextFit(renderer, innerX, buttonsY, overlayW - 16, "RUN SNAP CLR", SDL_Color{176, 208, 246, 255}, 1);
 
         for (int i = 0; i < listLines; ++i) {
             const int idx = scroll + i;
@@ -682,10 +756,10 @@ void drawMemoryPanel(
             const gb::u8 val = bus.peek(addr);
             char line[24];
             std::snprintf(line, sizeof(line), "%04X:%02X", addr, val);
-            drawHexText(renderer, innerX, listY + i * kSearchListLineHeight, line, active, 1);
+            drawHexTextFit(renderer, innerX, listY + i * kSearchListLineHeight, overlayW - 16, line, active, 1);
         }
 
-        drawHexText(renderer, innerX, overlayY + overlayH - 10, "S CLOSE ENTER RUN E EDIT", dim, 1);
+        drawHexTextFit(renderer, innerX, overlayY + overlayH - 10, overlayW - 16, "S CLOSE ENTER RUN E EDIT", dim, 1);
     }
 }
 
