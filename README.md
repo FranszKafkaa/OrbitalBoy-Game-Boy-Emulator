@@ -1,123 +1,170 @@
 # Game Boy Emulator (C++)
 
-Emulador do **Game Boy clássico (DMG-01)** em C++17, com arquitetura modular e foco em clareza de código.
+Emulador de **Game Boy (DMG)** com suporte inicial a **Game Boy Color (CGB)**, escrito em C++17.
+O projeto tem foco em legibilidade, arquitetura modular e ferramentas de debug em tempo real.
 
-## Comece em 1 minuto
+## Documentacao
+
+- Guia completo (leigo): `docs/guia.md`
+- Formato da suite de ROMs: `docs/rom-suite.md`
+
+## Build
+
+### Dependencias
+
+- CMake 3.16+
+- Compilador com C++17
+- SDL2 (recomendado para frontend grafico)
+- SDL2_image (opcional, para capas `.jpg/.jpeg` no seletor)
+
+### Comandos
 
 ```bash
-cmake -S . -B build
-cmake --build build
-./build/gbemu --choose-rom
+cmake -S . -B build -DGBEMU_USE_SDL2=ON
+cmake --build build -j
 ```
 
-Se já tiver uma ROM:
-
-```bash
-./build/gbemu --rom caminho/para/jogo.gb
-```
-
-## O que já funciona
-
-- Núcleo por componentes:
-  - `CPU` (LR35902 com cobertura ampla)
-  - `Bus/MMU` (mapa de memória principal)
-  - `PPU` (timing de modos + background + janela + sprites)
-  - `Timer` (`DIV`, `TIMA`, `TMA`, `TAC`)
-  - `Joypad` (`FF00` + interrupção)
-  - `Cartridge` com `ROM ONLY` e `MBC1`
-- Loop de frame com **70224 ciclos/frame**
-- Interrupções (IE/IF + vetores)
-- DMA OAM por `FF46`
-- Carregamento de ROM `.gb` com leitura de título
-- Frontend em tempo real com SDL2 (quando disponível)
-- Áudio básico no modo SDL2 (frame sequencer + mix estéreo)
-- Modo headless com export de framebuffer para `frame.ppm`
-
-## Requisitos
-
-- CMake
-- Compilador com suporte a C++17
-- SDL2 (opcional, detectada automaticamente no build)
+Sem SDL2, o executavel ainda funciona em modo headless.
 
 ## Como rodar
 
-Modo tempo real (SDL2):
+### Fluxo padrao (SDL2)
+
+```bash
+./build/gbemu
+```
+
+Se nenhuma ROM for passada, abre o seletor grafico SDL automaticamente.
+
+### Carregar ROM por parametro
 
 ```bash
 ./build/gbemu --rom caminho/para/jogo.gb
-```
-
-Atalho equivalente:
-
-```bash
+# ou
 ./build/gbemu caminho/para/jogo.gb
 ```
 
-Sem `--rom`, o seletor de ROM abre automaticamente no modo SDL.
-Busca de ROMs: primeiro em `./rom`, depois em `./roms`.
+### Seletor de ROM explicitamente
 
-Modo headless:
+```bash
+./build/gbemu --choose-rom
+```
+
+### Headless
 
 ```bash
 ./build/gbemu --rom caminho/para/jogo.gb --headless 300
 ```
 
-Ajuste de buffer de áudio (útil no WSL):
+Gera `frame.ppm` ao final da execucao.
+
+### Suite de compatibilidade
 
 ```bash
-./build/gbemu --rom caminho/para/jogo.gb --audio-buffer 2048
+./build/gbemu --rom-suite roms/tests/manifest.txt
 ```
 
-## Controles (SDL2)
+## Estrutura esperada de ROMs (seletor SDL)
 
-- Setas: direcionais
-- `Z`: botão `A`
-- `X`: botão `B`
-- `Enter`: `Start`
-- `Backspace`: `Select`
-- `P`: mutar/desmutar áudio
+O seletor procura primeiro em `./rom`, depois em `./roms`.
+Cada jogo deve estar em uma pasta propria:
+
+```text
+rom/
+  Pokemon Yellow/
+    pokemon.gb
+    capa.jpg
+  Mario Land/
+    mario.gb
+    capa.jpg
+```
+
+- Nome da pasta: vira o label no card
+- `.gb`/`.gbc`: ROM
+- `.jpg`/`.jpeg`: imagem de preview (opcional)
+
+## Controles principais (SDL)
+
+### Jogo
+
+- Setas: direcional
+- `Z`: A
+- `X`: B
+- `Enter`: Start
+- `Backspace`: Select
 - `Space`: pausar/continuar
-- `I`: ocultar/mostrar painel de memória
-- `F3` ou `Ctrl+S`: salvar state
-- `F5` ou `Ctrl+L`: carregar state
+- `Tab` (segurado): fast forward
+- `P`: mute/unmute
 - `Esc`: sair
 
-## Save state
+### Estado e execucao
 
-- Slot único por ROM
-- Arquivo salvo em `./states/<nome-da-rom>.state`
-- Exemplo: `./states/PokemonYellow.state`
-- `F3` sobrescreve o arquivo atual
+- `F3` ou `Ctrl+S`: salvar save state
+- `F5` ou `Ctrl+L`: carregar save state
+- `L`: encerrar sessao atual e voltar ao menu de ROMs
+- `Left` (pausado): voltar 1 frame
+- `Right` (pausado): avancar 1 frame
 
-## Painel de debug (SDL)
+### Video
 
-- Tela do jogo à esquerda
-- Painel à direita com:
-  - leituras recentes de memória (`ADDR:VAL`)
-  - instrução atual (`PC + OP`) e próxima (`NP + OP`)
-  - seção de sprites (OAM: `Y`, `X`, `Tile`, `Attr`)
-- Clique em um sprite na OAM para fixar seleção, destacar na tela e ver preview no painel
+- `F`: fullscreen on/off
+- `N` (em fullscreen): menu de escala
+  - `1`: Crisp Fit (nitido + barras laterais)
+  - `2`: Full Stretch (sem barras)
+  - `3`: Full Stretch Sharp (sem barras + sharpen)
+- `V`: menu de paleta
+  - `1`: Game Boy Classico
+  - `2`: Game Boy Pocket
+  - `3`: Game Boy Color (somente ROM com suporte CGB)
+- `H`: alternar filtro (`None` / `Scanline` / `LCD`)
+- `F9`: screenshot `.ppm` em `captures/<rom>/`
+
+### Debug
+
+- `I`: mostrar/ocultar painel de debug (oculto por padrao)
+- `D`: mostrar/ocultar menu visual de BP/WP (oculto por padrao)
+- `S`: abrir/fechar busca de memoria
+- `M`: editor hexadecimal (endereco + valor)
+- `[` / `]`: endereco observado -1 / +1
+- `=` / `-` / `0`: incrementar / decrementar / zerar endereco observado
+- `K`: lock por frame no endereco observado
+- `W`: watchpoint no endereco observado
+- `B`: breakpoint no `PC` atual
+- Clique em leitura de memoria: fixa watch
+- Clique em sprite da lista OAM: seleciona sprite + preview/overlay
+
+## Persistencia
+
+Arquivos sao salvos em `./states/` por nome da ROM (`<rom>.ext`):
+
+- `.state`: save state
+- `.sav`: save interno do cartucho (battery RAM)
+- `.rtc`: relogio RTC (MBC3/HuC3)
+- `.palette`: preferencia de paleta
+- `.filters`: preferencia de filtro
+
+Capturas vao para `./captures/<rom>/`.
+
+## Arquitetura do projeto
+
+- `include/gb/core/` e `src/core/`: nucleo de emulacao
+  - CPU, Bus/MMU, PPU, APU, Timer, Joypad, Cartridge, GameBoy
+- `include/gb/app/` e `src/app/`: camada de aplicacao
+  - parsing de argumentos, runtime paths, modo headless, suite
+- `include/gb/app/frontend/` e `src/app/frontend/`: frontend SDL modular
+  - `rom_selector`, `realtime`, `debug_ui`, `realtime_support`
+- `tests/`: testes automatizados
 
 ## Testes
 
 ```bash
 cmake -S . -B build -DBUILD_TESTING=ON
-cmake --build build
+cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-Cobertura atual: instruções críticas da CPU (`DAA`, bloco `CB`, `CALL/RET`) e DMA para OAM.
+Suites por area (exemplo):
 
-## Estrutura do projeto
-
-- `include/gb/*.hpp`: interfaces e tipos
-- `src/*.cpp`: implementação
-- `tests/*.cpp`: testes
-- `roms/`: pasta sugerida para ROMs locais
-
-## Próximos passos
-
-1. Melhorar fidelidade de timing de CPU/PPU (ciclos e edge cases de hardware)
-2. Evoluir o áudio para maior precisão de APU
-3. Expandir MBCs (`MBC2`, `MBC3`, `MBC5`) e RAM com bateria
-4. Ampliar a suíte com ROMs de validação (Blargg/mooneye)
+```bash
+ctest --test-dir build -R gbemu_suite_cpu --output-on-failure
+```

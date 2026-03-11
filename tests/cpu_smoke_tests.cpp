@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-#include "gb/gameboy.hpp"
+#include "gb/core/gameboy.hpp"
 
 namespace {
 

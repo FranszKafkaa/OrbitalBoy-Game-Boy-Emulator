@@ -8,19 +8,32 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(GBEMU_USE_SDL2 "Build with SDL2 real-time frontend when available" ON)
 
 add_library(gbcore
-    src/gameboy.cpp
-    src/cartridge.cpp
-    src/bus.cpp
-    src/cpu.cpp
-    src/ppu.cpp
-    src/apu.cpp
-    src/timer.cpp
-    src/joypad.cpp
+    src/core/gameboy.cpp
+    src/core/gameboy_state_io.cpp
+    src/core/cartridge.cpp
+    src/core/bus.cpp
+    src/core/cpu.cpp
+    src/core/cpu_alu.cpp
+    src/core/ppu.cpp
+    src/core/apu.cpp
+    src/core/timer.cpp
+    src/core/joypad.cpp
 )
 
 target_include_directories(gbcore PUBLIC include)
 
-add_executable(gbemu src/main.cpp)
+add_executable(gbemu
+    src/app/main.cpp
+    src/app/app_options.cpp
+    src/app/headless_runner.cpp
+    src/app/rom_suite_runner.cpp
+    src/app/runtime_paths.cpp
+    src/app/sdl_frontend.cpp
+    src/app/frontend/debug_ui.cpp
+    src/app/frontend/realtime_support.cpp
+    src/app/frontend/realtime.cpp
+    src/app/frontend/rom_selector.cpp
+)
 target_link_libraries(gbemu PRIVATE gbcore)
 
 if (GBEMU_USE_SDL2)
@@ -45,7 +58,14 @@ endif()
 include(CTest)
 if (BUILD_TESTING)
     add_executable(gbemu_tests
-        tests/cpu_smoke_tests.cpp
+        src/app/app_options.cpp
+        src/app/rom_suite_runner.cpp
+        tests/test_main.cpp
+        tests/cpu_behavior_tests.cpp
+        tests/cartridge_tests.cpp
+        tests/bus_tests.cpp
+        tests/peripheral_tests.cpp
+        tests/state_and_options_tests.cpp
     )
     target_link_libraries(gbemu_tests PRIVATE gbcore)
     if (MSVC)
@@ -54,4 +74,20 @@ if (BUILD_TESTING)
         target_compile_options(gbemu_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME gbemu_tests COMMAND gbemu_tests)
+
+    set(GBEMU_TEST_SUITES
+        apu
+        bus
+        cartridge
+        cpu
+        joypad
+        options
+        ppu
+        state
+        timer
+    )
+    foreach(suite IN LISTS GBEMU_TEST_SUITES)
+        add_test(NAME gbemu_suite_${suite} COMMAND gbemu_tests --suite ${suite})
+        set_tests_properties(gbemu_suite_${suite} PROPERTIES LABELS "suite;${suite}")
+    endforeach()
 endif()
