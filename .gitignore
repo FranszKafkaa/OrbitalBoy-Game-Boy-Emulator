@@ -1,0 +1,14 @@
+/build/
+/gbemu
+/frame.ppm
+*.o
+*.obj
+*.exe
+
+# ROMs locais
+*.gb
+*.gbc
+CMakeFiles
+roms/*
+
+states/*
