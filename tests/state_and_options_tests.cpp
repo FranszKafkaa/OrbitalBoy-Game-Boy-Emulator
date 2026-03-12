@@ -1,3 +1,4 @@
+#include <array>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -8,6 +9,7 @@
 #include "gb/app/app_options.hpp"
 #include "gb/app/rom_suite_runner.hpp"
 #include "gb/core/gameboy.hpp"
+#include "gb/core/gba/system.hpp"
 
 #include "test_framework.hpp"
 #include "test_utils.hpp"
@@ -28,6 +30,50 @@ void loadRomOrThrow(gb::GameBoy& gb, const tests::RomSpec& spec, tests::ScopedPa
     const auto romPath = tests::writeTempRom(spec);
     cleanup = tests::ScopedPath(romPath);
     T_REQUIRE(gb.loadRom(romPath.string()));
+}
+
+std::vector<gb::u8> buildGbaTestRomImage(const std::string& title, const std::string& gameCode, const std::string& makerCode) {
+    std::vector<gb::u8> rom(0x200, 0x00);
+    const std::array<gb::u8, 156> logo = {
+        0x24, 0xFF, 0xAE, 0x51, 0x69, 0x9A, 0xA2, 0x21, 0x3D, 0x84, 0x82, 0x0A,
+        0x84, 0xE4, 0x09, 0xAD, 0x11, 0x24, 0x8B, 0x98, 0xC0, 0x81, 0x7F, 0x21,
+        0xA3, 0x52, 0xBE, 0x19, 0x93, 0x09, 0xCE, 0x20, 0x10, 0x46, 0x4A, 0x4A,
+        0xF8, 0x27, 0x31, 0xEC, 0x58, 0xC7, 0xE8, 0x33, 0x82, 0xE3, 0xCE, 0xBF,
+        0x85, 0xF4, 0xDF, 0x94, 0xCE, 0x4B, 0x09, 0xC1, 0x94, 0x56, 0x8A, 0xC0,
+        0x13, 0x72, 0xA7, 0xFC, 0x9F, 0x84, 0x4D, 0x73, 0xA3, 0xCA, 0x9A, 0x61,
+        0x58, 0x97, 0xA3, 0x27, 0xFC, 0x03, 0x98, 0x76, 0x23, 0x1D, 0xC7, 0x61,
+        0x03, 0x04, 0xAE, 0x56, 0xBF, 0x38, 0x84, 0x00, 0x40, 0xA7, 0x0E, 0xFD,
+        0xFF, 0x52, 0xFE, 0x03, 0x6F, 0x95, 0x30, 0xF1, 0x97, 0xFB, 0xC0, 0x85,
+        0x60, 0xD6, 0x80, 0x25, 0xA9, 0x63, 0xBE, 0x03, 0x01, 0x4E, 0x38, 0xE2,
+        0xF9, 0xA2, 0x34, 0xFF, 0xBB, 0x3E, 0x03, 0x44, 0x78, 0x00, 0x90, 0xCB,
+        0x88, 0x11, 0x3A, 0x94, 0x65, 0xC0, 0x7C, 0x63, 0x87, 0xF0, 0x3C, 0xAF,
+        0xD6, 0x25, 0xE4, 0x8B, 0x38, 0x0A, 0xAC, 0x72, 0x21, 0xD4, 0xF8, 0x07,
+    };
+
+    for (std::size_t i = 0; i < logo.size(); ++i) {
+        rom[0x04 + i] = logo[i];
+    }
+
+    for (std::size_t i = 0; i < title.size() && i < 12; ++i) {
+        rom[0xA0 + i] = static_cast<gb::u8>(title[i]);
+    }
+    for (std::size_t i = 0; i < gameCode.size() && i < 4; ++i) {
+        rom[0xAC + i] = static_cast<gb::u8>(gameCode[i]);
+    }
+    for (std::size_t i = 0; i < makerCode.size() && i < 2; ++i) {
+        rom[0xB0 + i] = static_cast<gb::u8>(makerCode[i]);
+    }
+    rom[0xB2] = 0x96;
+    rom[0xB3] = 0x00;
+    rom[0xB4] = 0x00;
+    rom[0xBC] = 0x00;
+
+    gb::u8 sum = 0;
+    for (std::size_t i = 0xA0; i <= 0xBC; ++i) {
+        sum = static_cast<gb::u8>(sum + rom[i]);
+    }
+    rom[0xBD] = static_cast<gb::u8>(0U - static_cast<gb::u8>(0x19U + sum));
+    return rom;
 }
 
 } // namespace
@@ -309,6 +355,7 @@ TEST_CASE("options", "defaults_when_no_args") {
     T_REQUIRE(!options.chooseRom);
     T_REQUIRE(!options.preciseTiming);
     T_EQ(static_cast<int>(options.hardwareMode), static_cast<int>(gb::HardwareModePreference::Auto));
+    T_EQ(static_cast<int>(options.targetSystem), static_cast<int>(gb::TargetSystemPreference::Auto));
     T_EQ(options.bootRomPath, std::string(""));
     T_EQ(options.linkConnect, std::string(""));
     T_EQ(options.netplayConnect, std::string(""));
@@ -468,6 +515,28 @@ TEST_CASE("options", "hardware_mode_invalid_value_returns_false") {
     T_REQUIRE(error.find("valor invalido para --hardware") != std::string::npos);
 }
 
+TEST_CASE("options", "target_system_flag_parse") {
+    gb::AppOptions options;
+    std::string error;
+
+    T_REQUIRE(parseArgs({"gbemu", "--system", "gb"}, options, error));
+    T_EQ(static_cast<int>(options.targetSystem), static_cast<int>(gb::TargetSystemPreference::Gb));
+
+    T_REQUIRE(parseArgs({"gbemu", "--system", "gba"}, options, error));
+    T_EQ(static_cast<int>(options.targetSystem), static_cast<int>(gb::TargetSystemPreference::Gba));
+
+    T_REQUIRE(parseArgs({"gbemu", "--system", "auto"}, options, error));
+    T_EQ(static_cast<int>(options.targetSystem), static_cast<int>(gb::TargetSystemPreference::Auto));
+}
+
+TEST_CASE("options", "target_system_invalid_value_returns_false") {
+    gb::AppOptions options;
+    std::string error;
+
+    T_REQUIRE(!parseArgs({"gbemu", "--system", "xyz"}, options, error));
+    T_REQUIRE(error.find("valor invalido para --system") != std::string::npos);
+}
+
 TEST_CASE("options", "netplay_flags_parse") {
     gb::AppOptions options;
     std::string error;
@@ -524,4 +593,31 @@ TEST_CASE("state", "rom_suite_runner_executes_manifest_case") {
 
     const int rc = gb::runRomCompatibilitySuite(manifestPath.string());
     T_EQ(rc, 0);
+}
+
+TEST_CASE("state", "gba_rom_parser_reads_metadata_and_checksum") {
+    const auto romPath = tests::makeTempPath("gba_parser", ".gba");
+    tests::ScopedPath cleanupRom(romPath);
+    const auto image = buildGbaTestRomImage("PHASE1DEMO", "ABCD", "01");
+    T_REQUIRE(tests::writeBinaryFile(romPath, image));
+
+    gb::gba::System gba;
+    T_REQUIRE(gba.loadRomFromFile(romPath.string()));
+    T_REQUIRE(gba.loaded());
+    T_EQ(gba.metadata().title, std::string("PHASE1DEMO"));
+    T_EQ(gba.metadata().gameCode, std::string("ABCD"));
+    T_EQ(gba.metadata().makerCode, std::string("01"));
+    T_REQUIRE(gba.metadata().validNintendoLogo);
+    T_REQUIRE(gba.metadata().validFixedByte);
+    T_REQUIRE(gba.metadata().validHeaderChecksum);
+}
+
+TEST_CASE("state", "gba_rom_parser_rejects_too_small_file") {
+    const auto romPath = tests::makeTempPath("gba_small", ".gba");
+    tests::ScopedPath cleanupRom(romPath);
+    T_REQUIRE(tests::writeBinaryFile(romPath, {0x00, 0x01, 0x02, 0x03}));
+
+    gb::gba::System gba;
+    T_REQUIRE(!gba.loadRomFromFile(romPath.string()));
+    T_REQUIRE(!gba.loaded());
 }

@@ -10,6 +10,12 @@ enum class HardwareModePreference {
     Cgb,
 };
 
+enum class TargetSystemPreference {
+    Auto,
+    Gb,
+    Gba,
+};
+
 struct AppOptions {
     std::string romPath;
     std::string romSuiteManifest;
@@ -20,6 +26,7 @@ struct AppOptions {
     bool chooseRom = false;
     bool preciseTiming = false;
     HardwareModePreference hardwareMode = HardwareModePreference::Auto;
+    TargetSystemPreference targetSystem = TargetSystemPreference::Auto;
     int linkHostPort = 0;
     int netplayHostPort = 0;
     int netplayDelayFrames = 0;

@@ -118,6 +118,24 @@ bool parseAppOptions(int argc, char** argv, AppOptions& outOptions, std::string&
             }
             continue;
         }
+        if (arg == "--system") {
+            std::string mode;
+            if (!readStringArg(argc, argv, i, arg, mode, errorMessage)) {
+                return false;
+            }
+            mode = toLowerAscii(mode);
+            if (mode == "auto") {
+                options.targetSystem = TargetSystemPreference::Auto;
+            } else if (mode == "gb") {
+                options.targetSystem = TargetSystemPreference::Gb;
+            } else if (mode == "gba") {
+                options.targetSystem = TargetSystemPreference::Gba;
+            } else {
+                errorMessage = "valor invalido para --system: " + mode + " (use auto|gb|gba)";
+                return false;
+            }
+            continue;
+        }
         if (arg == "--headless") {
             options.headless = true;
             if (i + 1 < argc) {

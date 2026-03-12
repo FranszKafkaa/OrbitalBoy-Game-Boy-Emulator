@@ -40,6 +40,16 @@ Detalhe tecnico:
 - preferencias de rede (`link mode` + `netplay delay`) agora ficam em `states/global.network`
 - mapper MMM01 ganhou implementacao dedicada (nao e mais alias de MBC1)
 - mapper HuC3 ganhou camada dedicada sobre MBC3 com estado estendido persistente
+- evoluiu base de Game Boy Advance (GBA) para fase 3 com parser de header + CPU ARM minima + memoria basica + PPU inicial
+- linha de comando ganhou `--system auto|gb|gba` para rotear entre frontends
+- GBA CPU recebeu estabilizacao de fluxo para reduzir tela preta apos menu:
+- `BX` em ARM agora realinha PC corretamente para estado ARM/THUMB
+- `SWI 0x04/0x05` (`IntrWait`/`VBlankIntrWait`) agora espera mascara de IRQ de forma consistente
+- guardas de escrita/leitura de PC foram reforcadas para evitar execucao em regioes invalidas
+- execucao de BIOS nao mapeada foi bloqueada no caminho de fetch (sem depender de BIOS externo)
+- `BX` com alvo invalido tenta fallback seguro para `LR` quando possivel
+- decode de `BL` em THUMB foi reforcado com prefixo explicito e eliminacao de shift assinado indefinido
+- suite de testes GBA ganhou casos para `BX` ARM alinhado, `VBlankIntrWait` e fluxo `BL` THUMB
 
 Impacto:
 
@@ -61,6 +71,8 @@ Impacto:
 - reduz risco de partidas seguirem divergidas em silencio (detecao de dessync por checksum)
 - evita reconfigurar delay/mode de rede a cada abertura do emulador
 - melhora compatibilidade com cartuchos MMM01/HuC3
+- cria base separada `core/gba` para evolucao incremental do emulador de GBA
+- reduz risco de travamento em tela preta no fluxo GBA por saltos para enderecos invalidos
 
 ## 0. Como ler este guia
 
@@ -89,6 +101,15 @@ Isso significa que ele tenta reproduzir:
 
 Quando esses blocos trabalham juntos, o jogo roda como se estivesse no console real.
 
+Observacao sobre GBA:
+
+- agora existe uma trilha inicial de GBA em fase 3 (ainda experimental).
+- nessa fase, o projeto ja executa CPU ARM + Thumb essencial, com SWI HLE basica.
+- memoria/timing ja inclui timers, IRQ regs, DMA imediata/VBlank/HBlank e keypad IRQ.
+- o CPU agora trata `HALT` basico e despacho de IRQ em HLE usando vetor em `0x03007FFC`.
+- a PPU inicial ja renderiza modo 0 com BG0..BG3 (text) e OBJ basico, alem de modos 3/4/5.
+- audio e perifericos avancados de hardware GBA ainda nao estao implementados.
+
 ## 2. Estrutura de pastas (visao de manutencao)
 
 ```text
@@ -98,6 +119,7 @@ include/gb/app/frontend/                # interfaces SDL/debug
 include/gb/app/frontend/realtime/       # modulos internos do loop realtime
 
 src/core/                               # implementacao do nucleo
+src/core/gba/                           # base do sistema GBA (fase 3)
 src/core/cartridge/mappers/             # mappers separados por arquivo
 src/app/                                # inicializacao e modos de execucao
 src/app/frontend/                       # janela, renderizacao, debug e seletor
@@ -128,7 +150,7 @@ Ordem:
 
 1. `main()` chama `parseAppOptions(...)` para ler argumentos.
 2. Se vier `--rom-suite`, executa suite automatica e termina.
-3. Se nao veio ROM e SDL esta habilitado, abre seletor grafico de ROM.
+3. Se nao veio ROM, SDL esta habilitado e o sistema alvo e GB, abre seletor grafico de ROM.
 4. Se ainda nao tiver ROM, encerra com erro amigavel.
 5. Se for modo SDL normal, chama `runRealtimeFlow(...)`.
 6. Se for headless, roda `runHeadless(...)`.
@@ -172,6 +194,7 @@ Opcoes:
 - `--audio-buffer <256..8192>`: buffer solicitado para SDL audio.
 - `--hardware <auto|dmg|cgb>`: seleciona o hardware emulado para ROM dual-mode.
 - `--netplay-delay <0..10>`: atraso de entrada para netplay com rollback simples.
+- `--system <auto|gb|gba>`: seleciona o sistema alvo (GBA em fase 3 experimental).
 
 Detalhe de runtime:
 
@@ -232,7 +255,7 @@ roms/
 Regras:
 
 - usa o nome da subpasta como label
-- pega o primeiro `.gb` ou `.gbc`
+- pega o primeiro `.gb`, `.gbc` ou `.gba`
 - pega a primeira imagem `.jpg/.jpeg` (se existir)
 - se nao tiver imagem, mostra placeholder `NO IMG`
 
@@ -910,6 +933,80 @@ Observacao:
 
 - modo CGB no projeto e funcional para varios casos, mas ainda experimental em termos de compatibilidade absoluta com toda biblioteca.
 
+## 18.1 GBA (fase 3)
+
+Onde esta:
+
+- `include/gb/core/gba/system.hpp`
+- `src/core/gba/system.cpp`
+- `include/gb/core/gba/ppu.hpp`
+- `src/core/gba/ppu.cpp`
+- `include/gb/app/frontend/gba_realtime.hpp`
+- `src/app/frontend/gba_realtime.cpp`
+
+O que ja existe:
+
+- parser de ROM `.gba` com leitura de metadados do header (title, game code, maker code)
+- validacao de logo Nintendo, fixed byte e checksum de header
+- CPU ARM7TDMI com cobertura incremental (ARM + Thumb essencial):
+  - data processing, multiply, block transfer, branch (`B`) e branch exchange (`BX`)
+  - load/store de byte/halfword/word em formatos ARM e Thumb principais
+  - SWI HLE basica (Div/DivArm/CpuSet/CpuFastSet + chamadas de espera simplificadas)
+  - correcoes de estabilidade para evitar tela preta:
+    - `CpuFastSet` usando contagem correta em words (nao 8x maior)
+    - leitura de `PC` em ARM data-processing com semantica de pipeline (`+8`)
+    - `BX` em Thumb com `r15` usando `current+4` e alinhamento correto ao trocar ARM/Thumb
+- memoria/timing com mapa principal:
+  - ROM (`0x08000000+`)
+  - EWRAM (`0x02000000`)
+  - IWRAM (`0x03000000`)
+  - Palette RAM (`0x05000000`)
+  - VRAM (`0x06000000`)
+  - OAM (`0x07000000`)
+  - IO (`0x04000000`, incluindo `KEYINPUT/KEYCNT/IE/IF/IME`)
+- timers e interrupcoes basicas:
+  - timers 0..3 com prescaler/cascade/reload/IRQ
+  - IRQ flags de keypad, timer, DMA e PPU quando habilitadas
+  - DMA canal 0..3 com transferencia 16/32-bit (start imediato, VBlank e HBlank)
+  - despacho de IRQ em HLE com vetor em `0x03007FFC`
+  - `SWI Halt` e waits basicos para reduzir busy-loop em ROMs
+- PPU separada em modulo proprio:
+  - timing de scanline (`VCOUNT`) e flags de blank (`DISPSTAT`)
+  - renderizacao modo 0 com BG0..BG3 (text) e composicao por prioridade
+  - renderizacao modo 1 (BG0/BG1 text + BG2 affine) e modo 2 (BG2/BG3 affine) em versao inicial
+  - renderizacao de OBJ/sprites basicos no modo 0 e overlay em modos 3/4/5
+  - OBJ com melhorias de compatibilidade:
+    - ignora OBJ desabilitado no modo nao-afim (bit9 em `attr0`)
+    - ajuste de indexacao de tile para OBJ 2D em 8bpp
+    - primeira versao de transformacao afim de OBJ (matriz `PA/PB/PC/PD`)
+  - renderizacao modo 3, modo 4 e modo 5
+  - base de OBJ corrigida por modo de video (0x10000 nos modos 0-2 e 0x14000 nos modos 3-5)
+  - indexacao de tile OBJ 8bpp em unidades de 32 bytes (comportamento real de OAM)
+- loop SDL basico em 240x160 (resolucao nativa do GBA)
+- selecao por CLI: `--system gba`
+- memoria/bus com ajustes de fidelidade que reduzem artefatos:
+  - espelhamento correto da VRAM em `0x06018000-0x0601FFFF`
+  - leitura `read32` com rotacao para enderecos desalinhados e alinhamento em `read16/write16/write32`
+  - em PRAM/VRAM, escrita de 8-bit replica o byte nos dois bytes do halfword (comportamento de barramento 16-bit)
+  - em OAM, escrita de 8-bit e ignorada (comportamento real do hardware)
+- pipeline de cor corrigido:
+  - conversao de paleta/framebuffer usa ordenacao real do GBA (`RGB555` em memoria) para `RGB565` no SDL
+- CPU ARM com mais fidelidade de operandos:
+  - `Operand2` com shift por registrador (LSL/LSR/ASR/ROR)
+
+O que ainda nao existe:
+
+- compatibilidade Thumb/ARM completa (ainda faltam grupos e edge-cases de ISA)
+- pipeline grafico completo (affine/rotacao, janelas, blending e efeitos por pixel)
+- audio de hardware GBA
+- save types de cartucho GBA
+
+Objetivo dessa fase:
+
+- estabelecer arquitetura separada (`core/gba`) com base executavel para evoluir sem poluir o core de GB.
+- sair do framebuffer de placeholder e entrar em caminho real de renderizacao do GBA.
+- destravar titulos que dependem de Thumb, DMA/timers e composicao BG+OBJ.
+
 ## 19. Captura de tela
 
 - tecla `F9`
@@ -970,3 +1067,20 @@ Se voce quiser evoluir o projeto, os melhores pontos de extensao hoje sao:
 - melhorias no pipeline de audio
 - mais cobertura de testes de compatibilidade
 - expansao do suporte CGB por titulo
+
+## 23. Ajustes recentes de estabilidade no GBA
+
+Melhorias aplicadas na CPU ARM7TDMI para reduzir travamentos com tela preta e corrupcao de fluxo em jogos GBA:
+
+- Retorno de IRQ ficou mais robusto:
+  - snapshot de registradores ampliado para `r0..r14` (antes era parcial)
+  - restauracao de CPSR e PC de retorno de forma mais consistente
+  - suporte de trampolim de retorno (`0xFFFF0010`) em mais caminhos de `BX`
+- Foi adicionada cobertura de teste para esse caso:
+  - `gba_cpu_irq_thumb_pop_bx_trampoline_restores_sp`
+- `BX` invalido passou a usar fallback mais conservador:
+  - so retorna por `LR` quando o alvo parece um retorno plausivel
+  - evita auto-loop em caudas de funcao que causavam crescimento indevido do `SP`
+
+Observacao importante:
+- O fluxo GBA ainda e experimental e alguns titulos podem continuar exigindo ajustes finos de IRQ/PPU para compatibilidade total.

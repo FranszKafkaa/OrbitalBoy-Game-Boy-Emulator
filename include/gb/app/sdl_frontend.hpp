@@ -2,6 +2,7 @@
 
 #include <string>
 
+#include "gb/core/gba/system.hpp"
 #include "gb/core/gameboy.hpp"
 
 namespace gb {
@@ -29,6 +30,8 @@ int runRealtime(
     int netplayHostPort,
     int netplayDelayFrames
 );
+
+int runGbaRealtime(gba::System& system, int scale);
 #endif
 
 } // namespace gb

@@ -78,7 +78,7 @@ int runRealtime(
     bool fullscreen = false;
 
     SDL_Window* window = SDL_CreateWindow(
-        "GB Emulator",
+        "Orion Boy",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         gameWidth + panelWidth,

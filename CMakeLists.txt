@@ -10,6 +10,10 @@ option(GBEMU_USE_SDL2 "Build with SDL2 real-time frontend when available" ON)
 add_library(gbcore
     src/core/gameboy.cpp
     src/core/gameboy_state_io.cpp
+    src/core/gba/system.cpp
+    src/core/gba/memory.cpp
+    src/core/gba/cpu.cpp
+    src/core/gba/ppu.cpp
     src/core/cartridge.cpp
     src/core/cartridge/mappers/no_mbc.cpp
     src/core/cartridge/mappers/mbc1.cpp
@@ -50,6 +54,7 @@ add_executable(gbemu
     src/app/frontend/realtime/link_transport.cpp
     src/app/frontend/realtime/network_config.cpp
     src/app/frontend/realtime/top_menu.cpp
+    src/app/frontend/gba_realtime.cpp
     src/app/frontend/realtime.cpp
     src/app/frontend/rom_selector.cpp
 )
@@ -93,6 +98,7 @@ if (BUILD_TESTING)
         tests/bus_tests.cpp
         tests/peripheral_tests.cpp
         tests/state_and_options_tests.cpp
+        tests/gba_phase2_tests.cpp
         tests/frontend_feature_tests.cpp
     )
     target_link_libraries(gbemu_tests PRIVATE gbcore)

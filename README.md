@@ -3,6 +3,7 @@
 ![Preview do emulador](image/image.png)
 
 Emulador de **Game Boy (DMG)** com suporte inicial a **Game Boy Color (CGB)**, escrito em C++17.
+Inclui tambem uma base **experimental de Game Boy Advance (GBA) - Fase 3** (parser + CPU ARM/Thumb essencial + timing/memoria + PPU expandida).
 O projeto tem foco em legibilidade, arquitetura modular e ferramentas de debug em tempo real.
 
 ## Documentacao
@@ -48,6 +49,9 @@ Se nenhuma ROM for passada, abre o seletor grafico SDL automaticamente.
 # selecionar hardware para ROM dual-mode
 ./build/gbemu --rom caminho/para/jogo.gb --hardware dmg
 ./build/gbemu --rom caminho/para/jogo.gb --hardware cgb
+
+# modo GBA fase 3
+./build/gbemu --system gba --rom caminho/para/jogo.gba
 ```
 
 ### Seletor de ROM explicitamente
@@ -81,6 +85,25 @@ Regras:
 - ROM CGB-only ignora `--hardware dmg`
 - ROM sem suporte CGB ignora `--hardware cgb`
 
+### Selecao de sistema (GB/GBA)
+
+- `--system auto` (padrao): detecta por extensao (`.gba` => GBA; resto => GB)
+- `--system gb`: forca fluxo de Game Boy
+- `--system gba`: forca fluxo GBA (fase 3)
+
+Estado atual do GBA fase 3:
+
+- parser de ROM/header implementado
+- CPU ARM7TDMI com base ARM + Thumb essencial implementada
+- SWI HLE basica implementada (incluindo rotinas de divisao e copy/fill)
+- memoria/timing com mapa principal + timers + IRQ regs + DMA (imediata/VBlank/HBlank) + keypad IRQ
+- despacho de IRQ em HLE (vetor em `0x03007FFC`) e suporte a `HALT` basico no CPU
+- PPU expandida: modo 0 com BG0..BG3 (text) + OBJ/sprites basicos; modos 3/4/5 com suporte a OBJ
+- timing basico de scanline (`VCOUNT`) e blank flags (`DISPSTAT`) com pedido de IRQ de VBlank/HBlank/VCounter
+- input de teclado mapeado para `KEYINPUT`
+- ainda nao tem pipeline grafico completo (affine/rotacao, janelas, blending/efeitos), audio e save de cartucho GBA
+- `--rom-suite` permanece focado em GB
+
 ### Netplay (UDP) e atraso configuravel
 
 ```bash
@@ -108,11 +131,16 @@ rom/
   Mario Land/
     mario.gb
     capa.jpg
+  Demo GBA/
+    demo.gba
+    capa.jpg
 ```
 
 - Nome da pasta: vira o label no card
-- `.gb`/`.gbc`: ROM
+- `.gb`/`.gbc`/`.gba`: ROM
 - `.jpg`/`.jpeg`: imagem de preview (opcional)
+
+Se a ROM escolhida no seletor for `.gba`, o emulador entra automaticamente no fluxo GBA.
 
 ## Controles principais (SDL)
 
@@ -224,6 +252,7 @@ Capturas vao para `./captures/<rom>/`.
 
 - `include/gb/core/` e `src/core/`: nucleo de emulacao
   - CPU, Bus/MMU, PPU, APU, Timer, Joypad, Cartridge, GameBoy
+  - `core/gba`: base do sistema GBA (fase 3)
 - `include/gb/app/` e `src/app/`: camada de aplicacao
   - parsing de argumentos, runtime paths, modo headless, suite
 - `include/gb/app/frontend/` e `src/app/frontend/`: frontend SDL modular

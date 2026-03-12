@@ -23,8 +23,11 @@ bool hasRomExtension(const std::filesystem::path& path) {
     if (!path.has_extension()) {
         return false;
     }
-    const std::string ext = path.extension().string();
-    return ext == ".gb" || ext == ".gbc" || ext == ".GB" || ext == ".GBC";
+    std::string ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return ext == ".gb" || ext == ".gbc" || ext == ".gba";
 }
 
 bool hasImageExtension(const std::filesystem::path& path) {
@@ -122,7 +125,7 @@ std::string chooseRomWithSdlDialog() {
         SDL_ShowSimpleMessageBox(
             SDL_MESSAGEBOX_WARNING,
             "Nenhuma ROM encontrada",
-            "Use estrutura ./rom/NOME_DO_JOGO/{arquivo.gb, capa.jpg}.",
+            "Use estrutura ./rom/NOME_DO_JOGO/{arquivo.gb|arquivo.gbc|arquivo.gba, capa.jpg}.",
             nullptr
         );
         return {};

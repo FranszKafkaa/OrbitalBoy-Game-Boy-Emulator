@@ -1,12 +1,16 @@
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
 #include <iostream>
 #include <string>
 
 #include "gb/app/app_options.hpp"
-#include "gb/core/gameboy.hpp"
 #include "gb/app/headless_runner.hpp"
 #include "gb/app/rom_suite_runner.hpp"
 #include "gb/app/runtime_paths.hpp"
 #include "gb/app/sdl_frontend.hpp"
+#include "gb/core/gameboy.hpp"
+#include "gb/core/gba/system.hpp"
 
 #ifdef GBEMU_USE_SDL2
 #include <SDL2/SDL.h>
@@ -16,6 +20,39 @@
 #endif
 
 namespace {
+
+enum class ResolvedTargetSystem {
+    Gb,
+    Gba,
+};
+
+std::string toLowerAscii(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return text;
+}
+
+bool hasGbaExtension(const std::string& romPath) {
+    if (romPath.empty()) {
+        return false;
+    }
+    const std::string ext = toLowerAscii(std::filesystem::path(romPath).extension().string());
+    return ext == ".gba";
+}
+
+ResolvedTargetSystem resolveTargetSystem(const gb::AppOptions& options) {
+    if (options.targetSystem == gb::TargetSystemPreference::Gb) {
+        return ResolvedTargetSystem::Gb;
+    }
+    if (options.targetSystem == gb::TargetSystemPreference::Gba) {
+        return ResolvedTargetSystem::Gba;
+    }
+    if (hasGbaExtension(options.romPath)) {
+        return ResolvedTargetSystem::Gba;
+    }
+    return ResolvedTargetSystem::Gb;
+}
 
 bool loadGame(gb::GameBoy& gb, const gb::AppOptions& options) {
     if (!options.bootRomPath.empty()) {
@@ -69,6 +106,27 @@ bool loadGame(gb::GameBoy& gb, const gb::AppOptions& options) {
     if (gb.loadRtcFromFile(rtcPath)) {
         std::cout << "rtc carregado: " << rtcPath << "\n";
     }
+    return true;
+}
+
+bool loadGbaGame(gb::gba::System& system, const gb::AppOptions& options) {
+    if (!system.loadRomFromFile(options.romPath)) {
+        std::cerr << "falha ao carregar ROM GBA: " << options.romPath << "\n";
+        return false;
+    }
+
+    const auto& meta = system.metadata();
+    const std::string fallbackTitle = std::filesystem::path(options.romPath).filename().string();
+    std::cout << "ROM GBA carregada: " << (meta.title.empty() ? fallbackTitle : meta.title) << "\n";
+    if (!meta.gameCode.empty()) {
+        std::cout << "game code: " << meta.gameCode << "\n";
+    }
+    if (!meta.makerCode.empty()) {
+        std::cout << "maker code: " << meta.makerCode << "\n";
+    }
+    std::cout << "header: logo=" << (meta.validNintendoLogo ? "ok" : "invalida")
+              << " fixed=" << (meta.validFixedByte ? "ok" : "invalido")
+              << " checksum=" << (meta.validHeaderChecksum ? "ok" : "invalido") << "\n";
     return true;
 }
 
@@ -154,7 +212,13 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    ResolvedTargetSystem resolvedTargetSystem = resolveTargetSystem(options);
+
     if (!options.romSuiteManifest.empty()) {
+        if (resolvedTargetSystem == ResolvedTargetSystem::Gba) {
+            std::cerr << "--rom-suite suporta apenas ROMs de Game Boy (fluxo GBA ainda experimental)\n";
+            return 1;
+        }
         return gb::runRomCompatibilitySuite(options.romSuiteManifest);
     }
 
@@ -162,7 +226,7 @@ int main(int argc, char** argv) {
     (void)options.chooseRom;
 #endif
 
-    if (options.romPath.empty()) {
+    if (options.romPath.empty() && resolvedTargetSystem == ResolvedTargetSystem::Gb) {
 #ifdef GBEMU_USE_SDL2
         options.chooseRom = true;
         options.headless = false;
@@ -170,7 +234,7 @@ int main(int argc, char** argv) {
     }
 
 #ifdef GBEMU_USE_SDL2
-    if (options.chooseRom && !openRomSelector(options)) {
+    if (options.chooseRom && resolvedTargetSystem == ResolvedTargetSystem::Gb && !openRomSelector(options)) {
         return 1;
     }
 #endif
@@ -181,8 +245,41 @@ int main(int argc, char** argv) {
         std::cerr << "use: gbemu --rom <rom.gb>\n";
         std::cerr << "ou compile com SDL2 para usar seletor grafico.\n";
 #endif
+        if (resolvedTargetSystem == ResolvedTargetSystem::Gba) {
+            std::cerr << "para GBA use: gbemu --system gba --rom <jogo.gba>\n";
+        }
         std::cerr << "audio: --audio-buffer 1024 (256..8192)\n";
         return 1;
+    }
+
+    resolvedTargetSystem = resolveTargetSystem(options);
+
+    if (resolvedTargetSystem == ResolvedTargetSystem::Gba) {
+        if (options.hardwareMode != gb::HardwareModePreference::Auto) {
+            std::cerr << "aviso: --hardware so se aplica ao modo GB, ignorando para GBA\n";
+        }
+
+        gb::gba::System gbaSystem;
+        if (!loadGbaGame(gbaSystem, options)) {
+            return 1;
+        }
+
+#ifdef GBEMU_USE_SDL2
+        if (!options.headless) {
+            return gb::runGbaRealtime(gbaSystem, options.scale);
+        }
+#else
+        if (!options.headless) {
+            std::cout << "SDL2 nao detectado no build. Executando GBA em modo headless.\n";
+        }
+#endif
+
+        const int frames = std::max(1, options.frames);
+        for (int i = 0; i < frames; ++i) {
+            gbaSystem.runFrame();
+        }
+        std::cout << "execucao headless GBA finalizada (" << frames << " frames)\n";
+        return 0;
     }
 
 #ifdef GBEMU_USE_SDL2
