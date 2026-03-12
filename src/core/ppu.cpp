@@ -24,6 +24,7 @@ void PPU::tick(
         ly_ = 0;
         mode_ = 0;
         modeClock_ = 0;
+        hblankEntered_ = false;
         return;
     }
 
@@ -41,6 +42,7 @@ void PPU::tick(
             modeClock_ -= TransferCycles;
             renderScanline(vramBank0, vramBank1, oam, cgbMode, bgPalette, objPalette);
             mode_ = 0;
+            hblankEntered_ = true;
         }
         break;
     case 0:
@@ -149,6 +151,14 @@ bool PPU::consumeLcdInterrupt() {
     return true;
 }
 
+bool PPU::consumeHBlankEntered() {
+    if (!hblankEntered_) {
+        return false;
+    }
+    hblankEntered_ = false;
+    return true;
+}
+
 const std::array<u8, PPU::ScreenWidth * PPU::ScreenHeight>& PPU::framebuffer() const {
     return framebuffer_;
 }
@@ -196,6 +206,7 @@ void PPU::loadState(const State& s) {
     dma_ = s.dma;
     vblankInterruptRequested_ = s.vblankInterruptRequested;
     lcdInterruptRequested_ = s.lcdInterruptRequested;
+    hblankEntered_ = false;
     framebuffer_ = s.framebuffer;
     for (std::size_t i = 0; i < framebuffer_.size(); ++i) {
         const u8 shade = framebuffer_[i] & 0x03;

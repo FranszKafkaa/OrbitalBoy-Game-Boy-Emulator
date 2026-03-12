@@ -44,6 +44,10 @@ Se nenhuma ROM for passada, abre o seletor grafico SDL automaticamente.
 ./build/gbemu --rom caminho/para/jogo.gb
 # ou
 ./build/gbemu caminho/para/jogo.gb
+
+# selecionar hardware para ROM dual-mode
+./build/gbemu --rom caminho/para/jogo.gb --hardware dmg
+./build/gbemu --rom caminho/para/jogo.gb --hardware cgb
 ```
 
 ### Seletor de ROM explicitamente
@@ -65,6 +69,17 @@ Gera `frame.ppm` ao final da execucao.
 ```bash
 ./build/gbemu --rom-suite roms/tests/manifest.txt
 ```
+
+### Selecao de hardware (DMG/CGB)
+
+- `--hardware auto` (padrao): usa CGB quando a ROM suporta
+- `--hardware dmg`: forca modo Game Boy classico em ROM dual-mode
+- `--hardware cgb`: forca modo Game Boy Color quando a ROM suporta
+
+Regras:
+
+- ROM CGB-only ignora `--hardware dmg`
+- ROM sem suporte CGB ignora `--hardware cgb`
 
 ## Estrutura esperada de ROMs (seletor SDL)
 

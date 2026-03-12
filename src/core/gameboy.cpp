@@ -10,9 +10,17 @@ bool GameBoy::loadRom(const std::string& path) {
     if (!cartridge_.loadFromFile(path)) {
         return false;
     }
-    bus_.syncCartridgeMode();
-    cpu_.setHardwareMode(cartridge_.shouldRunInCgbMode());
+    setHardwareMode(cartridge_.shouldRunInCgbMode());
     return true;
+}
+
+void GameBoy::setHardwareMode(bool cgbMode) {
+    bus_.setHardwareMode(cgbMode);
+    cpu_.setHardwareMode(cgbMode);
+}
+
+bool GameBoy::runningInCgbMode() const {
+    return bus_.cgbMode();
 }
 
 bool GameBoy::loadBootRomFromFile(const std::string& path) {

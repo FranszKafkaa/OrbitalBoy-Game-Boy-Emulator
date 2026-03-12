@@ -40,6 +40,7 @@ void APU::tick(u32 cycles) {
         clockSquare(ch1_);
         clockSquare(ch2_);
         clockWave();
+        clockNoise();
 
         ++frameSeqCycles_;
         if (frameSeqCycles_ >= FrameSequencerPeriod) {
@@ -56,6 +57,7 @@ void APU::tick(u32 cycles) {
         const float s1 = static_cast<float>(sampleSquare(ch1_)) / 15.0f;
         const float s2 = static_cast<float>(sampleSquare(ch2_)) / 15.0f;
         const float s3 = static_cast<float>(sampleWave()) / 15.0f;
+        const float s4 = static_cast<float>(sampleNoise()) / 15.0f;
 
         float left = 0.0f;
         float right = 0.0f;
@@ -75,6 +77,10 @@ void APU::tick(u32 cycles) {
             left += s3;
             ++leftCount;
         }
+        if (nr51_ & 0x80) {
+            left += s4;
+            ++leftCount;
+        }
         if (nr51_ & 0x01) {
             right += s1;
             ++rightCount;
@@ -85,6 +91,10 @@ void APU::tick(u32 cycles) {
         }
         if (nr51_ & 0x04) {
             right += s3;
+            ++rightCount;
+        }
+        if (nr51_ & 0x08) {
+            right += s4;
             ++rightCount;
         }
 
@@ -135,6 +145,10 @@ u8 APU::read(u16 address) const {
     case 0xFF1C: return static_cast<u8>(ch3_.nr32 | 0x9F);
     case 0xFF1D: return 0xFF;
     case 0xFF1E: return static_cast<u8>(ch3_.nr34 | 0xBF);
+    case 0xFF20: return 0xFF;
+    case 0xFF21: return ch4_.nr42;
+    case 0xFF22: return ch4_.nr43;
+    case 0xFF23: return static_cast<u8>(ch4_.nr44 | 0xBF);
 
     case 0xFF24: return nr50_;
     case 0xFF25: return nr51_;
@@ -143,6 +157,7 @@ u8 APU::read(u16 address) const {
         if (ch1_.enabled) status |= 0x01;
         if (ch2_.enabled) status |= 0x02;
         if (ch3_.enabled) status |= 0x04;
+        if (ch4_.enabled) status |= 0x08;
         return status;
     }
 
@@ -246,6 +261,27 @@ void APU::write(u16 address, u8 value) {
             triggerWave();
         }
         break;
+    case 0xFF20:
+        ch4_.nr41 = value;
+        ch4_.lengthCounter = static_cast<u8>(64 - (value & 0x3F));
+        break;
+    case 0xFF21:
+        ch4_.nr42 = value;
+        ch4_.dacEnabled = (value & 0xF8) != 0;
+        if (!ch4_.dacEnabled) {
+            ch4_.enabled = false;
+        }
+        break;
+    case 0xFF22:
+        ch4_.nr43 = value;
+        break;
+    case 0xFF23:
+        ch4_.nr44 = value;
+        ch4_.lengthEnabled = (value & 0x40) != 0;
+        if (value & 0x80) {
+            triggerNoise();
+        }
+        break;
 
     case 0xFF24: nr50_ = value; break;
     case 0xFF25: nr51_ = value; break;
@@ -282,6 +318,12 @@ APU::State APU::state() const {
         ch3_.nr30, ch3_.nr31, ch3_.nr32, ch3_.nr33, ch3_.nr34,
         ch3_.enabled, ch3_.dacEnabled, ch3_.waveStep, ch3_.timerCycles,
         ch3_.lengthCounter, ch3_.lengthEnabled,
+    };
+    s.ch4 = NoiseChannelState{
+        ch4_.nr41, ch4_.nr42, ch4_.nr43, ch4_.nr44,
+        ch4_.enabled, ch4_.dacEnabled, ch4_.lfsr, ch4_.timerCycles,
+        ch4_.lengthCounter, ch4_.lengthEnabled, ch4_.currentVolume,
+        ch4_.envelopePeriod, ch4_.envelopeTimer, ch4_.envelopeIncrease,
     };
     s.nr10 = nr10_;
     s.sweepEnabled = sweepEnabled_;
@@ -347,6 +389,24 @@ void APU::loadState(const State& s) {
     ch3_.lengthCounter = s.ch3.lengthCounter;
     ch3_.lengthEnabled = s.ch3.lengthEnabled;
 
+    ch4_.nr41 = s.ch4.nr41;
+    ch4_.nr42 = s.ch4.nr42;
+    ch4_.nr43 = s.ch4.nr43;
+    ch4_.nr44 = s.ch4.nr44;
+    ch4_.enabled = s.ch4.enabled;
+    ch4_.dacEnabled = s.ch4.dacEnabled;
+    ch4_.lfsr = s.ch4.lfsr;
+    if (ch4_.lfsr == 0) {
+        ch4_.lfsr = 0x7FFF;
+    }
+    ch4_.timerCycles = s.ch4.timerCycles;
+    ch4_.lengthCounter = s.ch4.lengthCounter;
+    ch4_.lengthEnabled = s.ch4.lengthEnabled;
+    ch4_.currentVolume = s.ch4.currentVolume;
+    ch4_.envelopePeriod = s.ch4.envelopePeriod;
+    ch4_.envelopeTimer = s.ch4.envelopeTimer;
+    ch4_.envelopeIncrease = s.ch4.envelopeIncrease;
+
     nr10_ = s.nr10;
     sweepEnabled_ = s.sweepEnabled;
     sweepPeriod_ = s.sweepPeriod;
@@ -398,6 +458,19 @@ void APU::triggerWave() {
     }
     ch3_.waveStep = 0;
     ch3_.timerCycles = 0;
+}
+
+void APU::triggerNoise() {
+    ch4_.enabled = ch4_.dacEnabled;
+    if (ch4_.lengthCounter == 0) {
+        ch4_.lengthCounter = 64;
+    }
+    ch4_.timerCycles = 0;
+    ch4_.lfsr = 0x7FFF;
+    ch4_.currentVolume = static_cast<u8>((ch4_.nr42 >> 4) & 0x0F);
+    ch4_.envelopeIncrease = (ch4_.nr42 & 0x08) != 0;
+    ch4_.envelopePeriod = static_cast<u8>(ch4_.nr42 & 0x07);
+    ch4_.envelopeTimer = envPeriodOr8(ch4_.envelopePeriod);
 }
 
 void APU::clockSquare(SquareChannel& ch) {
@@ -471,6 +544,40 @@ int APU::sampleWave() const {
     return sample;
 }
 
+void APU::clockNoise() {
+    if (!ch4_.enabled || !ch4_.dacEnabled) {
+        return;
+    }
+
+    const u8 divisorCode = static_cast<u8>(ch4_.nr43 & 0x07);
+    const u8 clockShift = static_cast<u8>((ch4_.nr43 >> 4) & 0x0F);
+    const u32 divisor = divisorCode == 0 ? 8u : static_cast<u32>(divisorCode) * 16u;
+    const u32 period = divisor << clockShift;
+    if (period == 0) {
+        return;
+    }
+
+    ++ch4_.timerCycles;
+    if (ch4_.timerCycles < period) {
+        return;
+    }
+    ch4_.timerCycles = 0;
+
+    const u16 xorBit = static_cast<u16>((ch4_.lfsr & 0x01) ^ ((ch4_.lfsr >> 1) & 0x01));
+    ch4_.lfsr = static_cast<u16>((ch4_.lfsr >> 1) | (xorBit << 14));
+    if (ch4_.nr43 & 0x08) {
+        ch4_.lfsr = static_cast<u16>((ch4_.lfsr & ~(1u << 6)) | (xorBit << 6));
+    }
+}
+
+int APU::sampleNoise() const {
+    if (!ch4_.enabled || !ch4_.dacEnabled || ch4_.currentVolume == 0) {
+        return 0;
+    }
+    const int wave = (ch4_.lfsr & 0x01) == 0 ? 1 : -1;
+    return wave * static_cast<int>(ch4_.currentVolume);
+}
+
 void APU::frameSequencerStep() {
     frameSeqStep_ = static_cast<u8>((frameSeqStep_ + 1) & 0x07);
 
@@ -506,6 +613,12 @@ void APU::clockLength() {
             ch3_.enabled = false;
         }
     }
+    if (ch4_.lengthEnabled && ch4_.lengthCounter > 0) {
+        --ch4_.lengthCounter;
+        if (ch4_.lengthCounter == 0) {
+            ch4_.enabled = false;
+        }
+    }
 }
 
 void APU::clockEnvelope() {
@@ -531,6 +644,28 @@ void APU::clockEnvelope() {
             if (ch->currentVolume > 0) {
                 --ch->currentVolume;
             }
+        }
+    }
+
+    if (!ch4_.enabled || ch4_.envelopePeriod == 0) {
+        return;
+    }
+
+    if (ch4_.envelopeTimer > 0) {
+        --ch4_.envelopeTimer;
+    }
+    if (ch4_.envelopeTimer != 0) {
+        return;
+    }
+
+    ch4_.envelopeTimer = envPeriodOr8(ch4_.envelopePeriod);
+    if (ch4_.envelopeIncrease) {
+        if (ch4_.currentVolume < 15) {
+            ++ch4_.currentVolume;
+        }
+    } else {
+        if (ch4_.currentVolume > 0) {
+            --ch4_.currentVolume;
         }
     }
 }
@@ -594,6 +729,7 @@ void APU::resetAll() {
     ch1_ = {};
     ch2_ = {};
     ch3_ = {};
+    ch4_ = {};
 
     nr10_ = 0x80;
     nr50_ = 0;

@@ -4,6 +4,12 @@
 
 namespace gb {
 
+enum class HardwareModePreference {
+    Auto,
+    Dmg,
+    Cgb,
+};
+
 struct AppOptions {
     std::string romPath;
     std::string romSuiteManifest;
@@ -13,6 +19,7 @@ struct AppOptions {
     bool headless = false;
     bool chooseRom = false;
     bool preciseTiming = false;
+    HardwareModePreference hardwareMode = HardwareModePreference::Auto;
     int linkHostPort = 0;
     int netplayHostPort = 0;
     int frames = 120;

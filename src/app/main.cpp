@@ -33,11 +33,32 @@ bool loadGame(gb::GameBoy& gb, const gb::AppOptions& options) {
         return false;
     }
 
+    bool runInCgb = gb.cartridge().shouldRunInCgbMode();
+    if (options.hardwareMode == gb::HardwareModePreference::Dmg) {
+        if (gb.cartridge().cgbOnly()) {
+            std::cerr << "aviso: ROM exige CGB; ignorando --hardware dmg\n";
+            runInCgb = true;
+        } else {
+            runInCgb = false;
+        }
+    } else if (options.hardwareMode == gb::HardwareModePreference::Cgb) {
+        if (!gb.cartridge().cgbSupported()) {
+            std::cerr << "aviso: ROM sem suporte CGB; usando DMG\n";
+            runInCgb = false;
+        } else {
+            runInCgb = true;
+        }
+    }
+    gb.setHardwareMode(runInCgb);
+
     std::cout << "ROM carregada: " << gb.cartridge().title() << "\n";
-    if (gb.cartridge().shouldRunInCgbMode()) {
-        std::cout << "modo CGB: suporte inicial experimental ativado\n";
-    } else if (gb.cartridge().cgbSupported()) {
-        std::cout << "modo DMG: ROM compativel com CGB detectada (.gb)\n";
+    if (gb.runningInCgbMode()) {
+        std::cout << "hardware emulado: CGB\n";
+    } else {
+        std::cout << "hardware emulado: DMG\n";
+    }
+    if (gb.cartridge().cgbSupported() && !gb.cartridge().cgbOnly()) {
+        std::cout << "ROM dual-mode detectada (DMG/CGB)\n";
     }
 
     const std::string batteryPath = gb::batteryRamPathForRom(options.romPath);

@@ -61,6 +61,8 @@ public:
 
     explicit Bus(Cartridge& cartridge);
     void syncCartridgeMode();
+    void setHardwareMode(bool cgbMode);
+    [[nodiscard]] bool cgbMode() const;
 
     u8 read(u16 address);
     u8 peek(u16 address) const;
@@ -96,6 +98,7 @@ private:
     void logWrite(u16 address, u8 value);
     void doOamDma(u8 page);
     void doHdmaTransfer(u16 lengthBytes);
+    void tickHdmaHBlank();
     [[nodiscard]] u8 wramBankValue() const;
     [[nodiscard]] u8 readWramMapped(u16 address) const;
     void writeWramMapped(u16 address, u8 value);

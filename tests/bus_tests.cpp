@@ -207,6 +207,26 @@ TEST_CASE("bus", "cgb_registers_hidden_in_dmg_mode") {
     T_EQ(gb.bus().read(0x8000), 0x55);
 }
 
+TEST_CASE("bus", "hardware_mode_can_toggle_between_dmg_and_cgb_for_dual_rom") {
+    gb::GameBoy gb;
+    tests::ScopedPath cleanup;
+    loadBlankRom(gb, cleanup, true);
+
+    T_REQUIRE(gb.runningInCgbMode());
+    T_EQ(gb.cpu().regs().a, 0x11);
+    T_EQ(gb.bus().read(0xFF4F), static_cast<gb::u8>(0xFE));
+
+    gb.setHardwareMode(false);
+    T_REQUIRE(!gb.runningInCgbMode());
+    T_EQ(gb.cpu().regs().a, 0x01);
+    T_EQ(gb.bus().read(0xFF4F), 0xFF);
+
+    gb.setHardwareMode(true);
+    T_REQUIRE(gb.runningInCgbMode());
+    T_EQ(gb.cpu().regs().a, 0x11);
+    T_EQ(gb.bus().read(0xFF4F), static_cast<gb::u8>(0xFE));
+}
+
 TEST_CASE("bus", "cgb_vram_bank_switching") {
     gb::GameBoy gb;
     tests::ScopedPath cleanup;
@@ -364,6 +384,74 @@ TEST_CASE("bus", "cgb_hdma_general_transfer_copies_to_vram") {
 
     for (int i = 0; i < 0x10; ++i) {
         T_EQ(gb.bus().read(static_cast<gb::u16>(0x8000 + i)), static_cast<gb::u8>(0x80 + i));
+    }
+    T_EQ(gb.bus().read(0xFF55), 0xFF);
+}
+
+TEST_CASE("bus", "cgb_hdma_hblank_transfers_one_block_per_hblank") {
+    gb::GameBoy gb;
+    tests::ScopedPath cleanup;
+    loadBlankRom(gb, cleanup, true);
+
+    for (int i = 0; i < 0x20; ++i) {
+        gb.bus().write(static_cast<gb::u16>(0xC000 + i), static_cast<gb::u8>(0xA0 + i));
+        gb.bus().write(static_cast<gb::u16>(0x8000 + i), 0x00);
+    }
+
+    gb.bus().write(0xFF51, 0xC0);
+    gb.bus().write(0xFF52, 0x00);
+    gb.bus().write(0xFF53, 0x00);
+    gb.bus().write(0xFF54, 0x00);
+    gb.bus().write(0xFF55, 0x81); // H-Blank DMA com 2 blocos
+
+    gb.bus().tick(80);
+    gb.bus().tick(172); // entra em H-Blank (1 bloco)
+
+    for (int i = 0; i < 0x10; ++i) {
+        T_EQ(gb.bus().read(static_cast<gb::u16>(0x8000 + i)), static_cast<gb::u8>(0xA0 + i));
+    }
+    T_EQ(gb.bus().read(0x8010), 0x00);
+    T_EQ(gb.bus().read(0xFF55), 0x00);
+
+    gb.bus().tick(204);
+    gb.bus().tick(80);
+    gb.bus().tick(172); // entra em H-Blank (2o bloco)
+
+    for (int i = 0; i < 0x20; ++i) {
+        T_EQ(gb.bus().read(static_cast<gb::u16>(0x8000 + i)), static_cast<gb::u8>(0xA0 + i));
+    }
+    T_EQ(gb.bus().read(0xFF55), 0xFF);
+}
+
+TEST_CASE("bus", "cgb_hdma_hblank_can_be_stopped") {
+    gb::GameBoy gb;
+    tests::ScopedPath cleanup;
+    loadBlankRom(gb, cleanup, true);
+
+    for (int i = 0; i < 0x20; ++i) {
+        gb.bus().write(static_cast<gb::u16>(0xC000 + i), static_cast<gb::u8>(0x50 + i));
+        gb.bus().write(static_cast<gb::u16>(0x8000 + i), 0x00);
+    }
+
+    gb.bus().write(0xFF51, 0xC0);
+    gb.bus().write(0xFF52, 0x00);
+    gb.bus().write(0xFF53, 0x00);
+    gb.bus().write(0xFF54, 0x00);
+    gb.bus().write(0xFF55, 0x81);
+
+    gb.bus().tick(80);
+    gb.bus().tick(172); // 1o bloco
+    gb.bus().write(0xFF55, 0x00); // para transferencia H-Blank ativa
+
+    gb.bus().tick(204);
+    gb.bus().tick(80);
+    gb.bus().tick(172); // nao deve transferir 2o bloco
+
+    for (int i = 0; i < 0x10; ++i) {
+        T_EQ(gb.bus().read(static_cast<gb::u16>(0x8000 + i)), static_cast<gb::u8>(0x50 + i));
+    }
+    for (int i = 0; i < 0x10; ++i) {
+        T_EQ(gb.bus().read(static_cast<gb::u16>(0x8010 + i)), 0x00);
     }
     T_EQ(gb.bus().read(0xFF55), 0xFF);
 }

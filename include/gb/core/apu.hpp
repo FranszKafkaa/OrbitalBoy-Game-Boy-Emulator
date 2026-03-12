@@ -41,10 +41,27 @@ public:
         u16 lengthCounter = 0;
         bool lengthEnabled = false;
     };
+    struct NoiseChannelState {
+        u8 nr41 = 0;
+        u8 nr42 = 0;
+        u8 nr43 = 0;
+        u8 nr44 = 0;
+        bool enabled = false;
+        bool dacEnabled = false;
+        u16 lfsr = 0x7FFF;
+        u32 timerCycles = 0;
+        u8 lengthCounter = 0;
+        bool lengthEnabled = false;
+        u8 currentVolume = 0;
+        u8 envelopePeriod = 0;
+        u8 envelopeTimer = 0;
+        bool envelopeIncrease = false;
+    };
     struct State {
         SquareChannelState ch1{};
         SquareChannelState ch2{};
         WaveChannelState ch3{};
+        NoiseChannelState ch4{};
         u8 nr10 = 0x80;
         bool sweepEnabled = false;
         u8 sweepPeriod = 0;
@@ -112,6 +129,26 @@ private:
         u16 lengthCounter = 0;
         bool lengthEnabled = false;
     };
+    struct NoiseChannel {
+        u8 nr41 = 0;
+        u8 nr42 = 0;
+        u8 nr43 = 0;
+        u8 nr44 = 0;
+
+        bool enabled = false;
+        bool dacEnabled = false;
+
+        u16 lfsr = 0x7FFF;
+        u32 timerCycles = 0;
+
+        u8 lengthCounter = 0;
+        bool lengthEnabled = false;
+
+        u8 currentVolume = 0;
+        u8 envelopePeriod = 0;
+        u8 envelopeTimer = 0;
+        bool envelopeIncrease = false;
+    };
 
     [[nodiscard]] bool masterEnabled() const;
 
@@ -120,12 +157,15 @@ private:
 
     void triggerSquare(SquareChannel& ch, bool withSweep);
     void triggerWave();
+    void triggerNoise();
 
     void clockSquare(SquareChannel& ch);
     int sampleSquare(const SquareChannel& ch) const;
 
     void clockWave();
     int sampleWave() const;
+    void clockNoise();
+    int sampleNoise() const;
 
     void frameSequencerStep();
     void clockLength();
@@ -141,6 +181,7 @@ private:
     SquareChannel ch1_{};
     SquareChannel ch2_{};
     WaveChannel ch3_{};
+    NoiseChannel ch4_{};
 
     u8 nr10_ = 0x80;
 

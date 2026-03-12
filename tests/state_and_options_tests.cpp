@@ -256,6 +256,7 @@ TEST_CASE("options", "defaults_when_no_args") {
     T_REQUIRE(!options.headless);
     T_REQUIRE(!options.chooseRom);
     T_REQUIRE(!options.preciseTiming);
+    T_EQ(static_cast<int>(options.hardwareMode), static_cast<int>(gb::HardwareModePreference::Auto));
     T_EQ(options.bootRomPath, std::string(""));
     T_EQ(options.linkConnect, std::string(""));
     T_EQ(options.netplayConnect, std::string(""));
@@ -390,6 +391,28 @@ TEST_CASE("options", "boot_rom_precise_and_link_flags_parse") {
     T_REQUIRE(options.preciseTiming);
     T_EQ(options.linkHostPort, 6000);
     T_EQ(options.linkConnect, std::string("127.0.0.1:6001"));
+}
+
+TEST_CASE("options", "hardware_mode_flag_parse") {
+    gb::AppOptions options;
+    std::string error;
+
+    T_REQUIRE(parseArgs({"gbemu", "--hardware", "dmg"}, options, error));
+    T_EQ(static_cast<int>(options.hardwareMode), static_cast<int>(gb::HardwareModePreference::Dmg));
+
+    T_REQUIRE(parseArgs({"gbemu", "--hardware", "cgb"}, options, error));
+    T_EQ(static_cast<int>(options.hardwareMode), static_cast<int>(gb::HardwareModePreference::Cgb));
+
+    T_REQUIRE(parseArgs({"gbemu", "--hardware", "auto"}, options, error));
+    T_EQ(static_cast<int>(options.hardwareMode), static_cast<int>(gb::HardwareModePreference::Auto));
+}
+
+TEST_CASE("options", "hardware_mode_invalid_value_returns_false") {
+    gb::AppOptions options;
+    std::string error;
+
+    T_REQUIRE(!parseArgs({"gbemu", "--hardware", "abc"}, options, error));
+    T_REQUIRE(error.find("valor invalido para --hardware") != std::string::npos);
 }
 
 TEST_CASE("options", "netplay_flags_parse") {

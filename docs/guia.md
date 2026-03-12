@@ -1,6 +1,6 @@
 # Guia Completo do Projeto GBEMU (explicado para leigos)
 
-Atualizado em 2026-03-11.
+Atualizado em 2026-03-12.
 
 Este documento foi escrito para voce entender o projeto inteiro com calma, incluindo:
 
@@ -11,7 +11,7 @@ Este documento foi escrito para voce entender o projeto inteiro com calma, inclu
 - como o modo debug funciona por dentro
 - como a arquitetura multithread foi montada
 
-## Nota de manutencao (2026-03-11)
+## Nota de manutencao (2026-03-12)
 
 Foi aplicada uma correcao de compilacao em `src/core/gameboy.cpp` no metodo `loadBootRomFromFile`.
 
@@ -28,6 +28,10 @@ Detalhe tecnico:
 - itens da barra ficaram dinamicos por disponibilidade e com highlight de hover no mouse
 - menus pop-up agora tem botao `X` clicavel para fechar (`Escala`, `Paleta`, `Controles`)
 - controles agora persistem automatico entre sessoes com perfil por ROM + fallback global
+- APU ganhou canal 4 (noise): registradores `FF20..FF23`, LFSR, envelope e roteamento em `NR51`
+- HDMA CGB no `FF55` foi ajustado: modo geral continua imediato, modo H-Blank agora transfere 16 bytes por H-Blank
+- linha de comando ganhou `--hardware auto|dmg|cgb` para ROM dual-mode
+- `GameBoy` agora permite alternar o hardware emulado (DMG/CGB) em tempo de carga da ROM
 
 Impacto:
 
@@ -40,6 +44,9 @@ Impacto:
 - reduz ambiguidade visual com feedback imediato de hover em secoes/itens
 - melhora fechamento de overlays sem depender so de teclado
 - evita perder remapeamento de controles ao fechar e abrir o emulador
+- melhora fidelidade de audio em jogos que usam ruido/percussao (canal 4)
+- melhora compatibilidade CGB em jogos que dependem de HDMA por H-Blank
+- permite testar ROM dual-mode em DMG real sem precisar trocar de build
 
 ## 0. Como ler este guia
 
@@ -118,7 +125,7 @@ Ordem:
 
 1. `gb.loadRom(romPath)`.
 2. Loga titulo da ROM.
-3. Informa modo CGB/DMG detectado.
+3. Resolve o hardware emulado (auto/DMG/CGB) e aplica no `GameBoy`.
 4. Tenta carregar save interno (`.sav`).
 5. Tenta carregar RTC (`.rtc`) quando aplicavel.
 
@@ -149,6 +156,7 @@ Opcoes:
 - `--rom-suite <manifesto>`: executa suite de compatibilidade.
 - `--scale <n>`: escala base da janela no modo janela.
 - `--audio-buffer <256..8192>`: buffer solicitado para SDL audio.
+- `--hardware <auto|dmg|cgb>`: seleciona o hardware emulado para ROM dual-mode.
 
 Tambem aceita ROM como argumento posicional:
 
@@ -763,6 +771,7 @@ Papel:
 - roteamento de leitura/escrita por endereco
 - integracao com PPU/APU/Timer/Joypad/Cartridge
 - eventos de leitura para debug
+- controle de recursos CGB (VRAM bank, WRAM bank, HDMA, serial)
 
 ## 16.3 `CPU`
 
@@ -799,6 +808,8 @@ Arquivos:
 Papel:
 
 - gera samples de audio da emulacao
+- inclui CH1, CH2, CH3 e CH4 (noise)
+- CH4 usa LFSR para ruido e envelope de volume
 
 ## 16.6 `Timer` e `Joypad`
 
@@ -857,6 +868,13 @@ Comportamento atual:
 - se ROM suporta CGB, existe modo de paleta colorida
 - se nao suporta, usuario joga com paletas mono (Classic/Pocket)
 - mudanca de paleta e em tempo real via menu `V`
+- modo de hardware pode ser escolhido via CLI em ROM dual-mode (`--hardware`)
+  - `auto`: preferencia CGB quando disponivel
+  - `dmg`: forca comportamento de hardware DMG
+  - `cgb`: forca comportamento CGB quando suportado
+- HDMA (`FF55`) em CGB:
+  - bit7=0: transferencia geral imediata
+  - bit7=1: transferencia por H-Blank (16 bytes por entrada em H-Blank)
 
 Observacao:
 

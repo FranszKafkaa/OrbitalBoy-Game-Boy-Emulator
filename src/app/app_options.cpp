@@ -1,5 +1,7 @@
 #include "gb/app/app_options.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <exception>
 
 namespace gb {
@@ -18,6 +20,13 @@ bool parseIntValue(const std::string& text, int& out) {
     } catch (const std::exception&) {
         return false;
     }
+}
+
+std::string toLowerAscii(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return text;
 }
 
 bool readIntArg(
@@ -89,6 +98,24 @@ bool parseAppOptions(int argc, char** argv, AppOptions& outOptions, std::string&
         }
         if (arg == "--precise-timing") {
             options.preciseTiming = true;
+            continue;
+        }
+        if (arg == "--hardware") {
+            std::string mode;
+            if (!readStringArg(argc, argv, i, arg, mode, errorMessage)) {
+                return false;
+            }
+            mode = toLowerAscii(mode);
+            if (mode == "auto") {
+                options.hardwareMode = HardwareModePreference::Auto;
+            } else if (mode == "dmg") {
+                options.hardwareMode = HardwareModePreference::Dmg;
+            } else if (mode == "cgb") {
+                options.hardwareMode = HardwareModePreference::Cgb;
+            } else {
+                errorMessage = "valor invalido para --hardware: " + mode + " (use auto|dmg|cgb)";
+                return false;
+            }
             continue;
         }
         if (arg == "--headless") {

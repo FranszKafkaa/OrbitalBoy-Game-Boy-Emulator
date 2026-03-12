@@ -46,6 +46,7 @@ public:
 
     bool consumeVBlankInterrupt();
     bool consumeLcdInterrupt();
+    bool consumeHBlankEntered();
 
     [[nodiscard]] const std::array<u8, ScreenWidth * ScreenHeight>& framebuffer() const;
     [[nodiscard]] const std::array<u16, ScreenWidth * ScreenHeight>& colorFramebuffer() const;
@@ -82,6 +83,7 @@ private:
 
     bool vblankInterruptRequested_ = false;
     bool lcdInterruptRequested_ = false;
+    bool hblankEntered_ = false;
 
     std::array<u8, ScreenWidth * ScreenHeight> framebuffer_{};
     std::array<u16, ScreenWidth * ScreenHeight> colorFramebuffer_{};

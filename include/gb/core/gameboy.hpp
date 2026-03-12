@@ -17,6 +17,8 @@ public:
     };
 
     bool loadRom(const std::string& path);
+    void setHardwareMode(bool cgbMode);
+    [[nodiscard]] bool runningInCgbMode() const;
     bool loadBootRomFromFile(const std::string& path);
     void clearBootRom();
     void setPreciseTiming(bool enabled);

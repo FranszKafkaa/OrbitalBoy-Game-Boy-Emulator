@@ -68,8 +68,15 @@ Bus::Bus(Cartridge& cartridge)
 }
 
 void Bus::syncCartridgeMode() {
-    cgbMode_ = cartridge_.shouldRunInCgbMode();
+    setHardwareMode(cartridge_.shouldRunInCgbMode());
+}
+
+void Bus::setHardwareMode(bool cgbMode) {
+    cgbMode_ = cgbMode;
     if (cgbMode_) {
+        vbk_ = 0;
+        bgpi_ = 0;
+        obpi_ = 0;
         doubleSpeed_ = false;
         speedSwitchArmed_ = false;
         hdma1_ = 0;
@@ -110,6 +117,10 @@ void Bus::syncCartridgeMode() {
         hdmaActive_ = false;
     }
     bootRomEnabled_ = !bootRom_.empty();
+}
+
+bool Bus::cgbMode() const {
+    return cgbMode_;
 }
 
 u8 Bus::read(u16 address) {
@@ -328,13 +339,16 @@ void Bus::write(u16 address, u8 value) {
         }
         if (hdmaActive_ && (value & 0x80) == 0) {
             hdmaActive_ = false;
-            hdma5_ = static_cast<u8>(value & 0x7F);
+            hdma5_ = 0xFF;
             return;
         }
         hdma5_ = static_cast<u8>(value & 0x7F);
-        hdmaActive_ = (value & 0x80) != 0;
-        doHdmaTransfer(static_cast<u16>((static_cast<u16>(hdma5_) + 1) * 0x10));
+        if (value & 0x80) {
+            hdmaActive_ = true;
+            return;
+        }
         hdmaActive_ = false;
+        doHdmaTransfer(static_cast<u16>((static_cast<u16>(hdma5_) + 1) * 0x10));
         hdma5_ = 0xFF;
         return;
     case CgbBgpi:
@@ -433,6 +447,7 @@ void Bus::writeWramMapped(u16 address, u8 value) {
 void Bus::tick(u32 cycles) {
     timer_.tick(cycles);
     ppu_.tick(cycles, vram_, vramBank1_, oam_, cgbMode_, bgPalette_, objPalette_);
+    tickHdmaHBlank();
     apu_.tick(cycles);
 
     if (timer_.consumeInterrupt()) {
@@ -681,6 +696,26 @@ void Bus::doHdmaTransfer(u16 lengthBytes) {
     hdma2_ = static_cast<u8>(source & 0xF0);
     hdma3_ = static_cast<u8>((dstMasked >> 8) & 0x1F);
     hdma4_ = static_cast<u8>(dstMasked & 0xF0);
+}
+
+void Bus::tickHdmaHBlank() {
+    if (!cgbMode_ || !hdmaActive_) {
+        return;
+    }
+    if ((ppu_.read(0xFF40) & 0x80) == 0) {
+        return;
+    }
+    if (!ppu_.consumeHBlankEntered()) {
+        return;
+    }
+
+    doHdmaTransfer(0x10);
+    if (hdma5_ == 0) {
+        hdmaActive_ = false;
+        hdma5_ = 0xFF;
+        return;
+    }
+    --hdma5_;
 }
 
 } // namespace gb

@@ -313,6 +313,26 @@ TEST_CASE("apu", "trigger_square_generates_samples") {
     T_EQ(samples.size() % 2, static_cast<std::size_t>(0));
 }
 
+TEST_CASE("apu", "trigger_noise_generates_samples") {
+    gb::APU apu;
+
+    apu.write(0xFF26, 0x80);
+    apu.write(0xFF24, 0x77);
+    apu.write(0xFF25, 0x88);
+    apu.write(0xFF21, 0xF3);
+    apu.write(0xFF22, 0x05);
+    apu.write(0xFF23, 0x80);
+
+    const gb::u8 statusBefore = apu.read(0xFF26);
+    T_REQUIRE((statusBefore & 0x08) != 0);
+
+    apu.tick(20000);
+    const auto samples = apu.takeSamples();
+
+    T_REQUIRE(!samples.empty());
+    T_EQ(samples.size() % 2, static_cast<std::size_t>(0));
+}
+
 TEST_CASE("apu", "take_samples_clears_internal_buffer") {
     gb::APU apu;
 
@@ -348,10 +368,15 @@ TEST_CASE("apu", "nr52_reports_enabled_channels") {
     apu.write(0xFF1C, 0x20);
     apu.write(0xFF1E, 0x80);
 
+    apu.write(0xFF21, 0xF3);
+    apu.write(0xFF22, 0x04);
+    apu.write(0xFF23, 0x80);
+
     const gb::u8 status = apu.read(0xFF26);
     T_REQUIRE((status & 0x01) != 0);
     T_REQUIRE((status & 0x02) != 0);
     T_REQUIRE((status & 0x04) != 0);
+    T_REQUIRE((status & 0x08) != 0);
 }
 
 TEST_CASE("apu", "state_roundtrip_preserves_registers_and_wave_ram") {
@@ -362,6 +387,8 @@ TEST_CASE("apu", "state_roundtrip_preserves_registers_and_wave_ram") {
     apu.write(0xFF25, 0x93);
     apu.write(0xFF30, 0x12);
     apu.write(0xFF31, 0x34);
+    apu.write(0xFF21, 0xA2);
+    apu.write(0xFF22, 0x67);
 
     const auto s = apu.state();
 
@@ -372,4 +399,6 @@ TEST_CASE("apu", "state_roundtrip_preserves_registers_and_wave_ram") {
     T_EQ(other.read(0xFF25), 0x93);
     T_EQ(other.read(0xFF30), 0x12);
     T_EQ(other.read(0xFF31), 0x34);
+    T_EQ(other.read(0xFF21), 0xA2);
+    T_EQ(other.read(0xFF22), 0x67);
 }
