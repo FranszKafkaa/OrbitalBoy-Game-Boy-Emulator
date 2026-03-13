@@ -8,6 +8,7 @@
 
 #include "gb/app/frontend/debug_ui.hpp"
 #include "gb/app/frontend/rom_selector.hpp"
+#include "gb/app/runtime_paths.hpp"
 
 #ifdef GBEMU_USE_SDL2
 #include "gb/app/sdl_compat.hpp"
@@ -61,10 +62,10 @@ std::string normalizeLabel(std::string text, std::size_t maxLen) {
 
 std::vector<RomEntry> discoverRoms() {
     std::vector<RomEntry> roms;
-    const std::array<std::filesystem::path, 2> dirs = {
-        std::filesystem::path("./rom"),
-        std::filesystem::path("./roms"),
-    };
+    std::vector<std::filesystem::path> dirs;
+    for (const auto& dirText : gb::romSearchDirectoriesForRuntime()) {
+        dirs.emplace_back(dirText);
+    }
 
     for (const auto& dir : dirs) {
         if (!std::filesystem::exists(dir) || !std::filesystem::is_directory(dir)) {
@@ -93,8 +94,8 @@ std::vector<RomEntry> discoverRoms() {
             }
             RomEntry r;
             r.label = normalizeLabel(entry.path().filename().string(), 18);
-            r.romPath = foundRom->string();
-            r.imagePath = foundImage ? foundImage->string() : std::string();
+            r.romPath = gb::resolveRomPathForRuntime(foundRom->string());
+            r.imagePath = foundImage ? gb::resolveRomPathForRuntime(foundImage->string()) : std::string();
             roms.push_back(std::move(r));
         }
     }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace gb {
 
@@ -17,5 +18,7 @@ std::string filtersPathForRom(const std::string& romPath);
 std::string cheatsPathForRom(const std::string& romPath);
 std::string replayPathForRom(const std::string& romPath);
 std::string captureDirForRom(const std::string& romPath);
+std::vector<std::string> romSearchDirectoriesForRuntime();
+std::string resolveRomPathForRuntime(const std::string& romPath);
 
 } // namespace gb

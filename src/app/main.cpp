@@ -52,6 +52,7 @@ ResolvedTargetSystem resolveTargetSystem(const gb::AppOptions& options) {
 }
 
 bool loadGame(gb::GameBoy& gb, const gb::AppOptions& options) {
+    const std::string resolvedRomPath = gb::resolveRomPathForRuntime(options.romPath);
     if (!options.bootRomPath.empty()) {
         if (!gb.loadBootRomFromFile(options.bootRomPath)) {
             std::cerr << "falha ao carregar boot ROM: " << options.bootRomPath << "\n";
@@ -62,8 +63,8 @@ bool loadGame(gb::GameBoy& gb, const gb::AppOptions& options) {
     }
     gb.setPreciseTiming(options.preciseTiming);
 
-    if (!gb.loadRom(options.romPath)) {
-        std::cerr << "falha ao carregar ROM: " << options.romPath << "\n";
+    if (!gb.loadRom(resolvedRomPath)) {
+        std::cerr << "falha ao carregar ROM: " << resolvedRomPath << "\n";
         return false;
     }
 
@@ -95,11 +96,11 @@ bool loadGame(gb::GameBoy& gb, const gb::AppOptions& options) {
         std::cout << "ROM dual-mode detectada (DMG/CGB)\n";
     }
 
-    const std::string batteryPath = gb::batteryRamPathForRom(options.romPath);
+    const std::string batteryPath = gb::batteryRamPathForRom(resolvedRomPath);
     if (gb.loadBatteryRamFromFile(batteryPath)) {
         std::cout << "save interno carregado: " << batteryPath << "\n";
     }
-    const std::string rtcPath = gb::rtcPathForRom(options.romPath);
+    const std::string rtcPath = gb::rtcPathForRom(resolvedRomPath);
     if (gb.loadRtcFromFile(rtcPath)) {
         std::cout << "rtc carregado: " << rtcPath << "\n";
     }
@@ -107,13 +108,14 @@ bool loadGame(gb::GameBoy& gb, const gb::AppOptions& options) {
 }
 
 bool loadGbaGame(gb::gba::System& system, const gb::AppOptions& options) {
-    if (!system.loadRomFromFile(options.romPath)) {
-        std::cerr << "falha ao carregar ROM GBA: " << options.romPath << "\n";
+    const std::string resolvedRomPath = gb::resolveRomPathForRuntime(options.romPath);
+    if (!system.loadRomFromFile(resolvedRomPath)) {
+        std::cerr << "falha ao carregar ROM GBA: " << resolvedRomPath << "\n";
         return false;
     }
 
     const auto& meta = system.metadata();
-    const std::string fallbackTitle = std::filesystem::path(options.romPath).filename().string();
+    const std::string fallbackTitle = std::filesystem::path(resolvedRomPath).filename().string();
     std::cout << "ROM GBA carregada: " << (meta.title.empty() ? fallbackTitle : meta.title) << "\n";
     if (!meta.gameCode.empty()) {
         std::cout << "game code: " << meta.gameCode << "\n";
@@ -127,7 +129,7 @@ bool loadGbaGame(gb::gba::System& system, const gb::AppOptions& options) {
     std::cout << "perfil de compatibilidade: " << system.compatibilityProfile().name << "\n";
 
     if (system.hasPersistentBackup()) {
-        const std::string batteryPath = gb::batteryRamPathForRom(options.romPath);
+        const std::string batteryPath = gb::batteryRamPathForRom(resolvedRomPath);
         std::cout << "backup detectado: " << system.backupTypeName() << "\n";
         const bool hasFile = std::filesystem::exists(std::filesystem::path(batteryPath));
         if (system.loadBackupFromFile(batteryPath)) {
@@ -264,6 +266,7 @@ int main(int argc, char** argv) {
         std::cerr << "audio: --audio-buffer 1024 (256..8192)\n";
         return 1;
     }
+    options.romPath = gb::resolveRomPathForRuntime(options.romPath);
 
     resolvedTargetSystem = resolveTargetSystem(options);
 
