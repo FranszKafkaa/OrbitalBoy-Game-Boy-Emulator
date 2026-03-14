@@ -278,13 +278,26 @@ void System::runInstructions(int instructionCount) {
         return;
     }
     for (int i = 0; i < instructionCount; ++i) {
-        const int cpuCycles = cpu_.step();
-        if (cpuCycles <= 0) {
+        int totalBusCycles = cpu_.step();
+        if (totalBusCycles <= 0) {
             break;
         }
-        const int busCycles = cpuCycles * 4;
-        memory_.step(busCycles);
-        ppu_.step(busCycles);
+        memory_.step(totalBusCycles);
+        for (int extra = memory_.consumeDeferredBusCycles(); extra > 0; extra = memory_.consumeDeferredBusCycles()) {
+            totalBusCycles += extra;
+            memory_.step(extra);
+        }
+        ppu_.step(totalBusCycles);
+        int ignoredAccumulatedCycles = 0;
+        drainDeferredBusCycles(ignoredAccumulatedCycles);
+    }
+}
+
+void System::drainDeferredBusCycles(int& accumulatedBusCycles) {
+    for (int extra = memory_.consumeDeferredBusCycles(); extra > 0; extra = memory_.consumeDeferredBusCycles()) {
+        accumulatedBusCycles += extra;
+        memory_.step(extra);
+        ppu_.step(extra);
     }
 }
 
@@ -298,14 +311,19 @@ void System::runUntilFrameBoundary(int targetBusCycles, int instructionLimit) {
     int instructions = 0;
     while (instructions < instructionLimit) {
         const std::uint16_t previousLine = ppu_.scanline();
-        const int cpuCycles = cpu_.step();
-        if (cpuCycles <= 0) {
+        int totalBusCycles = cpu_.step();
+        if (totalBusCycles <= 0) {
             break;
         }
-        const int busCycles = cpuCycles * 4;
-        accumulatedBusCycles += busCycles;
-        memory_.step(busCycles);
-        ppu_.step(busCycles);
+        accumulatedBusCycles += totalBusCycles;
+        memory_.step(totalBusCycles);
+        for (int extra = memory_.consumeDeferredBusCycles(); extra > 0; extra = memory_.consumeDeferredBusCycles()) {
+            accumulatedBusCycles += extra;
+            totalBusCycles += extra;
+            memory_.step(extra);
+        }
+        ppu_.step(totalBusCycles);
+        drainDeferredBusCycles(accumulatedBusCycles);
         ++instructions;
 
         const std::uint16_t currentLine = ppu_.scanline();
@@ -322,13 +340,18 @@ void System::runUntilFrameBoundary(int targetBusCycles, int instructionLimit) {
     constexpr int kRecoveryInstructionLimit = 20000;
     for (int i = 0; i < kRecoveryInstructionLimit; ++i) {
         const std::uint16_t previousLine = ppu_.scanline();
-        const int cpuCycles = cpu_.step();
-        if (cpuCycles <= 0) {
+        int totalBusCycles = cpu_.step();
+        if (totalBusCycles <= 0) {
             break;
         }
-        const int busCycles = cpuCycles * 4;
-        memory_.step(busCycles);
-        ppu_.step(busCycles);
+        memory_.step(totalBusCycles);
+        for (int extra = memory_.consumeDeferredBusCycles(); extra > 0; extra = memory_.consumeDeferredBusCycles()) {
+            totalBusCycles += extra;
+            memory_.step(extra);
+        }
+        ppu_.step(totalBusCycles);
+        int ignoredAccumulatedCycles = 0;
+        drainDeferredBusCycles(ignoredAccumulatedCycles);
         if (ppu_.scanline() < previousLine) {
             break;
         }

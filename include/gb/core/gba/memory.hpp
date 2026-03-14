@@ -34,6 +34,7 @@ public:
     static constexpr u32 KeyControlOffset = 0x132U;
     static constexpr u32 IeOffset = 0x200U;
     static constexpr u32 IfOffset = 0x202U;
+    static constexpr u32 WaitcntOffset = 0x204U;
     static constexpr u32 ImeOffset = 0x208U;
     static constexpr u16 DefaultKeyInput = 0xFFFFU; // bits 0..9 soltos, 10..15 lidos como 1
 
@@ -80,6 +81,11 @@ public:
     [[nodiscard]] std::size_t expectedBackupFileSize() const;
     bool loadBackupFromFile(const std::string& path);
     bool saveBackupToFile(const std::string& path) const;
+    void beginAccessTiming();
+    [[nodiscard]] int consumeAccessTiming();
+    [[nodiscard]] int consumeDeferredBusCycles();
+    [[nodiscard]] std::size_t audioFifoLevel(int fifoIndex) const;
+    [[nodiscard]] u8 audioFifoLastSample(int fifoIndex) const;
 
 private:
     enum class FlashStage {
@@ -100,6 +106,13 @@ private:
         std::uint32_t prescalerCycles = 0;
     };
 
+    struct AudioFifoState {
+        std::array<u8, 32> data{};
+        std::size_t readPos = 0;
+        std::size_t size = 0;
+        u8 lastSample = 0;
+    };
+
     [[nodiscard]] static constexpr std::size_t timerOffset(std::size_t timerIndex) {
         return 0x100U + timerIndex * 4U;
     }
@@ -115,6 +128,15 @@ private:
 
     void executeDmaTransfer(std::size_t channel, u16 triggeredStartTiming);
     void updateKeypadInterrupt();
+    void handleSoundControlWrite(u16 value);
+    void resetAudioFifo(int fifoIndex);
+    void writeAudioFifo(int fifoIndex, u32 value, int bytes);
+    void tickAudioFifosForTimer(std::size_t timerIndex, std::uint32_t overflowCount);
+    void triggerSoundFifoDma(int fifoIndex);
+    [[nodiscard]] bool isSoundFifoTimerSelected(int fifoIndex, std::size_t timerIndex) const;
+    [[nodiscard]] static bool isSoundFifoAddress(u32 address, int& fifoIndex);
+    [[nodiscard]] AudioFifoState& audioFifo(int fifoIndex);
+    [[nodiscard]] const AudioFifoState& audioFifo(int fifoIndex) const;
 
     [[nodiscard]] u8 readRom8(u32 address) const;
     void detectBackupType();
@@ -134,6 +156,9 @@ private:
     void programFlashByte(u32 address, u8 value);
     void eraseFlashSector(u32 address);
     void eraseFlashChip();
+    void accountAccessTiming(u32 address, int accessBytes, bool write) const;
+    [[nodiscard]] int accessCyclesForRegion(u32 address, int accessBytes, bool sequential) const;
+    [[nodiscard]] u8 read8Raw(u32 address) const;
     [[nodiscard]] u8* writableBytePointer(u32 address);
     [[nodiscard]] const u8* writableBytePointer(u32 address) const;
 
@@ -166,6 +191,15 @@ private:
     FlashStage flashStage_ = FlashStage::Ready;
     bool flashIdMode_ = false;
     u8 flashBank_ = 0;
+
+    mutable int accessCycles_ = 0;
+    mutable u32 lastAccessAddress_ = 0;
+    mutable int lastAccessBytes_ = 0;
+    mutable bool lastAccessValid_ = false;
+    mutable bool lastAccessWasWrite_ = false;
+    bool accessTimingActive_ = false;
+    int deferredBusCycles_ = 0;
+    std::array<AudioFifoState, 2> audioFifos_{};
 };
 
 } // namespace gb::gba

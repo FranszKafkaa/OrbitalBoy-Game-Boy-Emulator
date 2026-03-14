@@ -65,6 +65,7 @@ private:
         u16 win1V = 0;
         u16 winIn = 0;
         u16 winOut = 0;
+        u16 mosaic = 0;
         u16 bldCnt = 0;
         u16 bldAlpha = 0;
         u16 bldY = 0;
@@ -101,6 +102,12 @@ private:
         u8 priority,
         u8 layer,
         bool semiTransparentObj = false
+    ) const;
+    [[nodiscard]] u16 applyColorEffect(
+        const LayerPixel& pixel,
+        const RasterLineSnapshot& line,
+        u16 backdropRaw,
+        u8 windowMask
     ) const;
     [[nodiscard]] u8 windowMaskForPixel(int x, int y) const;
     [[nodiscard]] u8 windowMaskForPixel(int x, int y, const RasterLineSnapshot& line) const;

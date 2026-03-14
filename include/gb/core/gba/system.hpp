@@ -80,6 +80,7 @@ public:
     void setInputState(const InputState& input);
 
 private:
+    void drainDeferredBusCycles(int& accumulatedBusCycles);
     void runUntilFrameBoundary(int targetBusCycles, int instructionLimit);
     void refreshMetadata();
     void configureCompatibilityProfile();

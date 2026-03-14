@@ -16,6 +16,8 @@ constexpr u16 kWin0EnableMask = 0x2000U;
 constexpr u16 kWin1EnableMask = 0x4000U;
 constexpr u16 kObjWinEnableMask = 0x8000U;
 constexpr u16 kAnyWindowEnableMask = kWin0EnableMask | kWin1EnableMask | kObjWinEnableMask;
+constexpr u16 kBgMosaicMask = 0x0040U;
+constexpr u16 kObjMosaicMask = 0x1000U;
 
 constexpr std::size_t kBitmapPage1Offset = 0xA000U;
 constexpr std::size_t kObjTileBaseMode012Offset = 0x10000U;
@@ -35,6 +37,7 @@ constexpr u32 kWin0VOffset = 0x0044U;
 constexpr u32 kWin1VOffset = 0x0046U;
 constexpr u32 kWinInOffset = 0x0048U;
 constexpr u32 kWinOutOffset = 0x004AU;
+constexpr u32 kMosaicOffset = 0x004CU;
 constexpr u32 kBldCntOffset = 0x0050U;
 constexpr u32 kBldAlphaOffset = 0x0052U;
 constexpr u32 kBldYOffset = 0x0054U;
@@ -136,6 +139,33 @@ bool decodeObjSize(u8 shape, u8 size, int& width, int& height) {
     }
 }
 
+bool resolveObjTileNumber(u16 displayMode, u16 attr2, bool color256, u32& tileNumber, u32& totalObjBlocks) {
+    tileNumber = static_cast<u32>(attr2 & 0x03FFU);
+    totalObjBlocks = displayMode >= 3U ? 512U : 1024U;
+    if (displayMode >= 3U) {
+        if (tileNumber < 0x0200U) {
+            return false;
+        }
+        tileNumber -= 0x0200U;
+    }
+    if (color256) {
+        tileNumber &= ~1U;
+    }
+    tileNumber %= totalObjBlocks;
+    return true;
+}
+
+int mosaicSpan(u16 mosaic, unsigned shift) {
+    return 1 + static_cast<int>((mosaic >> shift) & 0x0FU);
+}
+
+int mosaicSampleCoord(int coord, int span) {
+    if (span <= 1) {
+        return coord;
+    }
+    return coord - (coord % span);
+}
+
 } // namespace
 
 void Ppu::connectMemory(Memory* memory) {
@@ -163,9 +193,29 @@ void Ppu::step(int cpuCycles) {
         return;
     }
 
-    scanlineCycles_ += static_cast<std::uint32_t>(cpuCycles);
-    while (scanlineCycles_ >= CyclesPerLine) {
-        scanlineCycles_ -= CyclesPerLine;
+    std::uint32_t remainingCycles = static_cast<std::uint32_t>(cpuCycles);
+    while (remainingCycles > 0U) {
+        if (scanlineCycles_ < HblankStartCycle) {
+            const std::uint32_t toHblank = HblankStartCycle - scanlineCycles_;
+            if (remainingCycles < toHblank) {
+                scanlineCycles_ += remainingCycles;
+                break;
+            }
+
+            scanlineCycles_ = HblankStartCycle;
+            remainingCycles -= toHblank;
+            updateIoRegisters();
+            continue;
+        }
+
+        const std::uint32_t toLineEnd = CyclesPerLine - scanlineCycles_;
+        if (remainingCycles < toLineEnd) {
+            scanlineCycles_ += remainingCycles;
+            break;
+        }
+
+        scanlineCycles_ = 0;
+        remainingCycles -= toLineEnd;
         scanline_ = static_cast<std::uint16_t>((scanline_ + 1U) % TotalLines);
         if (scanline_ == 0U) {
             completedRasterLineSnapshots_ = rasterLineSnapshots_;
@@ -178,9 +228,8 @@ void Ppu::step(int cpuCycles) {
             captureRasterLineSnapshot(static_cast<int>(scanline_));
             captureAffineLineSnapshot(static_cast<int>(scanline_));
         }
+        updateIoRegisters();
     }
-
-    updateIoRegisters();
 }
 
 bool Ppu::render(std::array<u16, FramebufferSize>& framebuffer) const {
@@ -255,40 +304,13 @@ bool Ppu::renderMode0(std::array<u16, FramebufferSize>& framebuffer) const {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u16 bldcnt = line.bldCnt;
-        const u8 blendMode = static_cast<u8>((bldcnt >> 6U) & 0x3U);
-        const u8 eva = static_cast<u8>(std::min<u16>(16U, static_cast<u16>(line.bldAlpha & 0x1FU)));
-        const u8 evb = static_cast<u8>(std::min<u16>(16U, static_cast<u16>((line.bldAlpha >> 8U) & 0x1FU)));
-        const u8 evy = static_cast<u8>(std::min<u16>(16U, static_cast<u16>(line.bldY & 0x1FU)));
+        static_cast<void>(bldcnt);
         for (int x = 0; x < ScreenWidth; ++x) {
             const std::size_t i = static_cast<std::size_t>(y) * static_cast<std::size_t>(ScreenWidth)
                 + static_cast<std::size_t>(x);
             const LayerPixel& px = layerPixels[i];
-            u16 outRaw = px.rawColor555;
             const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y, line) : 0x3FU;
-            const bool colorEffectsEnabled = (windowMask & 0x20U) != 0U;
-            if (colorEffectsEnabled) {
-                const u8 topLayerBit = blendLayerBitFromLayerId(px.layer);
-                const bool firstTarget = (bldcnt & static_cast<u16>(1U << topLayerBit)) != 0U;
-                const bool alphaLike = (blendMode == 1U) || px.semiTransparentObj;
-                if (alphaLike && (firstTarget || px.semiTransparentObj)) {
-                    bool hasSecond = px.hasSecond;
-                    u16 secondRaw = px.secondRawColor555;
-                    u8 secondLayerBit = blendLayerBitFromLayerId(px.secondLayer);
-                    if (!hasSecond && px.layer != 4U) {
-                        hasSecond = true;
-                        secondRaw = backdropRaw;
-                        secondLayerBit = 5U;
-                    }
-                    if (hasSecond && (bldcnt & static_cast<u16>(1U << (8U + secondLayerBit))) != 0U) {
-                        outRaw = blendAlpha555(outRaw, secondRaw, eva, evb);
-                    }
-                } else if (blendMode == 2U && firstTarget) {
-                    outRaw = brighten555(outRaw, evy);
-                } else if (blendMode == 3U && firstTarget) {
-                    outRaw = darken555(outRaw, evy);
-                }
-            }
-            framebuffer[i] = bgr555ToRgb565(outRaw);
+            framebuffer[i] = bgr555ToRgb565(applyColorEffect(px, line, backdropRaw, windowMask));
         }
     }
     activeObjWindowMask_ = nullptr;
@@ -338,40 +360,13 @@ bool Ppu::renderMode1(std::array<u16, FramebufferSize>& framebuffer) const {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u16 bldcnt = line.bldCnt;
-        const u8 blendMode = static_cast<u8>((bldcnt >> 6U) & 0x3U);
-        const u8 eva = static_cast<u8>(std::min<u16>(16U, static_cast<u16>(line.bldAlpha & 0x1FU)));
-        const u8 evb = static_cast<u8>(std::min<u16>(16U, static_cast<u16>((line.bldAlpha >> 8U) & 0x1FU)));
-        const u8 evy = static_cast<u8>(std::min<u16>(16U, static_cast<u16>(line.bldY & 0x1FU)));
+        static_cast<void>(bldcnt);
         for (int x = 0; x < ScreenWidth; ++x) {
             const std::size_t i = static_cast<std::size_t>(y) * static_cast<std::size_t>(ScreenWidth)
                 + static_cast<std::size_t>(x);
             const LayerPixel& px = layerPixels[i];
-            u16 outRaw = px.rawColor555;
             const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y, line) : 0x3FU;
-            const bool colorEffectsEnabled = (windowMask & 0x20U) != 0U;
-            if (colorEffectsEnabled) {
-                const u8 topLayerBit = blendLayerBitFromLayerId(px.layer);
-                const bool firstTarget = (bldcnt & static_cast<u16>(1U << topLayerBit)) != 0U;
-                const bool alphaLike = (blendMode == 1U) || px.semiTransparentObj;
-                if (alphaLike && (firstTarget || px.semiTransparentObj)) {
-                    bool hasSecond = px.hasSecond;
-                    u16 secondRaw = px.secondRawColor555;
-                    u8 secondLayerBit = blendLayerBitFromLayerId(px.secondLayer);
-                    if (!hasSecond && px.layer != 4U) {
-                        hasSecond = true;
-                        secondRaw = backdropRaw;
-                        secondLayerBit = 5U;
-                    }
-                    if (hasSecond && (bldcnt & static_cast<u16>(1U << (8U + secondLayerBit))) != 0U) {
-                        outRaw = blendAlpha555(outRaw, secondRaw, eva, evb);
-                    }
-                } else if (blendMode == 2U && firstTarget) {
-                    outRaw = brighten555(outRaw, evy);
-                } else if (blendMode == 3U && firstTarget) {
-                    outRaw = darken555(outRaw, evy);
-                }
-            }
-            framebuffer[i] = bgr555ToRgb565(outRaw);
+            framebuffer[i] = bgr555ToRgb565(applyColorEffect(px, line, backdropRaw, windowMask));
         }
     }
     activeObjWindowMask_ = nullptr;
@@ -420,40 +415,13 @@ bool Ppu::renderMode2(std::array<u16, FramebufferSize>& framebuffer) const {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u16 bldcnt = line.bldCnt;
-        const u8 blendMode = static_cast<u8>((bldcnt >> 6U) & 0x3U);
-        const u8 eva = static_cast<u8>(std::min<u16>(16U, static_cast<u16>(line.bldAlpha & 0x1FU)));
-        const u8 evb = static_cast<u8>(std::min<u16>(16U, static_cast<u16>((line.bldAlpha >> 8U) & 0x1FU)));
-        const u8 evy = static_cast<u8>(std::min<u16>(16U, static_cast<u16>(line.bldY & 0x1FU)));
+        static_cast<void>(bldcnt);
         for (int x = 0; x < ScreenWidth; ++x) {
             const std::size_t i = static_cast<std::size_t>(y) * static_cast<std::size_t>(ScreenWidth)
                 + static_cast<std::size_t>(x);
             const LayerPixel& px = layerPixels[i];
-            u16 outRaw = px.rawColor555;
             const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y, line) : 0x3FU;
-            const bool colorEffectsEnabled = (windowMask & 0x20U) != 0U;
-            if (colorEffectsEnabled) {
-                const u8 topLayerBit = blendLayerBitFromLayerId(px.layer);
-                const bool firstTarget = (bldcnt & static_cast<u16>(1U << topLayerBit)) != 0U;
-                const bool alphaLike = (blendMode == 1U) || px.semiTransparentObj;
-                if (alphaLike && (firstTarget || px.semiTransparentObj)) {
-                    bool hasSecond = px.hasSecond;
-                    u16 secondRaw = px.secondRawColor555;
-                    u8 secondLayerBit = blendLayerBitFromLayerId(px.secondLayer);
-                    if (!hasSecond && px.layer != 4U) {
-                        hasSecond = true;
-                        secondRaw = backdropRaw;
-                        secondLayerBit = 5U;
-                    }
-                    if (hasSecond && (bldcnt & static_cast<u16>(1U << (8U + secondLayerBit))) != 0U) {
-                        outRaw = blendAlpha555(outRaw, secondRaw, eva, evb);
-                    }
-                } else if (blendMode == 2U && firstTarget) {
-                    outRaw = brighten555(outRaw, evy);
-                } else if (blendMode == 3U && firstTarget) {
-                    outRaw = darken555(outRaw, evy);
-                }
-            }
-            framebuffer[i] = bgr555ToRgb565(outRaw);
+            framebuffer[i] = bgr555ToRgb565(applyColorEffect(px, line, backdropRaw, windowMask));
         }
     }
     activeObjWindowMask_ = nullptr;
@@ -497,6 +465,10 @@ bool Ppu::renderMode3(std::array<u16, FramebufferSize>& framebuffer) const {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u8 bgPriority = static_cast<u8>(line.bgCnt[2] & 0x3U);
+        const bool mosaicEnabled = (line.bgCnt[2] & kBgMosaicMask) != 0U;
+        const int mosaicXSpan = mosaicEnabled ? mosaicSpan(line.mosaic, 0U) : 1;
+        const int mosaicYSpan = mosaicEnabled ? mosaicSpan(line.mosaic, 4U) : 1;
+        const int sourceY = mosaicEnabled ? mosaicSampleCoord(y, mosaicYSpan) : y;
         for (int x = 0; x < ScreenWidth; ++x) {
             const auto pixelIndex = static_cast<std::size_t>(y) * static_cast<std::size_t>(ScreenWidth)
                 + static_cast<std::size_t>(x);
@@ -504,7 +476,9 @@ bool Ppu::renderMode3(std::array<u16, FramebufferSize>& framebuffer) const {
             if (!layerEnabledByWindowMask(winMask, 2U)) {
                 continue;
             }
-            const auto byteIndex = pixelIndex * 2U;
+            const int sourceX = mosaicEnabled ? mosaicSampleCoord(x, mosaicXSpan) : x;
+            const auto byteIndex = (static_cast<std::size_t>(sourceY) * static_cast<std::size_t>(ScreenWidth)
+                + static_cast<std::size_t>(sourceX)) * 2U;
             composeLayer(layerPixels, pixelIndex, readVram16(byteIndex), bgPriority, 2U);
         }
     }
@@ -514,40 +488,13 @@ bool Ppu::renderMode3(std::array<u16, FramebufferSize>& framebuffer) const {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u16 bldcnt = line.bldCnt;
-        const u8 blendMode = static_cast<u8>((bldcnt >> 6U) & 0x3U);
-        const u8 eva = static_cast<u8>(std::min<u16>(16U, static_cast<u16>(line.bldAlpha & 0x1FU)));
-        const u8 evb = static_cast<u8>(std::min<u16>(16U, static_cast<u16>((line.bldAlpha >> 8U) & 0x1FU)));
-        const u8 evy = static_cast<u8>(std::min<u16>(16U, static_cast<u16>(line.bldY & 0x1FU)));
+        static_cast<void>(bldcnt);
         for (int x = 0; x < ScreenWidth; ++x) {
             const std::size_t i = static_cast<std::size_t>(y) * static_cast<std::size_t>(ScreenWidth)
                 + static_cast<std::size_t>(x);
             const LayerPixel& px = layerPixels[i];
-            u16 outRaw = px.rawColor555;
             const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y, line) : 0x3FU;
-            const bool colorEffectsEnabled = (windowMask & 0x20U) != 0U;
-            if (colorEffectsEnabled) {
-                const u8 topLayerBit = blendLayerBitFromLayerId(px.layer);
-                const bool firstTarget = (bldcnt & static_cast<u16>(1U << topLayerBit)) != 0U;
-                const bool alphaLike = (blendMode == 1U) || px.semiTransparentObj;
-                if (alphaLike && (firstTarget || px.semiTransparentObj)) {
-                    bool hasSecond = px.hasSecond;
-                    u16 secondRaw = px.secondRawColor555;
-                    u8 secondLayerBit = blendLayerBitFromLayerId(px.secondLayer);
-                    if (!hasSecond && px.layer != 4U) {
-                        hasSecond = true;
-                        secondRaw = backdropRaw;
-                        secondLayerBit = 5U;
-                    }
-                    if (hasSecond && (bldcnt & static_cast<u16>(1U << (8U + secondLayerBit))) != 0U) {
-                        outRaw = blendAlpha555(outRaw, secondRaw, eva, evb);
-                    }
-                } else if (blendMode == 2U && firstTarget) {
-                    outRaw = brighten555(outRaw, evy);
-                } else if (blendMode == 3U && firstTarget) {
-                    outRaw = darken555(outRaw, evy);
-                }
-            }
-            framebuffer[i] = bgr555ToRgb565(outRaw);
+            framebuffer[i] = bgr555ToRgb565(applyColorEffect(px, line, backdropRaw, windowMask));
         }
     }
     activeObjWindowMask_ = nullptr;
@@ -596,6 +543,10 @@ bool Ppu::renderMode4(std::array<u16, FramebufferSize>& framebuffer) const {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u8 bgPriority = static_cast<u8>(line.bgCnt[2] & 0x3U);
+        const bool mosaicEnabled = (line.bgCnt[2] & kBgMosaicMask) != 0U;
+        const int mosaicXSpan = mosaicEnabled ? mosaicSpan(line.mosaic, 0U) : 1;
+        const int mosaicYSpan = mosaicEnabled ? mosaicSpan(line.mosaic, 4U) : 1;
+        const int sourceY = mosaicEnabled ? mosaicSampleCoord(y, mosaicYSpan) : y;
         for (int x = 0; x < ScreenWidth; ++x) {
             const auto pixelIndex = static_cast<std::size_t>(y) * static_cast<std::size_t>(ScreenWidth)
                 + static_cast<std::size_t>(x);
@@ -603,7 +554,10 @@ bool Ppu::renderMode4(std::array<u16, FramebufferSize>& framebuffer) const {
             if (!layerEnabledByWindowMask(winMask, 2U)) {
                 continue;
             }
-            const std::size_t byteIndex = pageBase + pixelIndex;
+            const int sourceX = mosaicEnabled ? mosaicSampleCoord(x, mosaicXSpan) : x;
+            const std::size_t byteIndex = pageBase
+                + static_cast<std::size_t>(sourceY) * static_cast<std::size_t>(ScreenWidth)
+                + static_cast<std::size_t>(sourceX);
             const u8 colorIndex = byteIndex < vram.size() ? vram[byteIndex] : 0U;
             composeLayer(layerPixels, pixelIndex, readBgPaletteColor(colorIndex), bgPriority, 2U);
         }
@@ -614,40 +568,13 @@ bool Ppu::renderMode4(std::array<u16, FramebufferSize>& framebuffer) const {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u16 bldcnt = line.bldCnt;
-        const u8 blendMode = static_cast<u8>((bldcnt >> 6U) & 0x3U);
-        const u8 eva = static_cast<u8>(std::min<u16>(16U, static_cast<u16>(line.bldAlpha & 0x1FU)));
-        const u8 evb = static_cast<u8>(std::min<u16>(16U, static_cast<u16>((line.bldAlpha >> 8U) & 0x1FU)));
-        const u8 evy = static_cast<u8>(std::min<u16>(16U, static_cast<u16>(line.bldY & 0x1FU)));
+        static_cast<void>(bldcnt);
         for (int x = 0; x < ScreenWidth; ++x) {
             const std::size_t i = static_cast<std::size_t>(y) * static_cast<std::size_t>(ScreenWidth)
                 + static_cast<std::size_t>(x);
             const LayerPixel& px = layerPixels[i];
-            u16 outRaw = px.rawColor555;
             const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y, line) : 0x3FU;
-            const bool colorEffectsEnabled = (windowMask & 0x20U) != 0U;
-            if (colorEffectsEnabled) {
-                const u8 topLayerBit = blendLayerBitFromLayerId(px.layer);
-                const bool firstTarget = (bldcnt & static_cast<u16>(1U << topLayerBit)) != 0U;
-                const bool alphaLike = (blendMode == 1U) || px.semiTransparentObj;
-                if (alphaLike && (firstTarget || px.semiTransparentObj)) {
-                    bool hasSecond = px.hasSecond;
-                    u16 secondRaw = px.secondRawColor555;
-                    u8 secondLayerBit = blendLayerBitFromLayerId(px.secondLayer);
-                    if (!hasSecond && px.layer != 4U) {
-                        hasSecond = true;
-                        secondRaw = backdropRaw;
-                        secondLayerBit = 5U;
-                    }
-                    if (hasSecond && (bldcnt & static_cast<u16>(1U << (8U + secondLayerBit))) != 0U) {
-                        outRaw = blendAlpha555(outRaw, secondRaw, eva, evb);
-                    }
-                } else if (blendMode == 2U && firstTarget) {
-                    outRaw = brighten555(outRaw, evy);
-                } else if (blendMode == 3U && firstTarget) {
-                    outRaw = darken555(outRaw, evy);
-                }
-            }
-            framebuffer[i] = bgr555ToRgb565(outRaw);
+            framebuffer[i] = bgr555ToRgb565(applyColorEffect(px, line, backdropRaw, windowMask));
         }
     }
     activeObjWindowMask_ = nullptr;
@@ -698,6 +625,10 @@ bool Ppu::renderMode5(std::array<u16, FramebufferSize>& framebuffer) const {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u8 bgPriority = static_cast<u8>(line.bgCnt[2] & 0x3U);
+        const bool mosaicEnabled = (line.bgCnt[2] & kBgMosaicMask) != 0U;
+        const int mosaicXSpan = mosaicEnabled ? mosaicSpan(line.mosaic, 0U) : 1;
+        const int mosaicYSpan = mosaicEnabled ? mosaicSpan(line.mosaic, 4U) : 1;
+        const int sourceY = mosaicEnabled ? mosaicSampleCoord(y, mosaicYSpan) : y;
         for (int x = 0; x < kMode5Width; ++x) {
             const auto pixelIndex = static_cast<std::size_t>(y) * static_cast<std::size_t>(ScreenWidth)
                 + static_cast<std::size_t>(x);
@@ -705,9 +636,10 @@ bool Ppu::renderMode5(std::array<u16, FramebufferSize>& framebuffer) const {
             if (!layerEnabledByWindowMask(winMask, 2U)) {
                 continue;
             }
+            const int sourceX = mosaicEnabled ? mosaicSampleCoord(x, mosaicXSpan) : x;
             const auto byteIndex = pageBase
-                + (static_cast<std::size_t>(y) * static_cast<std::size_t>(kMode5Width)
-                + static_cast<std::size_t>(x)) * 2U;
+                + (static_cast<std::size_t>(sourceY) * static_cast<std::size_t>(kMode5Width)
+                + static_cast<std::size_t>(sourceX)) * 2U;
             composeLayer(layerPixels, pixelIndex, readVram16(byteIndex), bgPriority, 2U);
         }
     }
@@ -717,40 +649,13 @@ bool Ppu::renderMode5(std::array<u16, FramebufferSize>& framebuffer) const {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u16 bldcnt = line.bldCnt;
-        const u8 blendMode = static_cast<u8>((bldcnt >> 6U) & 0x3U);
-        const u8 eva = static_cast<u8>(std::min<u16>(16U, static_cast<u16>(line.bldAlpha & 0x1FU)));
-        const u8 evb = static_cast<u8>(std::min<u16>(16U, static_cast<u16>((line.bldAlpha >> 8U) & 0x1FU)));
-        const u8 evy = static_cast<u8>(std::min<u16>(16U, static_cast<u16>(line.bldY & 0x1FU)));
+        static_cast<void>(bldcnt);
         for (int x = 0; x < ScreenWidth; ++x) {
             const std::size_t i = static_cast<std::size_t>(y) * static_cast<std::size_t>(ScreenWidth)
                 + static_cast<std::size_t>(x);
             const LayerPixel& px = layerPixels[i];
-            u16 outRaw = px.rawColor555;
             const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y, line) : 0x3FU;
-            const bool colorEffectsEnabled = (windowMask & 0x20U) != 0U;
-            if (colorEffectsEnabled) {
-                const u8 topLayerBit = blendLayerBitFromLayerId(px.layer);
-                const bool firstTarget = (bldcnt & static_cast<u16>(1U << topLayerBit)) != 0U;
-                const bool alphaLike = (blendMode == 1U) || px.semiTransparentObj;
-                if (alphaLike && (firstTarget || px.semiTransparentObj)) {
-                    bool hasSecond = px.hasSecond;
-                    u16 secondRaw = px.secondRawColor555;
-                    u8 secondLayerBit = blendLayerBitFromLayerId(px.secondLayer);
-                    if (!hasSecond && px.layer != 4U) {
-                        hasSecond = true;
-                        secondRaw = backdropRaw;
-                        secondLayerBit = 5U;
-                    }
-                    if (hasSecond && (bldcnt & static_cast<u16>(1U << (8U + secondLayerBit))) != 0U) {
-                        outRaw = blendAlpha555(outRaw, secondRaw, eva, evb);
-                    }
-                } else if (blendMode == 2U && firstTarget) {
-                    outRaw = brighten555(outRaw, evy);
-                } else if (blendMode == 3U && firstTarget) {
-                    outRaw = darken555(outRaw, evy);
-                }
-            }
-            framebuffer[i] = bgr555ToRgb565(outRaw);
+            framebuffer[i] = bgr555ToRgb565(applyColorEffect(px, line, backdropRaw, windowMask));
         }
     }
     activeObjWindowMask_ = nullptr;
@@ -772,11 +677,15 @@ void Ppu::renderTextBackground(int bgIndex, std::array<LayerPixel, FramebufferSi
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u8 priority = static_cast<u8>(bgcnt & 0x3U);
         const bool color256 = (bgcnt & 0x0080U) != 0U;
+        const bool mosaicEnabled = (bgcnt & kBgMosaicMask) != 0U;
         const u32 charBase = static_cast<u32>((bgcnt >> 2U) & 0x3U) * 0x4000U;
         const u32 screenBase = static_cast<u32>((bgcnt >> 8U) & 0x1FU) * 0x800U;
         const u32 sizeIndex = static_cast<u32>((bgcnt >> 14U) & 0x3U);
         const u32 screenWidth = (sizeIndex == 1U || sizeIndex == 3U) ? 512U : 256U;
         const u32 screenHeight = (sizeIndex == 2U || sizeIndex == 3U) ? 512U : 256U;
+        const int mosaicXSpan = mosaicEnabled ? mosaicSpan(line.mosaic, 0U) : 1;
+        const int mosaicYSpan = mosaicEnabled ? mosaicSpan(line.mosaic, 4U) : 1;
+        const int sourceY = mosaicEnabled ? mosaicSampleCoord(y, mosaicYSpan) : y;
         for (int x = 0; x < ScreenWidth; ++x) {
             const auto pixelIndex = static_cast<std::size_t>(y) * static_cast<std::size_t>(ScreenWidth)
                 + static_cast<std::size_t>(x);
@@ -785,8 +694,9 @@ void Ppu::renderTextBackground(int bgIndex, std::array<LayerPixel, FramebufferSi
                 continue;
             }
 
-            const u32 sx = (static_cast<u32>(x) + static_cast<u32>(hofs)) % screenWidth;
-            const u32 sy = (static_cast<u32>(y) + static_cast<u32>(vofs)) % screenHeight;
+            const int sourceX = mosaicEnabled ? mosaicSampleCoord(x, mosaicXSpan) : x;
+            const u32 sx = (static_cast<u32>(sourceX) + static_cast<u32>(hofs)) % screenWidth;
+            const u32 sy = (static_cast<u32>(sourceY) + static_cast<u32>(vofs)) % screenHeight;
             const u32 tileX = sx / 8U;
             const u32 tileY = sy / 8U;
             const u32 pixelX = sx & 7U;
@@ -840,6 +750,11 @@ void Ppu::renderAffineBackground(int bgIndex, std::array<LayerPixel, Framebuffer
         return;
     }
 
+    std::array<AffineLineSnapshot, ScreenHeight> affineLines{};
+    std::array<RasterLineSnapshot, ScreenHeight> rasterLines{};
+    std::array<std::int64_t, ScreenHeight> lineStartXs{};
+    std::array<std::int64_t, ScreenHeight> lineStartYs{};
+
     std::int64_t prevLineStartX = 0;
     std::int64_t prevLineStartY = 0;
     std::int32_t prevPb = 0;
@@ -861,16 +776,42 @@ void Ppu::renderAffineBackground(int bgIndex, std::array<LayerPixel, Framebuffer
             }
         }
 
+        affineLines[static_cast<std::size_t>(y)] = affine;
+        rasterLines[static_cast<std::size_t>(y)] = line;
+        lineStartXs[static_cast<std::size_t>(y)] = lineStartX;
+        lineStartYs[static_cast<std::size_t>(y)] = lineStartY;
+
+        prevLineStartX = lineStartX;
+        prevLineStartY = lineStartY;
+        prevPb = affine.pb;
+        prevPd = affine.pd;
+        prevRegX = affine.xRef;
+        prevRegY = affine.yRef;
+        havePreviousLine = true;
+    }
+
+    for (int y = 0; y < ScreenHeight; ++y) {
+        const RasterLineSnapshot& line = rasterLines[static_cast<std::size_t>(y)];
+        const AffineLineSnapshot& affine = affineLines[static_cast<std::size_t>(y)];
+
         const u16 bgcnt = line.bgCnt[static_cast<std::size_t>(bgIndex)];
         const bool layerEnabled = (line.dispcnt & kBgEnableMasks[bgIndex]) != 0U;
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u8 priority = static_cast<u8>(bgcnt & 0x3U);
         const bool wrap = (bgcnt & kBgWrapMask) != 0U;
+        const bool mosaicEnabled = (bgcnt & kBgMosaicMask) != 0U;
         const u32 charBase = static_cast<u32>((bgcnt >> 2U) & 0x3U) * 0x4000U;
         const u32 screenBase = static_cast<u32>((bgcnt >> 8U) & 0x1FU) * 0x800U;
         const u32 sizeIndex = static_cast<u32>((bgcnt >> 14U) & 0x3U);
         const int affineSize = 128 << static_cast<int>(sizeIndex);
         const int tilesPerLine = affineSize / 8;
+        const int mosaicXSpan = mosaicEnabled ? mosaicSpan(line.mosaic, 0U) : 1;
+        const int mosaicYSpan = mosaicEnabled ? mosaicSpan(line.mosaic, 4U) : 1;
+        const int sampleLine = mosaicEnabled ? mosaicSampleCoord(y, mosaicYSpan) : y;
+        const AffineLineSnapshot& sampleAffine = affineLines[static_cast<std::size_t>(sampleLine)];
+        const std::int64_t sampleLineStartX = lineStartXs[static_cast<std::size_t>(sampleLine)];
+        const std::int64_t sampleLineStartY = lineStartYs[static_cast<std::size_t>(sampleLine)];
+        static_cast<void>(affine);
 
         if (layerEnabled) {
             for (int x = 0; x < ScreenWidth; ++x) {
@@ -878,8 +819,11 @@ void Ppu::renderAffineBackground(int bgIndex, std::array<LayerPixel, Framebuffer
                 if (!layerEnabledByWindowMask(windowMask, static_cast<u8>(bgIndex))) {
                     continue;
                 }
-                const std::int64_t affineX = lineStartX + static_cast<std::int64_t>(affine.pa) * static_cast<std::int64_t>(x);
-                const std::int64_t affineY = lineStartY + static_cast<std::int64_t>(affine.pc) * static_cast<std::int64_t>(x);
+                const int sourceX = mosaicEnabled ? mosaicSampleCoord(x, mosaicXSpan) : x;
+                const std::int64_t affineX = sampleLineStartX
+                    + static_cast<std::int64_t>(sampleAffine.pa) * static_cast<std::int64_t>(sourceX);
+                const std::int64_t affineY = sampleLineStartY
+                    + static_cast<std::int64_t>(sampleAffine.pc) * static_cast<std::int64_t>(sourceX);
 
                 int sx = static_cast<int>(affineX >> 8U);
                 int sy = static_cast<int>(affineY >> 8U);
@@ -913,14 +857,6 @@ void Ppu::renderAffineBackground(int bgIndex, std::array<LayerPixel, Framebuffer
                 composeLayer(layerPixels, pixelIndex, readBgPaletteColor(colorIndex), priority, static_cast<u8>(bgIndex));
             }
         }
-
-        prevLineStartX = lineStartX;
-        prevLineStartY = lineStartY;
-        prevPb = affine.pb;
-        prevPd = affine.pd;
-        prevRegX = affine.xRef;
-        prevRegY = affine.yRef;
-        havePreviousLine = true;
     }
 }
 
@@ -934,8 +870,6 @@ void Ppu::buildObjWindowMask(std::array<bool, FramebufferSize>& objWindowMask) c
     const u16 mode = static_cast<u16>(dispcnt & kDisplayModeMask);
     const std::size_t objTileBase = mode >= 3U ? kObjTileBaseMode345Offset : kObjTileBaseMode012Offset;
     const bool obj1D = (dispcnt & kObjMapping1dMask) != 0U;
-    const u32 totalObjBlocks = mode >= 3U ? 512U : 1024U;
-    const u32 objTileMask = mode >= 3U ? 0x01FFU : 0x03FFU;
     const auto& vram = memory_->vram();
 
     for (int obj = 0; obj < 128; ++obj) {
@@ -956,6 +890,7 @@ void Ppu::buildObjWindowMask(std::array<bool, FramebufferSize>& objWindowMask) c
         }
 
         const bool color256 = (attr0 & 0x2000U) != 0U;
+        const bool mosaicEnabled = (attr0 & kObjMosaicMask) != 0U;
         const u8 shape = static_cast<u8>((attr0 >> 14U) & 0x3U);
         const u8 size = static_cast<u8>((attr1 >> 14U) & 0x3U);
         int baseWidth = 0;
@@ -977,7 +912,11 @@ void Ppu::buildObjWindowMask(std::array<bool, FramebufferSize>& objWindowMask) c
 
         const bool hflip = !affine && (attr1 & 0x1000U) != 0U;
         const bool vflip = !affine && (attr1 & 0x2000U) != 0U;
-        const u32 tileBase = static_cast<u32>(attr2 & objTileMask);
+        u32 tileBase = 0;
+        u32 totalObjBlocks = 0;
+        if (!resolveObjTileNumber(mode, attr2, color256, tileBase, totalObjBlocks)) {
+            continue;
+        }
         const int tilesPerRow1D = std::max(1, baseWidth / 8);
 
         std::int32_t pa = 0;
@@ -1007,12 +946,16 @@ void Ppu::buildObjWindowMask(std::array<bool, FramebufferSize>& objWindowMask) c
                 if ((line.dispcnt & kObjWinEnableMask) == 0U) {
                     continue;
                 }
+                const int objMosaicXSpan = mosaicEnabled ? mosaicSpan(line.mosaic, 8U) : 1;
+                const int objMosaicYSpan = mosaicEnabled ? mosaicSpan(line.mosaic, 12U) : 1;
+                const int samplePx = mosaicEnabled ? mosaicSampleCoord(px, objMosaicXSpan) : px;
+                const int samplePy = mosaicEnabled ? mosaicSampleCoord(py, objMosaicYSpan) : py;
 
                 int localX = 0;
                 int localY = 0;
                 if (affine) {
-                    const int dx = px - (renderWidth / 2);
-                    const int dy = py - (renderHeight / 2);
+                    const int dx = samplePx - (renderWidth / 2);
+                    const int dy = samplePy - (renderHeight / 2);
                     const std::int32_t srcX = ((pa * dx + pb * dy) >> 8) + (baseWidth / 2);
                     const std::int32_t srcY = ((pc * dx + pd * dy) >> 8) + (baseHeight / 2);
                     if (srcX < 0 || srcX >= baseWidth || srcY < 0 || srcY >= baseHeight) {
@@ -1021,8 +964,8 @@ void Ppu::buildObjWindowMask(std::array<bool, FramebufferSize>& objWindowMask) c
                     localX = static_cast<int>(srcX);
                     localY = static_cast<int>(srcY);
                 } else {
-                    localX = hflip ? (baseWidth - 1 - px) : px;
-                    localY = vflip ? (baseHeight - 1 - py) : py;
+                    localX = hflip ? (baseWidth - 1 - samplePx) : samplePx;
+                    localY = vflip ? (baseHeight - 1 - samplePy) : samplePy;
                 }
 
                 const int tileX = localX / 8;
@@ -1078,8 +1021,6 @@ void Ppu::renderObjects(std::array<LayerPixel, FramebufferSize>& layerPixels) co
     const u16 mode = static_cast<u16>(dispcnt & kDisplayModeMask);
     const std::size_t objTileBase = mode >= 3U ? kObjTileBaseMode345Offset : kObjTileBaseMode012Offset;
     const bool obj1D = (dispcnt & kObjMapping1dMask) != 0U;
-    const u32 totalObjBlocks = mode >= 3U ? 512U : 1024U;
-    const u32 objTileMask = mode >= 3U ? 0x01FFU : 0x03FFU;
     const auto& vram = memory_->vram();
 
     for (int obj = 0; obj < 128; ++obj) {
@@ -1101,6 +1042,7 @@ void Ppu::renderObjects(std::array<LayerPixel, FramebufferSize>& layerPixels) co
         }
 
         const bool color256 = (attr0 & 0x2000U) != 0U;
+        const bool mosaicEnabled = (attr0 & kObjMosaicMask) != 0U;
         const u8 shape = static_cast<u8>((attr0 >> 14U) & 0x3U);
         const u8 size = static_cast<u8>((attr1 >> 14U) & 0x3U);
 
@@ -1123,7 +1065,11 @@ void Ppu::renderObjects(std::array<LayerPixel, FramebufferSize>& layerPixels) co
 
         const bool hflip = !affine && (attr1 & 0x1000U) != 0U;
         const bool vflip = !affine && (attr1 & 0x2000U) != 0U;
-        const u32 tileBase = static_cast<u32>(attr2 & objTileMask);
+        u32 tileBase = 0;
+        u32 totalObjBlocks = 0;
+        if (!resolveObjTileNumber(mode, attr2, color256, tileBase, totalObjBlocks)) {
+            continue;
+        }
         const u8 objPriority = static_cast<u8>((attr2 >> 10U) & 0x3U);
         const u8 paletteBank = static_cast<u8>((attr2 >> 12U) & 0x0FU);
         const int tilesPerRow1D = std::max(1, baseWidth / 8);
@@ -1160,12 +1106,16 @@ void Ppu::renderObjects(std::array<LayerPixel, FramebufferSize>& layerPixels) co
                 if (!layerEnabledByWindowMask(windowMask, 4U)) {
                     continue;
                 }
+                const int objMosaicXSpan = mosaicEnabled ? mosaicSpan(line.mosaic, 8U) : 1;
+                const int objMosaicYSpan = mosaicEnabled ? mosaicSpan(line.mosaic, 12U) : 1;
+                const int samplePx = mosaicEnabled ? mosaicSampleCoord(px, objMosaicXSpan) : px;
+                const int samplePy = mosaicEnabled ? mosaicSampleCoord(py, objMosaicYSpan) : py;
 
                 int localX = 0;
                 int localY = 0;
                 if (affine) {
-                    const int dx = px - (renderWidth / 2);
-                    const int dy = py - (renderHeight / 2);
+                    const int dx = samplePx - (renderWidth / 2);
+                    const int dy = samplePy - (renderHeight / 2);
                     const std::int32_t srcX = ((pa * dx + pb * dy) >> 8) + (baseWidth / 2);
                     const std::int32_t srcY = ((pc * dx + pd * dy) >> 8) + (baseHeight / 2);
                     if (srcX < 0 || srcX >= baseWidth || srcY < 0 || srcY >= baseHeight) {
@@ -1174,8 +1124,8 @@ void Ppu::renderObjects(std::array<LayerPixel, FramebufferSize>& layerPixels) co
                     localX = static_cast<int>(srcX);
                     localY = static_cast<int>(srcY);
                 } else {
-                    localX = hflip ? (baseWidth - 1 - px) : px;
-                    localY = vflip ? (baseHeight - 1 - py) : py;
+                    localX = hflip ? (baseWidth - 1 - samplePx) : samplePx;
+                    localY = vflip ? (baseHeight - 1 - samplePy) : samplePy;
                 }
 
                 const int tileX = localX / 8;
@@ -1286,6 +1236,61 @@ void Ppu::composeLayer(
     }
 }
 
+u16 Ppu::applyColorEffect(
+    const LayerPixel& pixel,
+    const RasterLineSnapshot& line,
+    u16 backdropRaw,
+    u8 windowMask
+) const {
+    u16 outRaw = pixel.rawColor555;
+    if ((windowMask & 0x20U) == 0U) {
+        return outRaw;
+    }
+
+    const u16 bldcnt = line.bldCnt;
+    const u8 blendMode = static_cast<u8>((bldcnt >> 6U) & 0x3U);
+    const u8 eva = static_cast<u8>(std::min<u16>(16U, static_cast<u16>(line.bldAlpha & 0x1FU)));
+    const u8 evb = static_cast<u8>(std::min<u16>(16U, static_cast<u16>((line.bldAlpha >> 8U) & 0x1FU)));
+    const u8 evy = static_cast<u8>(std::min<u16>(16U, static_cast<u16>(line.bldY & 0x1FU)));
+    const u8 topLayerBit = blendLayerBitFromLayerId(pixel.layer);
+    const bool firstTarget = (bldcnt & static_cast<u16>(1U << topLayerBit)) != 0U;
+
+    const bool alphaBlendRequested = blendMode == 1U || pixel.semiTransparentObj;
+    if (alphaBlendRequested) {
+        bool hasSecond = pixel.hasSecond;
+        bool blockedByObj = false;
+        u16 secondRaw = pixel.secondRawColor555;
+        u8 secondLayer = pixel.secondLayer;
+        if (pixel.semiTransparentObj && hasSecond && secondLayer == 5U) {
+            hasSecond = false;
+            blockedByObj = true;
+        }
+        if (!hasSecond && !blockedByObj && pixel.layer != 4U) {
+            hasSecond = true;
+            secondRaw = backdropRaw;
+            secondLayer = 4U;
+        }
+        const bool canAlphaBlend = pixel.semiTransparentObj || (blendMode == 1U && firstTarget);
+        if (canAlphaBlend && hasSecond) {
+            const u8 secondLayerBit = blendLayerBitFromLayerId(secondLayer);
+            if ((bldcnt & static_cast<u16>(1U << (8U + secondLayerBit))) != 0U) {
+                return blendAlpha555(outRaw, secondRaw, eva, evb);
+            }
+        }
+        if (pixel.semiTransparentObj) {
+            return outRaw;
+        }
+    }
+
+    if (blendMode == 2U && firstTarget) {
+        return brighten555(outRaw, evy);
+    }
+    if (blendMode == 3U && firstTarget) {
+        return darken555(outRaw, evy);
+    }
+    return outRaw;
+}
+
 u8 Ppu::windowMaskForPixel(int x, int y) const {
     const RasterLineSnapshot line = rasterSnapshotForLine(y);
     return windowMaskForPixel(x, y, line);
@@ -1334,7 +1339,7 @@ bool Ppu::pointInsideWindowRange(int value, int start, int end, int limit) {
     start = std::clamp(start, 0, limit);
     end = std::clamp(end, 0, limit);
     if (start == end) {
-        return true;
+        return start != 0;
     }
     if (start < end) {
         return value >= start && value < end;
@@ -1484,6 +1489,7 @@ Ppu::RasterLineSnapshot Ppu::readCurrentRasterSnapshot() const {
     out.win1V = memory_->readIo16(kWin1VOffset);
     out.winIn = memory_->readIo16(kWinInOffset);
     out.winOut = memory_->readIo16(kWinOutOffset);
+    out.mosaic = memory_->readIo16(kMosaicOffset);
     out.bldCnt = memory_->readIo16(kBldCntOffset);
     out.bldAlpha = memory_->readIo16(kBldAlphaOffset);
     out.bldY = memory_->readIo16(kBldYOffset);

@@ -287,6 +287,8 @@ int CpuArm7tdmi::step() {
         return 0;
     }
 
+    memory_->beginAccessTiming();
+
     alignPcForCurrentState();
     const u32 executeAddressMask = thumbMode() ? ~1U : ~3U;
     if (!isValidExecuteAddress(regs_[15] & executeAddressMask)) {
@@ -300,7 +302,7 @@ int CpuArm7tdmi::step() {
                       << " cpsr=0x" << cpsr_ << std::dec << '\n';
         }
         ++executedInstructions_;
-        return 1;
+        return 4;
     }
     lastExecutablePc_ = regs_[15];
 
@@ -318,13 +320,13 @@ int CpuArm7tdmi::step() {
     if (halted_) {
         if (waitingForInterrupt_) {
             ++executedInstructions_;
-            return 1;
+            return 4;
         }
         if (memory_->pendingInterrupts() != 0U) {
             halted_ = false;
         } else {
             ++executedInstructions_;
-            return 1;
+            return 4;
         }
     }
 
@@ -377,7 +379,7 @@ int CpuArm7tdmi::step() {
             }
         }
         ++executedInstructions_;
-        return 1;
+        return 1 + memory_->consumeAccessTiming();
     }
 
     const u32 currentPc = regs_[15];
@@ -406,7 +408,7 @@ int CpuArm7tdmi::step() {
     const u8 cond = static_cast<u8>((instruction & kCondMask) >> 28U);
     if (!conditionPassed(cond)) {
         ++executedInstructions_;
-        return 1;
+        return 2 + memory_->consumeAccessTiming();
     }
 
     bool executed = false;
@@ -465,7 +467,7 @@ int CpuArm7tdmi::step() {
         }
     }
     ++executedInstructions_;
-    return 1;
+    return 2 + memory_->consumeAccessTiming();
 }
 
 u32 CpuArm7tdmi::reg(int index) const {

@@ -20,6 +20,9 @@ constexpr std::array<u16, 4> kTimerIrqMasks = {
     static_cast<u16>(1U << 6U),
 };
 constexpr u16 kKeypadIrqMask = static_cast<u16>(1U << 12U);
+constexpr u32 kSoundCntHOffset = 0x0082U;
+constexpr u32 kFifoAOffset = 0x00A0U;
+constexpr u32 kFifoBOffset = 0x00A4U;
 constexpr u32 kVramMirrorStart = 0x18000U;
 constexpr u32 kVramMirrorSubtract = 0x8000U;
 constexpr u32 kBackupSramFlashBase = 0x0E000000U;
@@ -31,6 +34,10 @@ constexpr std::size_t kFlash64Size = 0x10000U;
 constexpr std::size_t kFlash128Size = 0x20000U;
 constexpr std::size_t kEepromMaxSize = 0x2000U; // 8 KiB
 constexpr std::size_t kEepromWordBytes = 8U;
+constexpr std::array<int, 4> kGamePakNonSequentialCycles = {4, 3, 2, 8};
+constexpr std::array<int, 2> kGamePakSequentialCycles0 = {2, 1};
+constexpr std::array<int, 2> kGamePakSequentialCycles1 = {4, 1};
+constexpr std::array<int, 2> kGamePakSequentialCycles2 = {8, 1};
 
 std::pair<u8, u8> defaultFlashIdPair(bool flash128) {
     return flash128
@@ -211,7 +218,17 @@ void Memory::reset() {
     writeIo16(IeOffset, 0);
     writeIo16(IfOffset, 0);
     writeIo16(ImeOffset, 0);
+    writeIo16(WaitcntOffset, 0);
+    resetAudioFifo(0);
+    resetAudioFifo(1);
+    deferredBusCycles_ = 0;
     resetBackupState();
+    accessTimingActive_ = false;
+    accessCycles_ = 0;
+    lastAccessAddress_ = 0;
+    lastAccessBytes_ = 0;
+    lastAccessValid_ = false;
+    lastAccessWasWrite_ = false;
 }
 
 void Memory::step(int cpuCycles) {
@@ -221,25 +238,168 @@ void Memory::step(int cpuCycles) {
     stepTimers(static_cast<std::uint32_t>(cpuCycles));
 }
 
-u8 Memory::read8(u32 address) const {
-    if (const u8* ptr = writableBytePointer(address); ptr != nullptr) {
-        return *ptr;
-    }
+void Memory::beginAccessTiming() {
+    accessTimingActive_ = true;
+    accessCycles_ = 0;
+    lastAccessAddress_ = 0;
+    lastAccessBytes_ = 0;
+    lastAccessValid_ = false;
+    lastAccessWasWrite_ = false;
+}
 
-    const u32 region = address >> 24U;
-    if (region == 0x0DU && isEepromBackup()) {
-        return readEepromBit();
+int Memory::consumeAccessTiming() {
+    const int cycles = accessCycles_;
+    accessTimingActive_ = false;
+    accessCycles_ = 0;
+    lastAccessAddress_ = 0;
+    lastAccessBytes_ = 0;
+    lastAccessValid_ = false;
+    lastAccessWasWrite_ = false;
+    return cycles;
+}
+
+int Memory::consumeDeferredBusCycles() {
+    const int cycles = deferredBusCycles_;
+    deferredBusCycles_ = 0;
+    return cycles;
+}
+
+std::size_t Memory::audioFifoLevel(int fifoIndex) const {
+    if (fifoIndex < 0 || fifoIndex >= static_cast<int>(audioFifos_.size())) {
+        return 0U;
     }
-    if (region == 0x0EU && hasPersistentBackup()) {
-        return readBackup8(address);
+    return audioFifos_[static_cast<std::size_t>(fifoIndex)].size;
+}
+
+u8 Memory::audioFifoLastSample(int fifoIndex) const {
+    if (fifoIndex < 0 || fifoIndex >= static_cast<int>(audioFifos_.size())) {
+        return 0U;
     }
-    if (region >= 0x08U && region <= 0x0DU) {
-        return readRom8(address);
+    return audioFifos_[static_cast<std::size_t>(fifoIndex)].lastSample;
+}
+
+Memory::AudioFifoState& Memory::audioFifo(int fifoIndex) {
+    return audioFifos_[static_cast<std::size_t>(fifoIndex)];
+}
+
+const Memory::AudioFifoState& Memory::audioFifo(int fifoIndex) const {
+    return audioFifos_[static_cast<std::size_t>(fifoIndex)];
+}
+
+bool Memory::isSoundFifoAddress(u32 address, int& fifoIndex) {
+    const u32 offset = address & 0x3FFU;
+    if (offset >= kFifoAOffset && offset < kFifoAOffset + 4U) {
+        fifoIndex = 0;
+        return true;
     }
-    return 0;
+    if (offset >= kFifoBOffset && offset < kFifoBOffset + 4U) {
+        fifoIndex = 1;
+        return true;
+    }
+    fifoIndex = -1;
+    return false;
+}
+
+void Memory::resetAudioFifo(int fifoIndex) {
+    if (fifoIndex < 0 || fifoIndex >= static_cast<int>(audioFifos_.size())) {
+        return;
+    }
+    audioFifo(fifoIndex) = AudioFifoState{};
+}
+
+void Memory::writeAudioFifo(int fifoIndex, u32 value, int bytes) {
+    if (fifoIndex < 0 || fifoIndex >= static_cast<int>(audioFifos_.size()) || bytes <= 0) {
+        return;
+    }
+    AudioFifoState& fifo = audioFifo(fifoIndex);
+    const int clampedBytes = std::min(bytes, 4);
+    for (int i = 0; i < clampedBytes; ++i) {
+        const u8 sample = static_cast<u8>((value >> (i * 8)) & 0xFFU);
+        if (fifo.size < fifo.data.size()) {
+            const std::size_t writePos = (fifo.readPos + fifo.size) % fifo.data.size();
+            fifo.data[writePos] = sample;
+            ++fifo.size;
+        } else {
+            fifo.data[fifo.readPos] = sample;
+            fifo.readPos = (fifo.readPos + 1U) % fifo.data.size();
+        }
+    }
+}
+
+bool Memory::isSoundFifoTimerSelected(int fifoIndex, std::size_t timerIndex) const {
+    if (timerIndex > 1U || fifoIndex < 0 || fifoIndex >= static_cast<int>(audioFifos_.size())) {
+        return false;
+    }
+    const u16 soundCntH = readIo16(kSoundCntHOffset);
+    if (fifoIndex == 0) {
+        const bool routed = (soundCntH & 0x0300U) != 0U;
+        const std::size_t selectedTimer = (soundCntH & 0x0400U) != 0U ? 1U : 0U;
+        return routed && selectedTimer == timerIndex;
+    }
+    const bool routed = (soundCntH & 0x3000U) != 0U;
+    const std::size_t selectedTimer = (soundCntH & 0x4000U) != 0U ? 1U : 0U;
+    return routed && selectedTimer == timerIndex;
+}
+
+void Memory::triggerSoundFifoDma(int fifoIndex) {
+    const u32 fifoAddress = fifoIndex == 0 ? (IoBase + kFifoAOffset) : (IoBase + kFifoBOffset);
+    for (std::size_t channel = 1; channel <= 2; ++channel) {
+        const std::size_t base = dmaOffset(channel);
+        const u32 dest = static_cast<u32>(io_[base + 4U])
+            | (static_cast<u32>(io_[base + 5U]) << 8U)
+            | (static_cast<u32>(io_[base + 6U]) << 16U)
+            | (static_cast<u32>(io_[base + 7U]) << 24U);
+        const u16 control = static_cast<u16>(io_[base + 10U] | (static_cast<u16>(io_[base + 11U]) << 8U));
+        const bool enabled = (control & 0x8000U) != 0U;
+        const u16 startTiming = static_cast<u16>((control >> 12U) & 0x3U);
+        if (!enabled || startTiming != 3U) {
+            continue;
+        }
+        if ((dest & ~0x3U) != fifoAddress) {
+            continue;
+        }
+        executeDmaTransfer(channel, 3U);
+    }
+}
+
+void Memory::tickAudioFifosForTimer(std::size_t timerIndex, std::uint32_t overflowCount) {
+    if (overflowCount == 0U || timerIndex > 1U) {
+        return;
+    }
+    for (int fifoIndex = 0; fifoIndex < 2; ++fifoIndex) {
+        if (!isSoundFifoTimerSelected(fifoIndex, timerIndex)) {
+            continue;
+        }
+        AudioFifoState& fifo = audioFifo(fifoIndex);
+        for (std::uint32_t i = 0; i < overflowCount; ++i) {
+            if (fifo.size != 0U) {
+                fifo.lastSample = fifo.data[fifo.readPos];
+                fifo.readPos = (fifo.readPos + 1U) % fifo.data.size();
+                --fifo.size;
+            }
+            if (fifo.size <= 16U) {
+                triggerSoundFifoDma(fifoIndex);
+            }
+        }
+    }
+}
+
+void Memory::handleSoundControlWrite(u16 value) {
+    if ((value & 0x0800U) != 0U) {
+        resetAudioFifo(0);
+    }
+    if ((value & 0x8000U) != 0U) {
+        resetAudioFifo(1);
+    }
+}
+
+u8 Memory::read8(u32 address) const {
+    accountAccessTiming(address, 1, false);
+    return read8Raw(address);
 }
 
 u16 Memory::read16(u32 address) const {
+    accountAccessTiming(address, 2, false);
     if ((address >> 24U) == 0x0DU && isEepromBackup()) {
         return static_cast<u16>(readEepromBit() & 0x1U);
     }
@@ -248,12 +408,13 @@ u16 Memory::read16(u32 address) const {
         return static_cast<u16>(v | static_cast<u16>(v << 8U));
     }
     const u32 aligned = address & ~1U;
-    const u16 lo = static_cast<u16>(read8(aligned));
-    const u16 hi = static_cast<u16>(read8(aligned + 1U));
+    const u16 lo = static_cast<u16>(read8Raw(aligned));
+    const u16 hi = static_cast<u16>(read8Raw(aligned + 1U));
     return static_cast<u16>(lo | static_cast<u16>(hi << 8U));
 }
 
 u32 Memory::read32(u32 address) const {
+    accountAccessTiming(address, 4, false);
     if ((address >> 24U) == 0x0DU && isEepromBackup()) {
         const u32 bit0 = static_cast<u32>(readEepromBit() & 0x1U);
         const u32 bit1 = static_cast<u32>(readEepromBit() & 0x1U);
@@ -264,17 +425,25 @@ u32 Memory::read32(u32 address) const {
         return v | (v << 8U) | (v << 16U) | (v << 24U);
     }
     const u32 aligned = address & ~3U;
-    const u32 b0 = static_cast<u32>(read8(aligned));
-    const u32 b1 = static_cast<u32>(read8(aligned + 1U));
-    const u32 b2 = static_cast<u32>(read8(aligned + 2U));
-    const u32 b3 = static_cast<u32>(read8(aligned + 3U));
+    const u32 b0 = static_cast<u32>(read8Raw(aligned));
+    const u32 b1 = static_cast<u32>(read8Raw(aligned + 1U));
+    const u32 b2 = static_cast<u32>(read8Raw(aligned + 2U));
+    const u32 b3 = static_cast<u32>(read8Raw(aligned + 3U));
     const u32 raw = b0 | (b1 << 8U) | (b2 << 16U) | (b3 << 24U);
     const unsigned rotate = static_cast<unsigned>((address & 0x3U) * 8U);
     return rotateRight32(raw, rotate);
 }
 
 void Memory::write8(u32 address, u8 value) {
+    accountAccessTiming(address, 1, true);
     const u32 region = address >> 24U;
+    if (region == 0x04U) {
+        int fifoIndex = -1;
+        if (isSoundFifoAddress(address, fifoIndex)) {
+            writeAudioFifo(fifoIndex, value, 1);
+            return;
+        }
+    }
     if (region == 0x0DU && isEepromBackup()) {
         handleEepromWriteBit(static_cast<u8>(value & 0x1U));
         return;
@@ -304,6 +473,14 @@ void Memory::write8(u32 address, u8 value) {
 }
 
 void Memory::write16(u32 address, u16 value) {
+    accountAccessTiming(address, 2, true);
+    if ((address >> 24U) == 0x04U) {
+        int fifoIndex = -1;
+        if (isSoundFifoAddress(address, fifoIndex)) {
+            writeAudioFifo(fifoIndex, value, 2);
+            return;
+        }
+    }
     if ((address >> 24U) == 0x0DU && isEepromBackup()) {
         handleEepromWriteBit(static_cast<u8>(value & 0x1U));
         return;
@@ -327,6 +504,14 @@ void Memory::write16(u32 address, u16 value) {
 }
 
 void Memory::write32(u32 address, u32 value) {
+    accountAccessTiming(address, 4, true);
+    if ((address >> 24U) == 0x04U) {
+        int fifoIndex = -1;
+        if (isSoundFifoAddress(address, fifoIndex)) {
+            writeAudioFifo(fifoIndex, value, 4);
+            return;
+        }
+    }
     if ((address >> 24U) == 0x0DU && isEepromBackup()) {
         handleEepromWriteBit(static_cast<u8>(value & 0x1U));
         return;
@@ -354,6 +539,24 @@ void Memory::write32(u32 address, u32 value) {
         *b2 = static_cast<u8>((value >> 16U) & 0xFFU);
         *b3 = static_cast<u8>((value >> 24U) & 0xFFU);
     }
+}
+
+u8 Memory::read8Raw(u32 address) const {
+    if (const u8* ptr = writableBytePointer(address); ptr != nullptr) {
+        return *ptr;
+    }
+
+    const u32 region = address >> 24U;
+    if (region == 0x0DU && isEepromBackup()) {
+        return readEepromBit();
+    }
+    if (region == 0x0EU && hasPersistentBackup()) {
+        return readBackup8(address);
+    }
+    if (region >= 0x08U && region <= 0x0DU) {
+        return readRom8(address);
+    }
+    return 0;
 }
 
 const std::vector<u8>& Memory::rom() const {
@@ -493,6 +696,86 @@ u8* Memory::directWritePointer(u32 address, std::size_t size) {
     }
 }
 
+void Memory::accountAccessTiming(u32 address, int accessBytes, bool write) const {
+    if (accessBytes <= 0) {
+        return;
+    }
+
+    const u8 region = static_cast<u8>(address >> 24U);
+    bool sequential = false;
+    if (lastAccessValid_
+        && lastAccessWasWrite_ == write
+        && static_cast<u8>(lastAccessAddress_ >> 24U) == region
+        && address == lastAccessAddress_ + static_cast<u32>(lastAccessBytes_)) {
+        sequential = true;
+    }
+
+    accessCycles_ += accessCyclesForRegion(address, accessBytes, sequential);
+    lastAccessAddress_ = address;
+    lastAccessBytes_ = accessBytes;
+    lastAccessValid_ = true;
+    lastAccessWasWrite_ = write;
+}
+
+int Memory::accessCyclesForRegion(u32 address, int accessBytes, bool sequential) const {
+    const auto waitcnt = readIo16(WaitcntOffset);
+    const auto gamePakCycles16 = [&](int waitStateIndex, bool seq) {
+        const int nonSequentialShift = 2 + waitStateIndex * 3;
+        const int sequentialShift = 4 + waitStateIndex * 3;
+        const int nonSequentialIndex = static_cast<int>((waitcnt >> nonSequentialShift) & 0x3U);
+        const int sequentialIndex = static_cast<int>((waitcnt >> sequentialShift) & 0x1U);
+        if (!seq) {
+            return kGamePakNonSequentialCycles[static_cast<std::size_t>(nonSequentialIndex)];
+        }
+        switch (waitStateIndex) {
+        case 0:
+            return kGamePakSequentialCycles0[static_cast<std::size_t>(sequentialIndex)];
+        case 1:
+            return kGamePakSequentialCycles1[static_cast<std::size_t>(sequentialIndex)];
+        default:
+            return kGamePakSequentialCycles2[static_cast<std::size_t>(sequentialIndex)];
+        }
+    };
+
+    const auto accessCycles16 = [&](u32 halfwordAddress, bool seq) {
+        const u8 region = static_cast<u8>(halfwordAddress >> 24U);
+        switch (region) {
+        case 0x00U: // BIOS
+        case 0x03U: // IWRAM
+        case 0x04U: // IO
+        case 0x05U: // PRAM
+        case 0x06U: // VRAM
+        case 0x07U: // OAM
+            return 1;
+        case 0x02U: // EWRAM
+            return 3;
+        case 0x08U:
+        case 0x09U:
+            return gamePakCycles16(0, seq);
+        case 0x0AU:
+        case 0x0BU:
+            return gamePakCycles16(1, seq);
+        case 0x0CU:
+        case 0x0DU:
+            return gamePakCycles16(2, seq);
+        case 0x0EU: {
+            const int sramIndex = static_cast<int>(waitcnt & 0x3U);
+            return kGamePakNonSequentialCycles[static_cast<std::size_t>(sramIndex)];
+        }
+        default:
+            return 1;
+        }
+    };
+
+    if (accessBytes <= 2) {
+        return accessCycles16(address, sequential);
+    }
+
+    const int first = accessCycles16(address, sequential);
+    const int second = accessCycles16(address + 2U, true);
+    return first + second;
+}
+
 u16 Memory::readIo16(u32 ioOffset) const {
     if (ioOffset + 1U >= IoSize) {
         return 0;
@@ -522,6 +805,11 @@ void Memory::writeIo16(u32 ioOffset, u16 value) {
     if (ioOffset == IfOffset) {
         clearInterrupt(value);
         return;
+    }
+
+    if (ioOffset == kSoundCntHOffset) {
+        handleSoundControlWrite(value);
+        value = static_cast<u16>(value & ~static_cast<u16>(0x8800U));
     }
 
     io_[static_cast<std::size_t>(ioOffset)] = static_cast<u8>(value & 0xFFU);
@@ -820,6 +1108,10 @@ std::uint32_t Memory::tickTimer(std::size_t timerIndex, std::uint32_t cpuCycles,
     io_[base] = static_cast<u8>(timer.counter & 0xFFU);
     io_[base + 1U] = static_cast<u8>((timer.counter >> 8U) & 0xFFU);
 
+    if (overflowCount != 0U) {
+        tickAudioFifosForTimer(timerIndex, overflowCount);
+    }
+
     return overflowCount;
 }
 
@@ -859,10 +1151,17 @@ void Memory::executeDmaTransfer(std::size_t channel, u16 triggeredStartTiming) {
         return;
     }
 
-    const u32 maxCount = channel == 3U ? 0x10000U : 0x4000U;
-    u32 units = count == 0U ? maxCount : static_cast<u32>(count);
+    const u32 fifoADest = IoBase + kFifoAOffset;
+    const u32 fifoBDest = IoBase + kFifoBOffset;
+    const bool soundFifoDma = startTiming == 3U
+        && (channel == 1U || channel == 2U)
+        && transfer32
+        && ((destInit & ~0x3U) == fifoADest || (destInit & ~0x3U) == fifoBDest);
 
-    const u16 dstCtrl = static_cast<u16>((control >> 5U) & 0x3U);
+    const u32 maxCount = channel == 3U ? 0x10000U : 0x4000U;
+    u32 units = soundFifoDma ? 4U : (count == 0U ? maxCount : static_cast<u32>(count));
+
+    const u16 dstCtrl = soundFifoDma ? 2U : static_cast<u16>((control >> 5U) & 0x3U);
     const u16 srcCtrl = static_cast<u16>((control >> 7U) & 0x3U);
     const u32 stride = transfer32 ? 4U : 2U;
     const bool eepromWriteTransfer = isEepromBackup()
@@ -876,6 +1175,8 @@ void Memory::executeDmaTransfer(std::size_t channel, u16 triggeredStartTiming) {
         );
     }
 
+    const int accessBefore = accessCycles_;
+    const bool timingSessionActive = accessTimingActive_;
     for (u32 i = 0; i < units; ++i) {
         if (transfer32) {
             const u32 value = read32(source);
@@ -918,11 +1219,18 @@ void Memory::executeDmaTransfer(std::size_t channel, u16 triggeredStartTiming) {
     io_[base + 8U] = static_cast<u8>(count & 0xFFU);
     io_[base + 9U] = static_cast<u8>((count >> 8U) & 0xFFU);
 
-    const bool keepEnabled = repeat && startTiming != 0U;
+    const bool keepEnabled = (repeat || soundFifoDma) && startTiming != 0U;
     if (!keepEnabled) {
         control = static_cast<u16>(control & ~0x8000U);
         io_[base + 10U] = static_cast<u8>(control & 0xFFU);
         io_[base + 11U] = static_cast<u8>((control >> 8U) & 0xFFU);
+    }
+
+    if (!timingSessionActive) {
+        deferredBusCycles_ += accessCycles_ - accessBefore;
+        accessCycles_ = accessBefore;
+        lastAccessValid_ = false;
+        lastAccessBytes_ = 0;
     }
 
     if (irqOnEnd) {
