@@ -7,6 +7,24 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(GBEMU_USE_SDL2 "Build with SDL2 real-time frontend when available" ON)
 
+if (WIN32 AND GBEMU_USE_SDL2)
+    set(_gbemu_vcpkg_roots)
+    if (DEFINED ENV{VCPKG_ROOT} AND NOT "$ENV{VCPKG_ROOT}" STREQUAL "")
+        list(APPEND _gbemu_vcpkg_roots "$ENV{VCPKG_ROOT}")
+    endif()
+    list(APPEND _gbemu_vcpkg_roots "C:/vcpkg")
+
+    foreach(_root IN LISTS _gbemu_vcpkg_roots)
+        foreach(_triplet IN ITEMS x64-windows x64-windows-static)
+            if (EXISTS "${_root}/installed/${_triplet}/share/sdl2/SDL2Config.cmake")
+                list(APPEND CMAKE_PREFIX_PATH "${_root}/installed/${_triplet}")
+            endif()
+        endforeach()
+    endforeach()
+
+    list(REMOVE_DUPLICATES CMAKE_PREFIX_PATH)
+endif()
+
 add_library(gbcore
     src/core/gameboy.cpp
     src/core/gameboy_state_io.cpp
@@ -45,9 +63,12 @@ add_executable(gbemu
     src/app/sdl_frontend.cpp
 )
 target_link_libraries(gbemu PRIVATE gbcore)
+if (WIN32 AND MSVC)
+    target_link_options(gbemu PRIVATE /STACK:8388608)
+endif()
 
 if (GBEMU_USE_SDL2)
-    find_package(SDL2 QUIET)
+    find_package(SDL2 CONFIG QUIET)
     if (SDL2_FOUND)
         target_sources(gbemu PRIVATE
             src/app/frontend/debug_ui.cpp
@@ -69,8 +90,11 @@ if (GBEMU_USE_SDL2)
         if (TARGET SDL2::SDL2main)
             target_link_libraries(gbemu PRIVATE SDL2::SDL2main)
         endif()
+        if (WIN32)
+            target_link_libraries(gbemu PRIVATE ole32 windowscodecs)
+        endif()
         target_compile_definitions(gbemu PRIVATE GBEMU_USE_SDL2=1 SDL_MAIN_HANDLED=1)
-        find_package(SDL2_image QUIET)
+        find_package(SDL2_image CONFIG QUIET)
         if (SDL2_image_FOUND)
             target_link_libraries(gbemu PRIVATE SDL2_image::SDL2_image)
             target_compile_definitions(gbemu PRIVATE GBEMU_USE_SDL2_IMAGE=1)
@@ -113,6 +137,7 @@ if (BUILD_TESTING)
     target_link_libraries(gbemu_tests PRIVATE gbcore)
     if (MSVC)
         target_compile_options(gbemu_tests PRIVATE /W4)
+        target_link_options(gbemu_tests PRIVATE /STACK:8388608)
     else()
         target_compile_options(gbemu_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()

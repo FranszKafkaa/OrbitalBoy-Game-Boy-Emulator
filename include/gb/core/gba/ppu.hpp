@@ -103,6 +103,7 @@ private:
         bool semiTransparentObj = false
     ) const;
     [[nodiscard]] u8 windowMaskForPixel(int x, int y) const;
+    [[nodiscard]] u8 windowMaskForPixel(int x, int y, const RasterLineSnapshot& line) const;
     [[nodiscard]] static bool pointInsideWindowRange(int value, int start, int end, int limit);
     [[nodiscard]] static bool pointInsideWindowRect(int x, int y, u16 winH, u16 winV);
     [[nodiscard]] static bool layerEnabledByWindowMask(u8 mask, u8 layerBit);
@@ -137,8 +138,11 @@ private:
     bool prevHblank_ = false;
     bool prevVcounterMatch_ = false;
     std::array<RasterLineSnapshot, VisibleLines> rasterLineSnapshots_{};
+    std::array<RasterLineSnapshot, VisibleLines> completedRasterLineSnapshots_{};
     std::array<AffineLineSnapshot, VisibleLines> bg2LineSnapshots_{};
     std::array<AffineLineSnapshot, VisibleLines> bg3LineSnapshots_{};
+    std::array<AffineLineSnapshot, VisibleLines> completedBg2LineSnapshots_{};
+    std::array<AffineLineSnapshot, VisibleLines> completedBg3LineSnapshots_{};
     mutable const std::array<bool, FramebufferSize>* activeObjWindowMask_ = nullptr;
 };
 

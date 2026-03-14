@@ -56,6 +56,7 @@ private:
         bool stateSwitch = false;
         bool bl = false;
         bool swi = false;
+        bool irq = false;
     };
 
     [[nodiscard]] static u32 rotateRight(u32 value, unsigned amount);

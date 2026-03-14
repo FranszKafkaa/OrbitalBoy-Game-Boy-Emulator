@@ -43,6 +43,8 @@ struct CompatibilityProfile {
     bool forceScanlineFrameSync = false;
     bool enableAdaptiveScanlineFallback = true;
     bool useFlashCompatibilityMode = false;
+    int flashVendorId = -1;
+    int flashDeviceId = -1;
     int forcedEepromAddressBits = 0; // 0=auto, 6/14 for override
     bool strictBackupFileSize = false;
 };
@@ -78,6 +80,7 @@ public:
     void setInputState(const InputState& input);
 
 private:
+    void runUntilFrameBoundary(int targetBusCycles, int instructionLimit);
     void refreshMetadata();
     void configureCompatibilityProfile();
     void renderBootstrapFrame();

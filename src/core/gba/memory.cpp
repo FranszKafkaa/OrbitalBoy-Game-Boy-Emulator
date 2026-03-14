@@ -1,10 +1,13 @@
 #include "gb/core/gba/memory.hpp"
+#include "gb/core/environment.hpp"
 
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 #include <string>
+#include <utility>
 
 namespace gb::gba {
 
@@ -28,6 +31,44 @@ constexpr std::size_t kFlash64Size = 0x10000U;
 constexpr std::size_t kFlash128Size = 0x20000U;
 constexpr std::size_t kEepromMaxSize = 0x2000U; // 8 KiB
 constexpr std::size_t kEepromWordBytes = 8U;
+
+std::pair<u8, u8> defaultFlashIdPair(bool flash128) {
+    return flash128
+        ? std::pair<u8, u8>{static_cast<u8>(0x62U), static_cast<u8>(0x13U)}
+        : std::pair<u8, u8>{static_cast<u8>(0xBFU), static_cast<u8>(0xD4U)};
+}
+
+std::pair<u8, u8> flashIdPairFromEnvironment(bool flash128) {
+    const auto configured = gb::readEnvironmentVariable("GBEMU_GBA_FLASH_ID");
+    if (!configured.has_value()) {
+        return defaultFlashIdPair(flash128);
+    }
+
+    const std::string value = *configured;
+    if (value == "panasonic") {
+        return {static_cast<u8>(0x32U), static_cast<u8>(0x1BU)};
+    }
+    if (value == "macronix") {
+        return {static_cast<u8>(0xC2U), static_cast<u8>(0x1CU)};
+    }
+    if (value == "sanyo") {
+        return {static_cast<u8>(0x62U), static_cast<u8>(0x13U)};
+    }
+    if (value == "atmel") {
+        return {static_cast<u8>(0x1FU), static_cast<u8>(0x3DU)};
+    }
+    return defaultFlashIdPair(flash128);
+}
+
+std::pair<u8, u8> resolveFlashIdPair(bool flash128, int vendorOverride, int deviceOverride) {
+    if (vendorOverride >= 0 && vendorOverride <= 0xFF && deviceOverride >= 0 && deviceOverride <= 0xFF) {
+        return {
+            static_cast<u8>(vendorOverride & 0xFF),
+            static_cast<u8>(deviceOverride & 0xFF),
+        };
+    }
+    return flashIdPairFromEnvironment(flash128);
+}
 
 u32 rotateRight32(u32 value, unsigned amount) {
     const unsigned shift = amount & 31U;
@@ -110,6 +151,33 @@ std::string backupTypeToText(gb::gba::Memory::BackupType type) {
     }
 }
 
+bool allBytesEqual(const std::vector<u8>& data, u8 value) {
+    return !data.empty() && std::all_of(data.begin(), data.end(), [value](u8 byte) {
+        return byte == value;
+    });
+}
+
+bool backupLoggingEnabled() {
+    static const bool enabled = gb::hasEnvironmentVariable("GBEMU_GBA_LOG_BACKUP");
+    return enabled;
+}
+
+void logBackupEvent(const std::string& message) {
+    if (!backupLoggingEnabled()) {
+        return;
+    }
+    static int emitted = 0;
+    if (emitted >= 512) {
+        if (emitted == 512) {
+            std::cerr << "[GBA][BACKUP] log limit reached\n";
+            ++emitted;
+        }
+        return;
+    }
+    std::cerr << "[GBA][BACKUP] " << message << "\n";
+    ++emitted;
+}
+
 } // namespace
 
 bool Memory::loadRom(const std::vector<u8>& romData) {
@@ -118,9 +186,7 @@ bool Memory::loadRom(const std::vector<u8>& romData) {
     }
     rom_ = romData;
     detectBackupType();
-    const u8 backupInit = (backupType_ == BackupType::Flash64 || backupType_ == BackupType::Flash128)
-        ? static_cast<u8>(0x00U)
-        : static_cast<u8>(0xFFU);
+    const u8 backupInit = static_cast<u8>(0xFFU);
     backupStorage_.assign(backupStorageSize(backupType_), backupInit);
     backupDirty_ = false;
     resetBackupState();
@@ -129,12 +195,12 @@ bool Memory::loadRom(const std::vector<u8>& romData) {
 }
 
 void Memory::reset() {
-    std::fill(ewram_.begin(), ewram_.end(), 0);
-    std::fill(iwram_.begin(), iwram_.end(), 0);
-    std::fill(pram_.begin(), pram_.end(), 0);
-    std::fill(vram_.begin(), vram_.end(), 0);
-    std::fill(oam_.begin(), oam_.end(), 0);
-    std::fill(io_.begin(), io_.end(), 0);
+    std::fill(ewram_.begin(), ewram_.end(), static_cast<u8>(0U));
+    std::fill(iwram_.begin(), iwram_.end(), static_cast<u8>(0U));
+    std::fill(pram_.begin(), pram_.end(), static_cast<u8>(0U));
+    std::fill(vram_.begin(), vram_.end(), static_cast<u8>(0U));
+    std::fill(oam_.begin(), oam_.end(), static_cast<u8>(0U));
+    std::fill(io_.begin(), io_.end(), static_cast<u8>(0U));
 
     for (auto& timer : timers_) {
         timer = TimerState{};
@@ -314,6 +380,119 @@ const std::array<u8, Memory::OamSize>& Memory::oam() const {
     return oam_;
 }
 
+const u8* Memory::directReadPointer(u32 address, std::size_t size) const {
+    if (size == 0U) {
+        return nullptr;
+    }
+
+    const u32 region = address >> 24U;
+    switch (region) {
+    case 0x02U: {
+        const std::size_t idx = static_cast<std::size_t>(address & 0x3FFFFU);
+        if (idx + size > ewram_.size()) {
+            return nullptr;
+        }
+        return ewram_.data() + idx;
+    }
+    case 0x03U: {
+        const std::size_t idx = static_cast<std::size_t>(address & 0x7FFFU);
+        if (idx + size > iwram_.size()) {
+            return nullptr;
+        }
+        return iwram_.data() + idx;
+    }
+    case 0x05U: {
+        const std::size_t idx = static_cast<std::size_t>(address & 0x3FFU);
+        if (idx + size > pram_.size()) {
+            return nullptr;
+        }
+        return pram_.data() + idx;
+    }
+    case 0x06U: {
+        const u32 rawOffset = address & 0x1FFFFU;
+        if (rawOffset >= 0x18000U) {
+            return nullptr;
+        }
+        const std::size_t idx = mapVramOffset(address);
+        if (idx + size > vram_.size()) {
+            return nullptr;
+        }
+        return vram_.data() + idx;
+    }
+    case 0x07U: {
+        const std::size_t idx = static_cast<std::size_t>(address & 0x3FFU);
+        if (idx + size > oam_.size()) {
+            return nullptr;
+        }
+        return oam_.data() + idx;
+    }
+    default:
+        break;
+    }
+
+    if (region >= 0x08U && region <= 0x0DU && !rom_.empty()) {
+        const u32 romAddress = address - 0x08000000U;
+        const std::size_t idx = static_cast<std::size_t>(romAddress);
+        if (idx + size > rom_.size()) {
+            return nullptr;
+        }
+        return rom_.data() + idx;
+    }
+
+    return nullptr;
+}
+
+u8* Memory::directWritePointer(u32 address, std::size_t size) {
+    if (size == 0U) {
+        return nullptr;
+    }
+
+    const u32 region = address >> 24U;
+    switch (region) {
+    case 0x02U: {
+        const std::size_t idx = static_cast<std::size_t>(address & 0x3FFFFU);
+        if (idx + size > ewram_.size()) {
+            return nullptr;
+        }
+        return ewram_.data() + idx;
+    }
+    case 0x03U: {
+        const std::size_t idx = static_cast<std::size_t>(address & 0x7FFFU);
+        if (idx + size > iwram_.size()) {
+            return nullptr;
+        }
+        return iwram_.data() + idx;
+    }
+    case 0x05U: {
+        const std::size_t idx = static_cast<std::size_t>(address & 0x3FFU);
+        if (idx + size > pram_.size()) {
+            return nullptr;
+        }
+        return pram_.data() + idx;
+    }
+    case 0x06U: {
+        const u32 rawOffset = address & 0x1FFFFU;
+        if (rawOffset >= 0x18000U) {
+            return nullptr;
+        }
+        const std::size_t idx = mapVramOffset(address);
+        if (idx + size > vram_.size()) {
+            return nullptr;
+        }
+        return vram_.data() + idx;
+    }
+    case 0x07U: {
+        const std::size_t idx = static_cast<std::size_t>(address & 0x3FFU);
+        if (idx + size > oam_.size()) {
+            return nullptr;
+        }
+        return oam_.data() + idx;
+    }
+    default:
+        return nullptr;
+    }
+}
+
 u16 Memory::readIo16(u32 ioOffset) const {
     if (ioOffset + 1U >= IoSize) {
         return 0;
@@ -444,6 +623,11 @@ void Memory::configureBackupBehavior(int forcedEepromAddressBits, bool strictBac
     resetBackupState();
 }
 
+void Memory::setFlashIdOverride(int vendorId, int deviceId) {
+    flashVendorIdOverride_ = (vendorId >= 0 && vendorId <= 0xFF) ? vendorId : -1;
+    flashDeviceIdOverride_ = (deviceId >= 0 && deviceId <= 0xFF) ? deviceId : -1;
+}
+
 void Memory::setFlashCompatibilityMode(bool enabled) {
     flashCompatibilityMode_ = enabled;
     if (!flashCompatibilityMode_ || !isFlashBackup() || backupStorage_.empty()) {
@@ -461,6 +645,10 @@ bool Memory::flashCompatibilityMode() const {
     return flashCompatibilityMode_;
 }
 
+std::size_t Memory::expectedBackupFileSize() const {
+    return backupPersistSizeBytes();
+}
+
 bool Memory::loadBackupFromFile(const std::string& path) {
     if (backupStorage_.empty() || path.empty()) {
         return false;
@@ -476,11 +664,12 @@ bool Memory::loadBackupFromFile(const std::string& path) {
     if (fileData.empty()) {
         return false;
     }
+    int loadedEepromAddressBits = 0;
     if (backupType_ == BackupType::Eeprom && forcedEepromAddressBits_ == 0) {
         if (fileData.size() >= kEepromMaxSize) {
-            eepromAddressBits_ = 14;
+            loadedEepromAddressBits = 14;
         } else if (fileData.size() >= 512U) {
-            eepromAddressBits_ = 6;
+            loadedEepromAddressBits = 6;
         }
     }
     if (strictBackupFileSize_ && fileData.size() != backupPersistSizeBytes()) {
@@ -488,10 +677,22 @@ bool Memory::loadBackupFromFile(const std::string& path) {
             return false;
         }
     }
+    std::fill(backupStorage_.begin(), backupStorage_.end(), static_cast<u8>(0xFFU));
     const std::size_t copySize = std::min(fileData.size(), backupStorage_.size());
     std::copy(fileData.begin(), fileData.begin() + static_cast<std::ptrdiff_t>(copySize), backupStorage_.begin());
-    backupDirty_ = false;
+
     resetBackupState();
+    if (backupType_ == BackupType::Eeprom && loadedEepromAddressBits != 0 && forcedEepromAddressBits_ == 0) {
+        eepromAddressBits_ = loadedEepromAddressBits;
+    }
+    if (isFlashBackup()) {
+        if (!flashCompatibilityMode_ && allBytesEqual(backupStorage_, static_cast<u8>(0x00U))) {
+            std::fill(backupStorage_.begin(), backupStorage_.end(), static_cast<u8>(0xFFU));
+        } else if (flashCompatibilityMode_ && allBytesEqual(backupStorage_, static_cast<u8>(0xFFU))) {
+            std::fill(backupStorage_.begin(), backupStorage_.end(), static_cast<u8>(0x00U));
+        }
+    }
+    backupDirty_ = false;
     return true;
 }
 
@@ -669,6 +870,10 @@ void Memory::executeDmaTransfer(std::size_t channel, u16 triggeredStartTiming) {
         && ((destInit >> 24U) == 0x0DU);
     if (eepromWriteTransfer) {
         eepromExpectedWriteBits_ = static_cast<int>(units);
+        logBackupEvent(
+            "dma-eeprom-write bits=" + std::to_string(units)
+            + " src=0x" + std::to_string(sourceInit)
+        );
     }
 
     for (u32 i = 0; i < units; ++i) {
@@ -786,6 +991,9 @@ void Memory::detectBackupType() {
 std::size_t Memory::effectiveEepromAddressBits() const {
     if (forcedEepromAddressBits_ == 6 || forcedEepromAddressBits_ == 14) {
         return static_cast<std::size_t>(forcedEepromAddressBits_);
+    }
+    if (eepromAddressBits_ == 6 || eepromAddressBits_ == 14) {
+        return static_cast<std::size_t>(eepromAddressBits_);
     }
     // Heuristica comum: ROM > 16 MiB tende a usar EEPROM 8 KiB (14-bit).
     return rom_.size() > 0x01000000U ? 14U : 6U;
@@ -951,6 +1159,11 @@ void Memory::maybeCommitEepromCommand() {
                 addressWord = (addressWord << 1U) | static_cast<u32>(eepromWriteBits_[2U + static_cast<std::size_t>(i)] & 0x1U);
             }
             eepromAddressBits_ = addressBits;
+            logBackupEvent(
+                "eeprom-read bits=" + std::to_string(expected)
+                + " addrBits=" + std::to_string(addressBits)
+                + " addrWord=" + std::to_string(addressWord)
+            );
             pushEepromReadBlock(addressWord);
             eepromWriteBits_.clear();
             return true;
@@ -967,6 +1180,11 @@ void Memory::maybeCommitEepromCommand() {
             for (int i = 0; i < addressBits; ++i) {
                 addressWord = (addressWord << 1U) | static_cast<u32>(eepromWriteBits_[2U + static_cast<std::size_t>(i)] & 0x1U);
             }
+            logBackupEvent(
+                "eeprom-write bits=" + std::to_string(expected)
+                + " addrBits=" + std::to_string(addressBits)
+                + " addrWord=" + std::to_string(addressWord)
+            );
             const std::size_t blockCount = addressBits <= 6 ? 64U : 1024U;
             const std::size_t safeBlockCount = std::min(blockCount, backupStorage_.size() / kEepromWordBytes);
             const std::size_t block = safeBlockCount == 0U ? 0U : (static_cast<std::size_t>(addressWord) & (safeBlockCount - 1U));
@@ -1093,6 +1311,7 @@ void Memory::handleFlashCommandWrite(u32 address, u8 value) {
     if (value == 0xF0U) {
         flashIdMode_ = false;
         flashStage_ = FlashStage::Ready;
+        logBackupEvent("flash-reset-id");
         return;
     }
 
@@ -1116,15 +1335,19 @@ void Memory::handleFlashCommandWrite(u32 address, u8 value) {
         case 0x90U:
             flashIdMode_ = true;
             flashStage_ = FlashStage::Ready;
+            logBackupEvent("flash-enter-id");
             break;
         case 0xA0U:
             flashStage_ = FlashStage::ProgramByte;
+            logBackupEvent("flash-program-next");
             break;
         case 0x80U:
             flashStage_ = FlashStage::EraseUnlock1;
+            logBackupEvent("flash-erase-sequence");
             break;
         case 0xB0U:
             flashStage_ = FlashStage::BankSelect;
+            logBackupEvent("flash-bank-select-next");
             break;
         default:
             flashStage_ = FlashStage::Ready;
@@ -1132,6 +1355,10 @@ void Memory::handleFlashCommandWrite(u32 address, u8 value) {
         }
         break;
     case FlashStage::ProgramByte:
+        logBackupEvent(
+            "flash-program addr=0x" + std::to_string(local)
+            + " value=" + std::to_string(value)
+        );
         programFlashByte(address, value);
         flashStage_ = FlashStage::Ready;
         break;
@@ -1147,8 +1374,10 @@ void Memory::handleFlashCommandWrite(u32 address, u8 value) {
         break;
     case FlashStage::EraseCommand:
         if (local == kFlashUnlockAddr1 && value == 0x10U) {
+            logBackupEvent("flash-erase-chip");
             eraseFlashChip();
         } else if (value == 0x30U) {
+            logBackupEvent("flash-erase-sector addr=0x" + std::to_string(local));
             eraseFlashSector(address);
         }
         flashStage_ = FlashStage::Ready;
@@ -1156,6 +1385,7 @@ void Memory::handleFlashCommandWrite(u32 address, u8 value) {
     case FlashStage::BankSelect:
         if (backupType_ == BackupType::Flash128 && local == 0U) {
             flashBank_ = static_cast<u8>(value & 0x1U);
+            logBackupEvent("flash-bank=" + std::to_string(flashBank_));
         }
         flashStage_ = FlashStage::Ready;
         break;
@@ -1168,11 +1398,16 @@ void Memory::handleFlashCommandWrite(u32 address, u8 value) {
 u8 Memory::readFlash8(u32 address) const {
     const u32 local = (address - kBackupSramFlashBase) & kBackupSramFlashMask;
     if (flashIdMode_) {
+        const auto [vendorId, deviceId] = resolveFlashIdPair(
+            backupType_ == BackupType::Flash128,
+            flashVendorIdOverride_,
+            flashDeviceIdOverride_
+        );
         if (local == 0U) {
-            return backupType_ == BackupType::Flash128 ? 0x62U : 0xBFU;
+            return vendorId;
         }
         if (local == 1U) {
-            return backupType_ == BackupType::Flash128 ? 0x13U : 0xD4U;
+            return deviceId;
         }
         return 0xFFU;
     }
@@ -1199,8 +1434,9 @@ void Memory::programFlashByte(u32 address, u8 value) {
     }
     idx %= backupStorage_.size();
 
-    if (backupStorage_[idx] != value) {
-        backupStorage_[idx] = value;
+    const u8 programmed = static_cast<u8>(backupStorage_[idx] & value);
+    if (backupStorage_[idx] != programmed) {
+        backupStorage_[idx] = programmed;
         backupDirty_ = true;
     }
 }
@@ -1218,7 +1454,11 @@ void Memory::eraseFlashSector(u32 address) {
         return;
     }
     const std::size_t end = std::min(idx + 0x1000U, backupStorage_.size());
-    std::fill(backupStorage_.begin() + static_cast<std::ptrdiff_t>(idx), backupStorage_.begin() + static_cast<std::ptrdiff_t>(end), 0xFFU);
+    std::fill(
+        backupStorage_.begin() + static_cast<std::ptrdiff_t>(idx),
+        backupStorage_.begin() + static_cast<std::ptrdiff_t>(end),
+        static_cast<u8>(0xFFU)
+    );
     backupDirty_ = true;
 }
 
@@ -1226,7 +1466,7 @@ void Memory::eraseFlashChip() {
     if (backupStorage_.empty()) {
         return;
     }
-    std::fill(backupStorage_.begin(), backupStorage_.end(), 0xFFU);
+    std::fill(backupStorage_.begin(), backupStorage_.end(), static_cast<u8>(0xFFU));
     backupDirty_ = true;
 }
 

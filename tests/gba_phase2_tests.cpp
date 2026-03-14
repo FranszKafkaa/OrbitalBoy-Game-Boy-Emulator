@@ -1,12 +1,12 @@
 #include <array>
 #include <cctype>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
 
+#include "gb/core/environment.hpp"
 #include "gb/core/gba/cpu.hpp"
 #include "gb/core/gba/memory.hpp"
 #include "gb/core/gba/ppu.hpp"
@@ -48,9 +48,26 @@ std::vector<gb::u8> makeArmRom(std::initializer_list<gb::u32> instructions) {
     return rom;
 }
 
-std::vector<gb::u8> makeGbaRomWithBackupTag(const std::string& tag) {
+std::vector<gb::u8> makeGbaRomWithBackupTag(
+    const std::string& tag,
+    const std::string& gameCode = {},
+    const std::string& title = {}
+) {
     std::vector<gb::u8> rom(0x400, 0x00);
     rom[0xB2] = 0x96;
+    if (!title.empty()) {
+        const std::size_t titleLen = std::min<std::size_t>(title.size(), 12U);
+        for (std::size_t i = 0; i < titleLen; ++i) {
+            rom[0xA0U + i] = static_cast<gb::u8>(title[i]);
+        }
+    }
+    if (gameCode.size() == 4U) {
+        for (std::size_t i = 0; i < 4U; ++i) {
+            rom[0xACU + i] = static_cast<gb::u8>(gameCode[i]);
+        }
+        rom[0xB0U] = static_cast<gb::u8>('0');
+        rom[0xB1U] = static_cast<gb::u8>('1');
+    }
     const std::size_t maxLen = std::min<std::size_t>(tag.size(), rom.size() - 0x100U);
     for (std::size_t i = 0; i < maxLen; ++i) {
         rom[0x100U + i] = static_cast<gb::u8>(tag[i]);
@@ -79,6 +96,26 @@ gb::u16 bgr555ToRgb565(gb::u16 pixel) {
     const gb::u16 b5 = static_cast<gb::u16>((pixel >> 10U) & 0x1FU);
     const gb::u16 g6 = static_cast<gb::u16>((g5 << 1U) | (g5 >> 4U));
     return static_cast<gb::u16>((r5 << 11U) | (g6 << 5U) | b5);
+}
+
+template <std::size_t N>
+std::size_t countDistinctColors(const std::array<gb::u16, N>& framebuffer, std::size_t stopAfter = 64U) {
+    std::vector<gb::u16> colors;
+    colors.reserve(std::min<std::size_t>(stopAfter, framebuffer.size()));
+    for (gb::u16 pixel : framebuffer) {
+        if (std::find(colors.begin(), colors.end(), pixel) != colors.end()) {
+            continue;
+        }
+        colors.push_back(pixel);
+        if (colors.size() >= stopAfter) {
+            break;
+        }
+    }
+    return colors.size();
+}
+
+std::filesystem::path localRomPath(const std::filesystem::path& relativePath) {
+    return std::filesystem::current_path() / relativePath;
 }
 
 std::vector<std::vector<std::pair<std::string, gb::u32>>> parseDiffTrace(const std::filesystem::path& path) {
@@ -430,6 +467,67 @@ TEST_CASE("cpu", "gba_swi_rluncomp_vram_packs_bytes_in_halfwords") {
     T_EQ(memory.read16(dst + 4U), static_cast<gb::u16>(0x557AU));
 }
 
+TEST_CASE("cpu", "gba_swi_bgaffineset_uses_8bit_angle_turns") {
+    gb::gba::Memory memory;
+    const auto rom = makeArmRom({
+        0xEF00000EU, // SWI BgAffineSet
+    });
+    T_REQUIRE(memory.loadRom(rom));
+
+    const gb::u32 src = 0x02000000U;
+    const gb::u32 dst = 0x02000100U;
+    memory.write32(src + 0U, 0U); // texX
+    memory.write32(src + 4U, 0U); // texY
+    memory.write16(src + 8U, 0U); // screenX
+    memory.write16(src + 10U, 0U); // screenY
+    memory.write16(src + 12U, 0x0100U); // scaleX = 1.0
+    memory.write16(src + 14U, 0x0100U); // scaleY = 1.0
+    memory.write16(src + 16U, 0x0040U); // 64/256 turn = 90 graus
+
+    gb::gba::CpuArm7tdmi cpu;
+    cpu.connectMemory(&memory);
+    cpu.reset();
+    cpu.setReg(0, src);
+    cpu.setReg(1, dst);
+    cpu.setReg(2, 1U);
+
+    (void)cpu.step();
+
+    T_EQ(memory.read16(dst + 0U), static_cast<gb::u16>(0x0000U));
+    T_EQ(memory.read16(dst + 2U), static_cast<gb::u16>(0xFF00U));
+    T_EQ(memory.read16(dst + 4U), static_cast<gb::u16>(0x0100U));
+    T_EQ(memory.read16(dst + 6U), static_cast<gb::u16>(0x0000U));
+}
+
+TEST_CASE("cpu", "gba_swi_objaffineset_uses_8bit_angle_turns") {
+    gb::gba::Memory memory;
+    const auto rom = makeArmRom({
+        0xEF00000FU, // SWI ObjAffineSet
+    });
+    T_REQUIRE(memory.loadRom(rom));
+
+    const gb::u32 src = 0x02000040U;
+    const gb::u32 dst = 0x07000006U;
+    memory.write16(src + 0U, 0x0100U); // scaleX = 1.0
+    memory.write16(src + 2U, 0x0100U); // scaleY = 1.0
+    memory.write16(src + 4U, 0x0040U); // 90 graus
+
+    gb::gba::CpuArm7tdmi cpu;
+    cpu.connectMemory(&memory);
+    cpu.reset();
+    cpu.setReg(0, src);
+    cpu.setReg(1, dst);
+    cpu.setReg(2, 1U);
+    cpu.setReg(3, 8U);
+
+    (void)cpu.step();
+
+    T_EQ(memory.read16(dst + 0U), static_cast<gb::u16>(0x0000U));
+    T_EQ(memory.read16(dst + 8U), static_cast<gb::u16>(0xFF00U));
+    T_EQ(memory.read16(dst + 16U), static_cast<gb::u16>(0x0100U));
+    T_EQ(memory.read16(dst + 24U), static_cast<gb::u16>(0x0000U));
+}
+
 TEST_CASE("cpu", "gba_thumb_bl_reaches_expected_target_and_sets_lr") {
     gb::gba::Memory memory;
     std::vector<gb::u8> rom(0x200, 0x00);
@@ -725,12 +823,12 @@ TEST_CASE("cpu", "gba_arm_invalid_execute_address_triggers_prefetch_abort_except
 }
 
 TEST_CASE("cpu", "gba_cpu_optional_diff_trace_matches_reference_file") {
-    const char* tracePathEnv = std::getenv("GBEMU_GBA_MGBA_TRACE");
-    if (tracePathEnv == nullptr || tracePathEnv[0] == '\0') {
+    const auto tracePathEnv = gb::readEnvironmentVariable("GBEMU_GBA_MGBA_TRACE");
+    if (!tracePathEnv.has_value() || tracePathEnv->empty()) {
         return; // opcional: executa apenas quando um trace externo for fornecido.
     }
 
-    const std::filesystem::path tracePath(tracePathEnv);
+    const std::filesystem::path tracePath(*tracePathEnv);
     if (!std::filesystem::exists(tracePath)) {
         return;
     }
@@ -1348,6 +1446,40 @@ TEST_CASE("cpu", "gba_ppu_hofs_registers_are_scanline_snapshotted") {
     T_EQ(fb[line2], static_cast<gb::u16>(0xF800U));
 }
 
+TEST_CASE("cpu", "gba_ppu_render_uses_completed_frame_snapshots_after_wrap") {
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x0100U); // mode0 + BG0
+    memory.writeIo16(0x0008U, 0x0100U); // BG0CNT
+    memory.write16(0x05000002U, 0x03E0U); // index 1 = green
+    memory.write16(0x05000004U, 0x001FU); // index 2 = red
+
+    for (gb::u32 i = 0; i < 32U; ++i) {
+        memory.write8(0x06000000U + i, 0x11U); // tile0 inteiro = indice 1
+        memory.write8(0x06000020U + i, 0x22U); // tile1 inteiro = indice 2
+    }
+    memory.write16(0x06000800U, 0x0000U); // map(0,0)=tile0
+    memory.write16(0x06000802U, 0x0001U); // map(1,0)=tile1
+    memory.writeIo16(0x0010U, 0x0000U); // BG0HOFS
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    ppu.step(static_cast<int>(gb::gba::Ppu::CyclesPerLine * gb::gba::Ppu::TotalLines));
+    memory.writeIo16(0x0010U, 0x0008U); // novo frame ja iniciou, mas o render deve usar o frame anterior completo
+
+    std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
+    T_REQUIRE(ppu.render(fb));
+
+    const std::size_t line0 = 0U;
+    const std::size_t line2 = static_cast<std::size_t>(2U) * static_cast<std::size_t>(gb::gba::Ppu::ScreenWidth);
+    T_EQ(fb[line0], static_cast<gb::u16>(0x07E0U));
+    T_EQ(fb[line2], static_cast<gb::u16>(0x07E0U));
+}
+
 TEST_CASE("cpu", "gba_ppu_mode4_uses_obj_tile_base_0x14000") {
     gb::gba::Memory memory;
     std::vector<gb::u8> rom(0x200, 0x00);
@@ -1492,6 +1624,29 @@ TEST_CASE("cpu", "gba_backup_flash_accepts_program_and_id_mode") {
     T_EQ(memory.read8(0x0E000123U), static_cast<gb::u8>(0x5AU));
 }
 
+TEST_CASE("cpu", "gba_backup_flash_defaults_to_erased_ff") {
+    gb::gba::Memory memory;
+    const auto rom = makeGbaRomWithBackupTag("FLASH1M_V102");
+    T_REQUIRE(memory.loadRom(rom));
+
+    T_EQ(memory.read8(0x0E000000U), static_cast<gb::u8>(0xFFU));
+    T_EQ(memory.read8(0x0E000123U), static_cast<gb::u8>(0xFFU));
+}
+
+TEST_CASE("cpu", "gba_backup_flash_id_override_is_respected") {
+    gb::gba::Memory memory;
+    const auto rom = makeGbaRomWithBackupTag("FLASH_V121");
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.setFlashIdOverride(0x62, 0x13);
+    memory.write8(0x0E005555U, 0xAAU);
+    memory.write8(0x0E002AAAU, 0x55U);
+    memory.write8(0x0E005555U, 0x90U);
+
+    T_EQ(memory.read8(0x0E000000U), static_cast<gb::u8>(0x62U));
+    T_EQ(memory.read8(0x0E000001U), static_cast<gb::u8>(0x13U));
+}
+
 TEST_CASE("cpu", "gba_backup_flash_compat_mode_uses_raw_byte_storage") {
     gb::gba::Memory memory;
     const auto rom = makeGbaRomWithBackupTag("FLASH_V121");
@@ -1501,6 +1656,28 @@ TEST_CASE("cpu", "gba_backup_flash_compat_mode_uses_raw_byte_storage") {
 
     memory.write8(0x0E000055U, 0xA5U);
     T_EQ(memory.read8(0x0E000055U), static_cast<gb::u8>(0xA5U));
+}
+
+TEST_CASE("cpu", "gba_backup_flash_zero_legacy_file_is_migrated_to_erased_state") {
+    gb::gba::Memory memory;
+    const auto rom = makeGbaRomWithBackupTag("FLASH_V121");
+    T_REQUIRE(memory.loadRom(rom));
+
+    const auto legacyPath = tests::makeTempPath("gba_flash_legacy_zero", ".sav");
+    std::vector<gb::u8> legacy(65536U, 0x00U);
+    T_REQUIRE(tests::writeBinaryFile(legacyPath, legacy));
+    T_REQUIRE(memory.loadBackupFromFile(legacyPath.string()));
+    T_EQ(memory.read8(0x0E000000U), static_cast<gb::u8>(0xFFU));
+
+    const auto freshPath = tests::makeTempPath("gba_flash_fresh", ".sav");
+    T_REQUIRE(memory.saveBackupToFile(freshPath.string()));
+    const auto freshBytes = tests::readBinaryFile(freshPath);
+    T_REQUIRE(!freshBytes.empty());
+    T_EQ(freshBytes.front(), static_cast<gb::u8>(0xFFU));
+
+    std::error_code ec;
+    std::filesystem::remove(legacyPath, ec);
+    std::filesystem::remove(freshPath, ec);
 }
 
 TEST_CASE("cpu", "gba_backup_sram_halfword_and_word_writes_use_low_byte_only") {
@@ -1667,4 +1844,117 @@ TEST_CASE("cpu", "gba_backup_eeprom_strict_size_migrates_legacy_file") {
     std::error_code ec;
     std::filesystem::remove(legacyPath, ec);
     std::filesystem::remove(freshPath, ec);
+}
+
+TEST_CASE("cpu", "gba_backup_eeprom_dynamic_loaded_size_is_preserved_on_resave") {
+    const auto rom = makeGbaRomWithBackupTag("EEPROM_V124");
+    gb::gba::Memory memory;
+    T_REQUIRE(memory.loadRom(rom));
+
+    const auto legacyPath = tests::makeTempPath("gba_eeprom_dynamic_legacy", ".sav");
+    std::vector<gb::u8> legacy(8192U, 0xAAU);
+    T_REQUIRE(tests::writeBinaryFile(legacyPath, legacy));
+    T_REQUIRE(memory.loadBackupFromFile(legacyPath.string()));
+
+    const auto freshPath = tests::makeTempPath("gba_eeprom_dynamic_fresh", ".sav");
+    T_REQUIRE(memory.saveBackupToFile(freshPath.string()));
+    const auto freshBytes = tests::readBinaryFile(freshPath);
+    T_EQ(freshBytes.size(), static_cast<std::size_t>(8192U));
+
+    std::error_code ec;
+    std::filesystem::remove(legacyPath, ec);
+    std::filesystem::remove(freshPath, ec);
+}
+
+TEST_CASE("cpu", "gba_system_super_mario_advance_2_rejects_legacy_512_byte_save") {
+    const auto rom = makeGbaRomWithBackupTag("EEPROM_V124", "AA2E", "SUPERMARIOB");
+    const auto romPath = tests::makeTempPath("gba_aa2e_profile", ".gba");
+    T_REQUIRE(tests::writeBinaryFile(romPath, rom));
+
+    const auto legacySavePath = tests::makeTempPath("gba_aa2e_legacy", ".sav");
+    std::vector<gb::u8> legacy(512U, 0xAAU);
+    T_REQUIRE(tests::writeBinaryFile(legacySavePath, legacy));
+
+    gb::gba::System system;
+    T_REQUIRE(system.loadRomFromFile(romPath.string()));
+    T_EQ(system.compatibilityProfile().forcedEepromAddressBits, 14);
+    T_EQ(system.memory().expectedBackupFileSize(), static_cast<std::size_t>(8192U));
+    T_REQUIRE(!system.loadBackupFromFile(legacySavePath.string()));
+
+    std::error_code ec;
+    std::filesystem::remove(romPath, ec);
+    std::filesystem::remove(legacySavePath, ec);
+}
+
+TEST_CASE("cpu", "gba_system_advance_wars_uses_sanyo_flash64_id") {
+    const auto rom = makeGbaRomWithBackupTag("FLASH512_V131", "AWRE", "ADVANCEWARS");
+    const auto romPath = tests::makeTempPath("gba_awre_profile", ".gba");
+    T_REQUIRE(tests::writeBinaryFile(romPath, rom));
+
+    gb::gba::System system;
+    T_REQUIRE(system.loadRomFromFile(romPath.string()));
+    T_EQ(system.backupTypeName(), std::string("FLASH64"));
+    T_EQ(system.compatibilityProfile().flashVendorId, 0x62);
+    T_EQ(system.compatibilityProfile().flashDeviceId, 0x13);
+
+    auto& memory = system.memory();
+    memory.write8(0x0E005555U, 0xAAU);
+    memory.write8(0x0E002AAAU, 0x55U);
+    memory.write8(0x0E005555U, 0x90U);
+    T_EQ(memory.read8(0x0E000000U), static_cast<gb::u8>(0x62U));
+    T_EQ(memory.read8(0x0E000001U), static_cast<gb::u8>(0x13U));
+
+    std::error_code ec;
+    std::filesystem::remove(romPath, ec);
+}
+
+TEST_CASE("state", "gba_system_runframe_ends_on_frame_boundary") {
+    const auto romPath = tests::makeTempPath("gba_frame_boundary", ".gba");
+    tests::ScopedPath cleanupRom(romPath);
+
+    const auto image = makeArmRom({
+        0xEAFFFFFEU, // B .
+    });
+    T_REQUIRE(tests::writeBinaryFile(romPath, image));
+
+    gb::gba::System system;
+    T_REQUIRE(system.loadRomFromFile(romPath.string()));
+    system.runFrame();
+
+    T_EQ(system.memory().readIo16(gb::gba::Ppu::VcountOffset), static_cast<gb::u16>(0U));
+    T_REQUIRE((system.memory().readIo16(gb::gba::Ppu::DispstatOffset) & 0x0003U) == 0U);
+}
+
+TEST_CASE("state", "gba_smoke_super_mario_advance_2_local_rom_boots_to_visible_frame") {
+    const auto romPath = localRomPath(std::filesystem::path("roms") / "Super Mario Advance" / "Super Mario Advance 2 - Super Mario World (USA).gba");
+    if (!std::filesystem::exists(romPath)) {
+        return;
+    }
+
+    gb::gba::System system;
+    T_REQUIRE(system.loadRomFromFile(romPath.string()));
+    for (int i = 0; i < 120; ++i) {
+        system.runFrame();
+    }
+
+    T_EQ(system.metadata().gameCode, std::string("AA2E"));
+    T_REQUIRE(system.memory().readIo16(gb::gba::Ppu::DispcntOffset) != 0U);
+    T_REQUIRE(countDistinctColors(system.framebuffer()) >= 2U);
+}
+
+TEST_CASE("state", "gba_smoke_advance_wars_local_rom_boots_past_flash_probe") {
+    const auto romPath = localRomPath(std::filesystem::path("roms") / "Advance Wars" / "Advance Wars (USA).gba");
+    if (!std::filesystem::exists(romPath)) {
+        return;
+    }
+
+    gb::gba::System system;
+    T_REQUIRE(system.loadRomFromFile(romPath.string()));
+    for (int i = 0; i < 300; ++i) {
+        system.runFrame();
+    }
+
+    T_EQ(system.metadata().gameCode, std::string("AWRE"));
+    T_REQUIRE(system.memory().readIo16(gb::gba::Ppu::DispcntOffset) != 0U);
+    T_REQUIRE(countDistinctColors(system.framebuffer()) >= 16U);
 }

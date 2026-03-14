@@ -1,8 +1,9 @@
 #include "gb/core/gba/cpu.hpp"
+#include "gb/core/environment.hpp"
 
 #include <array>
 #include <cmath>
-#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <vector>
@@ -37,6 +38,7 @@ constexpr u32 kIrqReturnTrampoline = 0xFFFF0010U;
 constexpr u32 kVectorUndefined = 0x00000004U;
 constexpr u32 kVectorPrefetchAbort = 0x0000000CU;
 constexpr double kTwoPi = 6.2831853071795864769;
+constexpr std::size_t kAffineTrigTableSize = 256U;
 
 bool isValidExecuteAddress(u32 address) {
     const u8 region = static_cast<u8>(address >> 24U);
@@ -59,7 +61,96 @@ T clampToType(std::int64_t value) {
     return static_cast<T>(value);
 }
 
+const std::array<std::int16_t, kAffineTrigTableSize>& affineSinTable() {
+    static const auto table = []() {
+        std::array<std::int16_t, kAffineTrigTableSize> out{};
+        for (std::size_t i = 0; i < out.size(); ++i) {
+            const double radians = (static_cast<double>(i) * kTwoPi) / static_cast<double>(out.size());
+            out[i] = static_cast<std::int16_t>(std::llround(std::sin(radians) * 256.0));
+        }
+        return out;
+    }();
+    return table;
+}
+
+std::int32_t affineSin256(u16 angle) {
+    return affineSinTable()[static_cast<std::size_t>(angle & 0x00FFU)];
+}
+
+std::int32_t affineCos256(u16 angle) {
+    return affineSinTable()[static_cast<std::size_t>((angle + 64U) & 0x00FFU)];
+}
+
+std::int32_t roundedShift8(std::int64_t value) {
+    if (value >= 0) {
+        return static_cast<std::int32_t>((value + 0x80LL) >> 8U);
+    }
+    return -static_cast<std::int32_t>(((-value) + 0x80LL) >> 8U);
+}
+
+bool zeroMemoryRange(Memory& memory, u32 address, std::size_t size) {
+    if (u8* dst = memory.directWritePointer(address, size); dst != nullptr) {
+        std::fill(dst, dst + static_cast<std::ptrdiff_t>(size), static_cast<u8>(0U));
+        return true;
+    }
+    return false;
+}
+
+bool copyHalfwords(Memory& memory, u32 dst, u32 src, u32 count) {
+    const std::size_t bytes = static_cast<std::size_t>(count) * 2U;
+    const u8* srcPtr = memory.directReadPointer(src, bytes);
+    u8* dstPtr = memory.directWritePointer(dst, bytes);
+    if (srcPtr == nullptr || dstPtr == nullptr) {
+        return false;
+    }
+    std::memcpy(dstPtr, srcPtr, bytes);
+    return true;
+}
+
+bool copyWords(Memory& memory, u32 dst, u32 src, u32 count) {
+    const std::size_t bytes = static_cast<std::size_t>(count) * 4U;
+    const u8* srcPtr = memory.directReadPointer(src, bytes);
+    u8* dstPtr = memory.directWritePointer(dst, bytes);
+    if (srcPtr == nullptr || dstPtr == nullptr) {
+        return false;
+    }
+    std::memcpy(dstPtr, srcPtr, bytes);
+    return true;
+}
+
+bool fillHalfwords(Memory& memory, u32 dst, u16 value, u32 count) {
+    const std::size_t bytes = static_cast<std::size_t>(count) * 2U;
+    u8* dstPtr = memory.directWritePointer(dst, bytes);
+    if (dstPtr == nullptr) {
+        return false;
+    }
+    auto* dstWords = reinterpret_cast<u16*>(dstPtr);
+    std::fill_n(dstWords, static_cast<std::ptrdiff_t>(count), value);
+    return true;
+}
+
+bool fillWords(Memory& memory, u32 dst, u32 value, u32 count) {
+    const std::size_t bytes = static_cast<std::size_t>(count) * 4U;
+    u8* dstPtr = memory.directWritePointer(dst, bytes);
+    if (dstPtr == nullptr) {
+        return false;
+    }
+    auto* dstWords = reinterpret_cast<u32*>(dstPtr);
+    std::fill_n(dstWords, static_cast<std::ptrdiff_t>(count), value);
+    return true;
+}
+
 void writeDecodedBuffer(Memory& memory, u32 dst, const std::vector<u8>& decoded, bool vramMode) {
+    const std::size_t directSize = decoded.size() + ((vramMode && (decoded.size() & 1U) != 0U) ? 1U : 0U);
+    if (u8* directDst = memory.directWritePointer(dst, directSize); directDst != nullptr) {
+        if (!decoded.empty()) {
+            std::memcpy(directDst, decoded.data(), decoded.size());
+        }
+        if ((decoded.size() & 1U) != 0U) {
+            directDst[decoded.size()] = 0U;
+        }
+        return;
+    }
     if (!vramMode) {
         for (std::size_t i = 0; i < decoded.size(); ++i) {
             memory.write8(dst + static_cast<u32>(i), decoded[i]);
@@ -148,13 +239,14 @@ void CpuArm7tdmi::connectMemory(Memory* memory) {
 }
 
 void CpuArm7tdmi::refreshLogFlags() {
-    logFlags_.badPc = std::getenv("GBEMU_GBA_LOG_BAD_PC") != nullptr;
-    logFlags_.biosExec = std::getenv("GBEMU_GBA_LOG_BIOS_EXEC") != nullptr;
-    logFlags_.unknown = std::getenv("GBEMU_GBA_LOG_UNKNOWN") != nullptr;
-    logFlags_.armWindow = std::getenv("GBEMU_GBA_LOG_ARM_WINDOW") != nullptr;
-    logFlags_.stateSwitch = std::getenv("GBEMU_GBA_LOG_STATE_SWITCH") != nullptr;
-    logFlags_.bl = std::getenv("GBEMU_GBA_LOG_BL") != nullptr;
-    logFlags_.swi = std::getenv("GBEMU_GBA_LOG_SWI") != nullptr;
+    logFlags_.badPc = gb::hasEnvironmentVariable("GBEMU_GBA_LOG_BAD_PC");
+    logFlags_.biosExec = gb::hasEnvironmentVariable("GBEMU_GBA_LOG_BIOS_EXEC");
+    logFlags_.unknown = gb::hasEnvironmentVariable("GBEMU_GBA_LOG_UNKNOWN");
+    logFlags_.armWindow = gb::hasEnvironmentVariable("GBEMU_GBA_LOG_ARM_WINDOW");
+    logFlags_.stateSwitch = gb::hasEnvironmentVariable("GBEMU_GBA_LOG_STATE_SWITCH");
+    logFlags_.bl = gb::hasEnvironmentVariable("GBEMU_GBA_LOG_BL");
+    logFlags_.swi = gb::hasEnvironmentVariable("GBEMU_GBA_LOG_SWI");
+    logFlags_.irq = gb::hasEnvironmentVariable("GBEMU_GBA_LOG_IRQ");
 }
 
 void CpuArm7tdmi::reset() {
@@ -2068,6 +2160,17 @@ bool CpuArm7tdmi::handlePendingInterrupt() {
     setThumbMode((target & 1U) != 0U);
     regs_[15] = target & ~1U;
     alignPcForCurrentState();
+    if (logFlags_.irq) {
+        static std::uint64_t irqEnterCount = 0;
+        if (irqEnterCount < 128U) {
+            ++irqEnterCount;
+            std::cerr << "[GBA][IRQ] enter pending=0x" << std::hex << pending
+                      << " irq=0x" << irq
+                      << " handler=0x" << target
+                      << " resume=0x" << context.resumeAddress
+                      << " depth=" << std::dec << irqContextDepth_ << '\n';
+        }
+    }
     halted_ = false;
     return true;
 }
@@ -2099,6 +2202,15 @@ bool CpuArm7tdmi::tryReturnFromIrqTrampoline(u32 target) {
         setThumbMode(false);
     }
     alignPcForCurrentState();
+    if (logFlags_.irq) {
+        static std::uint64_t irqReturnCount = 0;
+        if (irqReturnCount < 128U) {
+            ++irqReturnCount;
+            std::cerr << "[GBA][IRQ] return resume=0x" << std::hex << regs_[15]
+                      << " cpsr=0x" << cpsr_
+                      << " depth=" << std::dec << irqContextDepth_ << '\n';
+        }
+    }
     return true;
 }
 
@@ -2151,28 +2263,38 @@ void CpuArm7tdmi::handleSwi(u32 swiNumber) {
         if (memory_ != nullptr) {
             const u32 flags = regs_[0] & 0xFFU;
             if ((flags & 0x01U) != 0U) { // EWRAM
-                for (u32 i = 0; i < Memory::EwramSize; ++i) {
-                    memory_->write8(0x02000000U + i, 0U);
+                if (!zeroMemoryRange(*memory_, 0x02000000U, Memory::EwramSize)) {
+                    for (u32 i = 0; i < Memory::EwramSize; ++i) {
+                        memory_->write8(0x02000000U + i, 0U);
+                    }
                 }
             }
             if ((flags & 0x02U) != 0U) { // IWRAM
-                for (u32 i = 0; i < 0x7E00U; ++i) { // BIOS preserva os 0x200 bytes finais.
-                    memory_->write8(0x03000000U + i, 0U);
+                if (!zeroMemoryRange(*memory_, 0x03000000U, 0x7E00U)) {
+                    for (u32 i = 0; i < 0x7E00U; ++i) { // BIOS preserva os 0x200 bytes finais.
+                        memory_->write8(0x03000000U + i, 0U);
+                    }
                 }
             }
             if ((flags & 0x04U) != 0U) { // PRAM
-                for (u32 i = 0; i < Memory::PramSize; ++i) {
-                    memory_->write8(0x05000000U + i, 0U);
+                if (!zeroMemoryRange(*memory_, 0x05000000U, Memory::PramSize)) {
+                    for (u32 i = 0; i < Memory::PramSize; ++i) {
+                        memory_->write8(0x05000000U + i, 0U);
+                    }
                 }
             }
             if ((flags & 0x08U) != 0U) { // VRAM
-                for (u32 i = 0; i < Memory::VramSize; ++i) {
-                    memory_->write8(0x06000000U + i, 0U);
+                if (!zeroMemoryRange(*memory_, 0x06000000U, Memory::VramSize)) {
+                    for (u32 i = 0; i < Memory::VramSize; ++i) {
+                        memory_->write8(0x06000000U + i, 0U);
+                    }
                 }
             }
             if ((flags & 0x10U) != 0U) { // OAM
-                for (u32 i = 0; i < Memory::OamSize; ++i) {
-                    memory_->write8(0x07000000U + i, 0U);
+                if (!zeroMemoryRange(*memory_, 0x07000000U, Memory::OamSize)) {
+                    for (u32 i = 0; i < Memory::OamSize; ++i) {
+                        memory_->write8(0x07000000U + i, 0U);
+                    }
                 }
             }
         }
@@ -2298,6 +2420,10 @@ void CpuArm7tdmi::handleSwi(u32 swiNumber) {
         }
         if (transfer32) {
             const u32 fillValue = memory_->read32(src);
+            if ((fill && fillWords(*memory_, dst, fillValue, count))
+                || (!fill && copyWords(*memory_, dst, src, count))) {
+                return;
+            }
             for (u32 i = 0; i < count; ++i) {
                 const u32 value = fill ? fillValue : memory_->read32(src);
                 memory_->write32(dst, value);
@@ -2308,6 +2434,10 @@ void CpuArm7tdmi::handleSwi(u32 swiNumber) {
             }
         } else {
             const u16 fillValue = memory_->read16(src);
+            if ((fill && fillHalfwords(*memory_, dst, fillValue, count))
+                || (!fill && copyHalfwords(*memory_, dst, src, count))) {
+                return;
+            }
             for (u32 i = 0; i < count; ++i) {
                 const u16 value = fill ? fillValue : memory_->read16(src);
                 memory_->write16(dst, value);
@@ -2333,6 +2463,10 @@ void CpuArm7tdmi::handleSwi(u32 swiNumber) {
             return;
         }
         const u32 fillValue = memory_->read32(src);
+        if ((fill && fillWords(*memory_, dst, fillValue, wordCount))
+            || (!fill && copyWords(*memory_, dst, src, wordCount))) {
+            return;
+        }
         for (u32 i = 0; i < wordCount; ++i) {
             const u32 value = fill ? fillValue : memory_->read32(src);
             memory_->write32(dst, value);
@@ -2358,15 +2492,13 @@ void CpuArm7tdmi::handleSwi(u32 swiNumber) {
             const std::int32_t scaleX = static_cast<std::int16_t>(memory_->read16(src + 12U));
             const std::int32_t scaleY = static_cast<std::int16_t>(memory_->read16(src + 14U));
             const u16 angle = memory_->read16(src + 16U);
+            const std::int32_t sine = affineSin256(angle);
+            const std::int32_t cosine = affineCos256(angle);
 
-            const double radians = (static_cast<double>(angle) * kTwoPi) / 65536.0;
-            const double sx = static_cast<double>(scaleX) / 256.0;
-            const double sy = static_cast<double>(scaleY) / 256.0;
-
-            const std::int32_t pa = static_cast<std::int32_t>(std::llround(std::cos(radians) * sx * 256.0));
-            const std::int32_t pb = static_cast<std::int32_t>(std::llround(-std::sin(radians) * sx * 256.0));
-            const std::int32_t pc = static_cast<std::int32_t>(std::llround(std::sin(radians) * sy * 256.0));
-            const std::int32_t pd = static_cast<std::int32_t>(std::llround(std::cos(radians) * sy * 256.0));
+            const std::int32_t pa = roundedShift8(static_cast<std::int64_t>(cosine) * static_cast<std::int64_t>(scaleX));
+            const std::int32_t pb = roundedShift8(-static_cast<std::int64_t>(sine) * static_cast<std::int64_t>(scaleX));
+            const std::int32_t pc = roundedShift8(static_cast<std::int64_t>(sine) * static_cast<std::int64_t>(scaleY));
+            const std::int32_t pd = roundedShift8(static_cast<std::int64_t>(cosine) * static_cast<std::int64_t>(scaleY));
 
             const std::int64_t dx = static_cast<std::int64_t>(texX)
                 - static_cast<std::int64_t>(pa) * static_cast<std::int64_t>(screenX)
@@ -2400,15 +2532,13 @@ void CpuArm7tdmi::handleSwi(u32 swiNumber) {
             const std::int32_t scaleX = static_cast<std::int16_t>(memory_->read16(src + 0U));
             const std::int32_t scaleY = static_cast<std::int16_t>(memory_->read16(src + 2U));
             const u16 angle = memory_->read16(src + 4U);
+            const std::int32_t sine = affineSin256(angle);
+            const std::int32_t cosine = affineCos256(angle);
 
-            const double radians = (static_cast<double>(angle) * kTwoPi) / 65536.0;
-            const double sx = static_cast<double>(scaleX) / 256.0;
-            const double sy = static_cast<double>(scaleY) / 256.0;
-
-            const std::int32_t pa = static_cast<std::int32_t>(std::llround(std::cos(radians) * sx * 256.0));
-            const std::int32_t pb = static_cast<std::int32_t>(std::llround(-std::sin(radians) * sx * 256.0));
-            const std::int32_t pc = static_cast<std::int32_t>(std::llround(std::sin(radians) * sy * 256.0));
-            const std::int32_t pd = static_cast<std::int32_t>(std::llround(std::cos(radians) * sy * 256.0));
+            const std::int32_t pa = roundedShift8(static_cast<std::int64_t>(cosine) * static_cast<std::int64_t>(scaleX));
+            const std::int32_t pb = roundedShift8(-static_cast<std::int64_t>(sine) * static_cast<std::int64_t>(scaleX));
+            const std::int32_t pc = roundedShift8(static_cast<std::int64_t>(sine) * static_cast<std::int64_t>(scaleY));
+            const std::int32_t pd = roundedShift8(static_cast<std::int64_t>(cosine) * static_cast<std::int64_t>(scaleY));
 
             memory_->write16(dst + offset * 0U, static_cast<u16>(clampToType<std::int16_t>(pa)));
             memory_->write16(dst + offset * 1U, static_cast<u16>(clampToType<std::int16_t>(pb)));

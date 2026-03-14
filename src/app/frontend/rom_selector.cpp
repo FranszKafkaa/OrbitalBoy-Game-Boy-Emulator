@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <array>
+#include <cstdint>
+#include <cstdio>
 #include <cctype>
 #include <filesystem>
 #include <optional>
@@ -12,6 +14,14 @@
 
 #ifdef GBEMU_USE_SDL2
 #include "gb/app/sdl_compat.hpp"
+#endif
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <objbase.h>
+#include <wincodec.h>
 #endif
 
 namespace gb::frontend {
@@ -32,8 +42,11 @@ bool hasImageExtension(const std::filesystem::path& path) {
     if (!path.has_extension()) {
         return false;
     }
-    const std::string ext = path.extension().string();
-    return ext == ".jpg" || ext == ".jpeg" || ext == ".JPG" || ext == ".JPEG";
+    std::string ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp";
 }
 
 struct RomEntry {
@@ -58,6 +71,127 @@ std::string normalizeLabel(std::string text, std::size_t maxLen) {
         text = text.substr(0, maxLen);
     }
     return text;
+}
+
+#if defined(_WIN32)
+template <typename T>
+void safeRelease(T*& ptr) {
+    if (ptr != nullptr) {
+        ptr->Release();
+        ptr = nullptr;
+    }
+}
+
+SDL_Surface* loadPreviewSurfaceWithWic(const std::filesystem::path& imagePath) {
+    const HRESULT initHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool shouldUninitialize = SUCCEEDED(initHr);
+
+    IWICImagingFactory* factory = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    SDL_Surface* surface = nullptr;
+
+    const auto cleanup = [&]() {
+        safeRelease(converter);
+        safeRelease(frame);
+        safeRelease(decoder);
+        safeRelease(factory);
+        if (shouldUninitialize) {
+            CoUninitialize();
+        }
+    };
+
+    if (FAILED(CoCreateInstance(
+            CLSID_WICImagingFactory,
+            nullptr,
+            CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(&factory)))) {
+        cleanup();
+        return nullptr;
+    }
+
+    const std::wstring widePath = imagePath.wstring();
+    if (FAILED(factory->CreateDecoderFromFilename(
+            widePath.c_str(),
+            nullptr,
+            GENERIC_READ,
+            WICDecodeMetadataCacheOnDemand,
+            &decoder))) {
+        cleanup();
+        return nullptr;
+    }
+
+    if (FAILED(decoder->GetFrame(0, &frame))) {
+        cleanup();
+        return nullptr;
+    }
+
+    UINT width = 0;
+    UINT height = 0;
+    if (FAILED(frame->GetSize(&width, &height)) || width == 0U || height == 0U) {
+        cleanup();
+        return nullptr;
+    }
+
+    if (FAILED(factory->CreateFormatConverter(&converter))) {
+        cleanup();
+        return nullptr;
+    }
+
+    if (FAILED(converter->Initialize(
+            frame,
+            GUID_WICPixelFormat32bppBGRA,
+            WICBitmapDitherTypeNone,
+            nullptr,
+            0.0,
+            WICBitmapPaletteTypeCustom))) {
+        cleanup();
+        return nullptr;
+    }
+
+    surface = SDL_CreateRGBSurfaceWithFormat(
+        0,
+        static_cast<int>(width),
+        static_cast<int>(height),
+        32,
+        SDL_PIXELFORMAT_BGRA32
+    );
+    if (surface == nullptr) {
+        cleanup();
+        return nullptr;
+    }
+
+    const UINT pitch = static_cast<UINT>(surface->pitch);
+    const UINT imageSize = pitch * height;
+    if (FAILED(converter->CopyPixels(nullptr, pitch, imageSize, static_cast<BYTE*>(surface->pixels)))) {
+        SDL_FreeSurface(surface);
+        surface = nullptr;
+        cleanup();
+        return nullptr;
+    }
+
+    cleanup();
+    return surface;
+}
+#endif
+
+SDL_Surface* loadPreviewSurface(const std::string& imagePath) {
+    if (imagePath.empty()) {
+        return nullptr;
+    }
+
+#ifdef GBEMU_USE_SDL2_IMAGE
+    if (SDL_Surface* surface = IMG_Load(imagePath.c_str())) {
+        return surface;
+    }
+#endif
+
+#if defined(_WIN32)
+    return loadPreviewSurfaceWithWic(std::filesystem::path(imagePath));
+#else
+    return nullptr;
+#endif
 }
 
 std::vector<RomEntry> discoverRoms() {
@@ -346,7 +480,15 @@ std::string chooseRomWithSdlDialog() {
                 SDL_RenderDrawRect(renderer, &ph);
 #ifdef GBEMU_USE_SDL2_IMAGE
                 if (previewTextures[static_cast<std::size_t>(idx)] == nullptr && !roms[static_cast<std::size_t>(idx)].imagePath.empty()) {
-                    SDL_Surface* surface = IMG_Load(roms[static_cast<std::size_t>(idx)].imagePath.c_str());
+                    SDL_Surface* surface = loadPreviewSurface(roms[static_cast<std::size_t>(idx)].imagePath);
+                    if (surface) {
+                        previewTextures[static_cast<std::size_t>(idx)] = SDL_CreateTextureFromSurface(renderer, surface);
+                        SDL_FreeSurface(surface);
+                    }
+                }
+#else
+                if (previewTextures[static_cast<std::size_t>(idx)] == nullptr && !roms[static_cast<std::size_t>(idx)].imagePath.empty()) {
+                    SDL_Surface* surface = loadPreviewSurface(roms[static_cast<std::size_t>(idx)].imagePath);
                     if (surface) {
                         previewTextures[static_cast<std::size_t>(idx)] = SDL_CreateTextureFromSurface(renderer, surface);
                         SDL_FreeSurface(surface);

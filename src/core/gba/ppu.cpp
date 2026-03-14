@@ -149,7 +149,10 @@ void Ppu::reset() {
     prevHblank_ = false;
     prevVcounterMatch_ = false;
     clearRasterLineSnapshots();
+    completedRasterLineSnapshots_.fill(RasterLineSnapshot{});
     clearAffineLineSnapshots();
+    completedBg2LineSnapshots_.fill(AffineLineSnapshot{});
+    completedBg3LineSnapshots_.fill(AffineLineSnapshot{});
     captureRasterLineSnapshot(0);
     captureAffineLineSnapshot(0);
     updateIoRegisters();
@@ -165,6 +168,9 @@ void Ppu::step(int cpuCycles) {
         scanlineCycles_ -= CyclesPerLine;
         scanline_ = static_cast<std::uint16_t>((scanline_ + 1U) % TotalLines);
         if (scanline_ == 0U) {
+            completedRasterLineSnapshots_ = rasterLineSnapshots_;
+            completedBg2LineSnapshots_ = bg2LineSnapshots_;
+            completedBg3LineSnapshots_ = bg3LineSnapshots_;
             clearRasterLineSnapshots();
             clearAffineLineSnapshots();
         }
@@ -258,7 +264,7 @@ bool Ppu::renderMode0(std::array<u16, FramebufferSize>& framebuffer) const {
                 + static_cast<std::size_t>(x);
             const LayerPixel& px = layerPixels[i];
             u16 outRaw = px.rawColor555;
-            const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y) : 0x3FU;
+            const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y, line) : 0x3FU;
             const bool colorEffectsEnabled = (windowMask & 0x20U) != 0U;
             if (colorEffectsEnabled) {
                 const u8 topLayerBit = blendLayerBitFromLayerId(px.layer);
@@ -341,7 +347,7 @@ bool Ppu::renderMode1(std::array<u16, FramebufferSize>& framebuffer) const {
                 + static_cast<std::size_t>(x);
             const LayerPixel& px = layerPixels[i];
             u16 outRaw = px.rawColor555;
-            const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y) : 0x3FU;
+            const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y, line) : 0x3FU;
             const bool colorEffectsEnabled = (windowMask & 0x20U) != 0U;
             if (colorEffectsEnabled) {
                 const u8 topLayerBit = blendLayerBitFromLayerId(px.layer);
@@ -423,7 +429,7 @@ bool Ppu::renderMode2(std::array<u16, FramebufferSize>& framebuffer) const {
                 + static_cast<std::size_t>(x);
             const LayerPixel& px = layerPixels[i];
             u16 outRaw = px.rawColor555;
-            const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y) : 0x3FU;
+            const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y, line) : 0x3FU;
             const bool colorEffectsEnabled = (windowMask & 0x20U) != 0U;
             if (colorEffectsEnabled) {
                 const u8 topLayerBit = blendLayerBitFromLayerId(px.layer);
@@ -494,7 +500,7 @@ bool Ppu::renderMode3(std::array<u16, FramebufferSize>& framebuffer) const {
         for (int x = 0; x < ScreenWidth; ++x) {
             const auto pixelIndex = static_cast<std::size_t>(y) * static_cast<std::size_t>(ScreenWidth)
                 + static_cast<std::size_t>(x);
-            const u8 winMask = windowingEnabled ? windowMaskForPixel(x, y) : 0x3FU;
+            const u8 winMask = windowingEnabled ? windowMaskForPixel(x, y, line) : 0x3FU;
             if (!layerEnabledByWindowMask(winMask, 2U)) {
                 continue;
             }
@@ -517,7 +523,7 @@ bool Ppu::renderMode3(std::array<u16, FramebufferSize>& framebuffer) const {
                 + static_cast<std::size_t>(x);
             const LayerPixel& px = layerPixels[i];
             u16 outRaw = px.rawColor555;
-            const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y) : 0x3FU;
+            const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y, line) : 0x3FU;
             const bool colorEffectsEnabled = (windowMask & 0x20U) != 0U;
             if (colorEffectsEnabled) {
                 const u8 topLayerBit = blendLayerBitFromLayerId(px.layer);
@@ -593,7 +599,7 @@ bool Ppu::renderMode4(std::array<u16, FramebufferSize>& framebuffer) const {
         for (int x = 0; x < ScreenWidth; ++x) {
             const auto pixelIndex = static_cast<std::size_t>(y) * static_cast<std::size_t>(ScreenWidth)
                 + static_cast<std::size_t>(x);
-            const u8 winMask = windowingEnabled ? windowMaskForPixel(x, y) : 0x3FU;
+            const u8 winMask = windowingEnabled ? windowMaskForPixel(x, y, line) : 0x3FU;
             if (!layerEnabledByWindowMask(winMask, 2U)) {
                 continue;
             }
@@ -617,7 +623,7 @@ bool Ppu::renderMode4(std::array<u16, FramebufferSize>& framebuffer) const {
                 + static_cast<std::size_t>(x);
             const LayerPixel& px = layerPixels[i];
             u16 outRaw = px.rawColor555;
-            const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y) : 0x3FU;
+            const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y, line) : 0x3FU;
             const bool colorEffectsEnabled = (windowMask & 0x20U) != 0U;
             if (colorEffectsEnabled) {
                 const u8 topLayerBit = blendLayerBitFromLayerId(px.layer);
@@ -695,7 +701,7 @@ bool Ppu::renderMode5(std::array<u16, FramebufferSize>& framebuffer) const {
         for (int x = 0; x < kMode5Width; ++x) {
             const auto pixelIndex = static_cast<std::size_t>(y) * static_cast<std::size_t>(ScreenWidth)
                 + static_cast<std::size_t>(x);
-            const u8 winMask = windowingEnabled ? windowMaskForPixel(x, y) : 0x3FU;
+            const u8 winMask = windowingEnabled ? windowMaskForPixel(x, y, line) : 0x3FU;
             if (!layerEnabledByWindowMask(winMask, 2U)) {
                 continue;
             }
@@ -720,7 +726,7 @@ bool Ppu::renderMode5(std::array<u16, FramebufferSize>& framebuffer) const {
                 + static_cast<std::size_t>(x);
             const LayerPixel& px = layerPixels[i];
             u16 outRaw = px.rawColor555;
-            const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y) : 0x3FU;
+            const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y, line) : 0x3FU;
             const bool colorEffectsEnabled = (windowMask & 0x20U) != 0U;
             if (colorEffectsEnabled) {
                 const u8 topLayerBit = blendLayerBitFromLayerId(px.layer);
@@ -774,7 +780,7 @@ void Ppu::renderTextBackground(int bgIndex, std::array<LayerPixel, FramebufferSi
         for (int x = 0; x < ScreenWidth; ++x) {
             const auto pixelIndex = static_cast<std::size_t>(y) * static_cast<std::size_t>(ScreenWidth)
                 + static_cast<std::size_t>(x);
-            const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y) : 0x3FU;
+            const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y, line) : 0x3FU;
             if (!layerEnabledByWindowMask(windowMask, static_cast<u8>(bgIndex))) {
                 continue;
             }
@@ -868,7 +874,7 @@ void Ppu::renderAffineBackground(int bgIndex, std::array<LayerPixel, Framebuffer
 
         if (layerEnabled) {
             for (int x = 0; x < ScreenWidth; ++x) {
-                const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y) : 0x3FU;
+                const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y, line) : 0x3FU;
                 if (!layerEnabledByWindowMask(windowMask, static_cast<u8>(bgIndex))) {
                     continue;
                 }
@@ -1150,7 +1156,7 @@ void Ppu::renderObjects(std::array<LayerPixel, FramebufferSize>& layerPixels) co
                 if (screenX < 0 || screenX >= ScreenWidth) {
                     continue;
                 }
-                const u8 windowMask = windowingEnabled ? windowMaskForPixel(screenX, screenY) : 0x3FU;
+                const u8 windowMask = windowingEnabled ? windowMaskForPixel(screenX, screenY, line) : 0x3FU;
                 if (!layerEnabledByWindowMask(windowMask, 4U)) {
                     continue;
                 }
@@ -1282,6 +1288,10 @@ void Ppu::composeLayer(
 
 u8 Ppu::windowMaskForPixel(int x, int y) const {
     const RasterLineSnapshot line = rasterSnapshotForLine(y);
+    return windowMaskForPixel(x, y, line);
+}
+
+u8 Ppu::windowMaskForPixel(int x, int y, const RasterLineSnapshot& line) const {
     const u16 dispcnt = line.dispcnt;
     const bool win0Enabled = (dispcnt & kWin0EnableMask) != 0U;
     const bool win1Enabled = (dispcnt & kWin1EnableMask) != 0U;
@@ -1496,7 +1506,12 @@ void Ppu::captureRasterLineSnapshot(int line) {
 
 Ppu::RasterLineSnapshot Ppu::rasterSnapshotForLine(int line) const {
     if (line >= 0 && line < static_cast<int>(VisibleLines)) {
-        const RasterLineSnapshot& s = rasterLineSnapshots_[static_cast<std::size_t>(line)];
+        const std::size_t index = static_cast<std::size_t>(line);
+        const RasterLineSnapshot& completed = completedRasterLineSnapshots_[index];
+        if (completed.valid) {
+            return completed;
+        }
+        const RasterLineSnapshot& s = rasterLineSnapshots_[index];
         if (s.valid) {
             return s;
         }
@@ -1544,6 +1559,12 @@ Ppu::AffineLineSnapshot Ppu::affineSnapshotForLine(int bgIndex, int line) const 
     }
     if (line >= 0 && line < static_cast<int>(VisibleLines)) {
         const std::size_t idx = static_cast<std::size_t>(line);
+        const AffineLineSnapshot& completed = bgIndex == 2
+            ? completedBg2LineSnapshots_[idx]
+            : completedBg3LineSnapshots_[idx];
+        if (completed.valid) {
+            return completed;
+        }
         const AffineLineSnapshot& s = bgIndex == 2 ? bg2LineSnapshots_[idx] : bg3LineSnapshots_[idx];
         if (s.valid) {
             return s;

@@ -55,6 +55,8 @@ public:
     [[nodiscard]] const std::array<u8, PramSize>& pram() const;
     [[nodiscard]] const std::array<u8, VramSize>& vram() const;
     [[nodiscard]] const std::array<u8, OamSize>& oam() const;
+    [[nodiscard]] const u8* directReadPointer(u32 address, std::size_t size = 1U) const;
+    [[nodiscard]] u8* directWritePointer(u32 address, std::size_t size = 1U);
 
     [[nodiscard]] u16 readIo16(u32 ioOffset) const;
     void writeIo16(u32 ioOffset, u16 value);
@@ -72,8 +74,10 @@ public:
     [[nodiscard]] bool hasPersistentBackup() const;
     [[nodiscard]] const std::string& backupTypeName() const;
     void configureBackupBehavior(int forcedEepromAddressBits, bool strictBackupFileSize);
+    void setFlashIdOverride(int vendorId, int deviceId);
     void setFlashCompatibilityMode(bool enabled);
     [[nodiscard]] bool flashCompatibilityMode() const;
+    [[nodiscard]] std::size_t expectedBackupFileSize() const;
     bool loadBackupFromFile(const std::string& path);
     bool saveBackupToFile(const std::string& path) const;
 
@@ -146,6 +150,8 @@ private:
     std::vector<u8> backupStorage_{};
     bool backupDirty_ = false;
     bool flashCompatibilityMode_ = false;
+    int flashVendorIdOverride_ = -1;
+    int flashDeviceIdOverride_ = -1;
     int forcedEepromAddressBits_ = 0;
     bool strictBackupFileSize_ = false;
 

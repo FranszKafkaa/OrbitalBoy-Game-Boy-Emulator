@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 
@@ -9,6 +11,7 @@
 #include "gb/app/rom_suite_runner.hpp"
 #include "gb/app/runtime_paths.hpp"
 #include "gb/app/sdl_frontend.hpp"
+#include "gb/core/environment.hpp"
 #include "gb/core/gameboy.hpp"
 #include "gb/core/gba/system.hpp"
 
@@ -36,6 +39,72 @@ bool hasGbaExtension(const std::string& romPath) {
     }
     const std::string ext = toLowerAscii(std::filesystem::path(romPath).extension().string());
     return ext == ".gba";
+}
+
+void writeLittleEndian32(std::ofstream& out, std::uint32_t value) {
+    const unsigned char bytes[4] = {
+        static_cast<unsigned char>(value & 0xFFU),
+        static_cast<unsigned char>((value >> 8U) & 0xFFU),
+        static_cast<unsigned char>((value >> 16U) & 0xFFU),
+        static_cast<unsigned char>((value >> 24U) & 0xFFU),
+    };
+    out.write(reinterpret_cast<const char*>(bytes), sizeof(bytes));
+}
+
+void writeLittleEndian16(std::ofstream& out, std::uint16_t value) {
+    const unsigned char bytes[2] = {
+        static_cast<unsigned char>(value & 0xFFU),
+        static_cast<unsigned char>((value >> 8U) & 0xFFU),
+    };
+    out.write(reinterpret_cast<const char*>(bytes), sizeof(bytes));
+}
+
+void writeGbaFrameAsBmp(const std::string& path, const gb::gba::System& gbaSystem) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        return;
+    }
+
+    constexpr int width = gb::gba::System::ScreenWidth;
+    constexpr int height = gb::gba::System::ScreenHeight;
+    constexpr int bytesPerPixel = 3;
+    const std::uint32_t rowStride = static_cast<std::uint32_t>((width * bytesPerPixel + 3) & ~3);
+    const std::uint32_t pixelDataSize = rowStride * static_cast<std::uint32_t>(height);
+    const std::uint32_t fileSize = 14U + 40U + pixelDataSize;
+
+    out.put('B');
+    out.put('M');
+    writeLittleEndian32(out, fileSize);
+    writeLittleEndian16(out, 0U);
+    writeLittleEndian16(out, 0U);
+    writeLittleEndian32(out, 54U);
+    writeLittleEndian32(out, 40U);
+    writeLittleEndian32(out, static_cast<std::uint32_t>(width));
+    writeLittleEndian32(out, static_cast<std::uint32_t>(height));
+    writeLittleEndian16(out, 1U);
+    writeLittleEndian16(out, 24U);
+    writeLittleEndian32(out, 0U);
+    writeLittleEndian32(out, pixelDataSize);
+    writeLittleEndian32(out, 2835U);
+    writeLittleEndian32(out, 2835U);
+    writeLittleEndian32(out, 0U);
+    writeLittleEndian32(out, 0U);
+
+    const unsigned char padding[3] = {0U, 0U, 0U};
+    const auto& frame = gbaSystem.framebuffer();
+    for (int y = height - 1; y >= 0; --y) {
+        const auto rowBase = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
+        for (int x = 0; x < width; ++x) {
+            const gb::u16 pixel = frame[rowBase + static_cast<std::size_t>(x)];
+            const unsigned char b = static_cast<unsigned char>((pixel & 0x1FU) * 255U / 31U);
+            const unsigned char g = static_cast<unsigned char>(((pixel >> 5U) & 0x3FU) * 255U / 63U);
+            const unsigned char r = static_cast<unsigned char>(((pixel >> 11U) & 0x1FU) * 255U / 31U);
+            out.write(reinterpret_cast<const char*>(&b), 1);
+            out.write(reinterpret_cast<const char*>(&g), 1);
+            out.write(reinterpret_cast<const char*>(&r), 1);
+        }
+        out.write(reinterpret_cast<const char*>(padding), rowStride - static_cast<std::uint32_t>(width * bytesPerPixel));
+    }
 }
 
 ResolvedTargetSystem resolveTargetSystem(const gb::AppOptions& options) {
@@ -302,6 +371,41 @@ int main(int argc, char** argv) {
         }
         if (gbaSystem.hasPersistentBackup() && gbaSystem.saveBackupToFile(batteryPath)) {
             std::cout << "save interno GBA gravado: " << batteryPath << "\n";
+        }
+        if (gb::environmentVariableEnabled("GBEMU_GBA_HEADLESS_DUMP_FRAME")) {
+            const std::string dumpPath = gb::readEnvironmentVariable("GBEMU_GBA_HEADLESS_DUMP_PATH")
+                .value_or("frame_gba.bmp");
+            writeGbaFrameAsBmp(dumpPath, gbaSystem);
+            std::cout << "framebuffer GBA salvo em " << dumpPath << "\n";
+        }
+        if (gb::environmentVariableEnabled("GBEMU_GBA_HEADLESS_DUMP_STATE")) {
+            const auto& memory = gbaSystem.memory();
+            const auto& cpu = gbaSystem.cpu();
+            const gb::u32 pc = cpu.pc();
+            std::cout << std::hex;
+            std::cout << "GBA state: pc=0x" << cpu.pc()
+                      << " sp=0x" << cpu.reg(13)
+                      << " lr=0x" << cpu.reg(14)
+                      << " cpsr=0x" << cpu.cpsr()
+                      << " irqHandler=0x" << memory.read32(0x03007FFCU)
+                      << " op16=0x" << memory.read16(pc & ~1U)
+                      << " op16n=0x" << memory.read16((pc & ~1U) + 2U)
+                      << " op32=0x" << memory.read32(pc & ~3U)
+                      << " ie=0x" << memory.interruptEnableRaw()
+                      << " if=0x" << memory.interruptFlagsRaw()
+                      << " ime=0x" << (memory.interruptMasterEnabled() ? 1U : 0U)
+                      << " dispcnt=0x" << memory.readIo16(0x000U)
+                      << " dispstat=0x" << memory.readIo16(0x004U)
+                      << " vcount=0x" << memory.readIo16(0x006U)
+                      << " bg0cnt=0x" << memory.readIo16(0x008U)
+                      << " bg1cnt=0x" << memory.readIo16(0x00AU)
+                      << " bg2cnt=0x" << memory.readIo16(0x00CU)
+                      << " bg3cnt=0x" << memory.readIo16(0x00EU)
+                      << " tm0=0x" << memory.readIo16(0x100U) << "/0x" << memory.readIo16(0x102U)
+                      << " tm1=0x" << memory.readIo16(0x104U) << "/0x" << memory.readIo16(0x106U)
+                      << " tm2=0x" << memory.readIo16(0x108U) << "/0x" << memory.readIo16(0x10AU)
+                      << " tm3=0x" << memory.readIo16(0x10CU) << "/0x" << memory.readIo16(0x10EU)
+                      << std::dec << "\n";
         }
         std::cout << "execucao headless GBA finalizada (" << frames << " frames)\n";
         return 0;
