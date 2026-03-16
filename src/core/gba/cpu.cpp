@@ -38,6 +38,7 @@ constexpr u32 kIrqReturnTrampoline = 0xFFFF0010U;
 constexpr u32 kVectorUndefined = 0x00000004U;
 constexpr u32 kVectorPrefetchAbort = 0x0000000CU;
 constexpr double kTwoPi = 6.2831853071795864769;
+constexpr u32 kBiosIrqFlagsAddress = 0x03007FF8U;
 constexpr std::size_t kAffineTrigTableSize = 256U;
 
 bool isValidExecuteAddress(u32 address) {
@@ -309,9 +310,10 @@ int CpuArm7tdmi::step() {
     (void)handlePendingInterrupt();
     if (waitingForInterrupt_) {
         const u16 mask = waitingInterruptMask_ == 0U ? 0x0001U : waitingInterruptMask_;
-        const u16 matched = static_cast<u16>(memory_->interruptFlagsRaw() & mask);
+        const u16 biosIrqFlags = memory_->read16(kBiosIrqFlagsAddress);
+        const u16 matched = static_cast<u16>(biosIrqFlags & mask);
         if (matched != 0U) {
-            memory_->clearInterrupt(matched);
+            memory_->write16(kBiosIrqFlagsAddress, static_cast<u16>(biosIrqFlags & ~mask));
             regs_[0] = 0U;
             waitingForInterrupt_ = false;
             halted_ = false;
@@ -2122,6 +2124,9 @@ bool CpuArm7tdmi::handlePendingInterrupt() {
         return false;
     }
 
+    const u16 biosIrqFlags = memory_->read16(kBiosIrqFlagsAddress);
+    memory_->write16(kBiosIrqFlagsAddress, static_cast<u16>(biosIrqFlags | pending));
+
     const u16 irq = static_cast<u16>(pending & static_cast<u16>(0U - pending));
     (void)irq;
 
@@ -2323,12 +2328,15 @@ void CpuArm7tdmi::handleSwi(u32 swiNumber) {
             ? 0x0001U
             : static_cast<u16>(regs_[1] & 0x3FFFU);
         const u16 mask = requestedMask == 0U ? 0x0001U : requestedMask;
+        u16 biosIrqFlags = memory_->read16(kBiosIrqFlagsAddress);
         if (id == 0x05U || (regs_[0] & 1U) != 0U) {
-            memory_->clearInterrupt(mask);
+            biosIrqFlags = static_cast<u16>(biosIrqFlags & ~mask);
+            memory_->write16(kBiosIrqFlagsAddress, biosIrqFlags);
         }
-        const u16 matched = static_cast<u16>(memory_->interruptFlagsRaw() & mask);
+        memory_->writeIo16(Memory::ImeOffset, 0x0001U);
+        const u16 matched = static_cast<u16>(biosIrqFlags & mask);
         if (matched != 0U) {
-            memory_->clearInterrupt(matched);
+            memory_->write16(kBiosIrqFlagsAddress, static_cast<u16>(biosIrqFlags & ~mask));
             regs_[0] = 0U;
             waitingForInterrupt_ = false;
             waitingInterruptMask_ = 0U;

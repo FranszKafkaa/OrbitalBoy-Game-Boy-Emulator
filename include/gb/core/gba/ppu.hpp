@@ -151,6 +151,8 @@ private:
     std::array<AffineLineSnapshot, VisibleLines> completedBg2LineSnapshots_{};
     std::array<AffineLineSnapshot, VisibleLines> completedBg3LineSnapshots_{};
     mutable const std::array<bool, FramebufferSize>* activeObjWindowMask_ = nullptr;
+    mutable std::array<LayerPixel, FramebufferSize> layerScratch_{};
+    mutable std::array<bool, FramebufferSize> objWindowScratch_{};
 };
 
 } // namespace gb::gba

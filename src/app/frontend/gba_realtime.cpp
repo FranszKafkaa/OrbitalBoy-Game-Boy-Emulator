@@ -102,6 +102,7 @@ int runGbaRealtime(gba::System& system, int scale) {
     }
 
     bool running = true;
+    bool backToMenu = false;
     gba::InputState eventInput{};
     const auto applyKeyToInput = [](gba::InputState& input, SDL_Keycode key, bool pressed) {
         switch (key) {
@@ -162,6 +163,11 @@ int runGbaRealtime(gba::System& system, int scale) {
             }
             if (event.type == SDL_KEYDOWN) {
                 if (event.key.keysym.sym == SDLK_ESCAPE) {
+                    running = false;
+                    continue;
+                }
+                if (event.key.keysym.sym == SDLK_l && (event.key.keysym.mod & KMOD_CTRL) == 0) {
+                    backToMenu = true;
                     running = false;
                     continue;
                 }
@@ -245,7 +251,7 @@ int runGbaRealtime(gba::System& system, int scale) {
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
-    return 0;
+    return backToMenu ? 2 : 0;
 }
 
 } // namespace gb::frontend

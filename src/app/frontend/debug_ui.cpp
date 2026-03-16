@@ -708,7 +708,7 @@ void drawMemoryPanel(
         const int listY = overlayY + kSearchListYOffset;
         const int listLines = searchVisibleLinesForPanel(panelHeight);
         const int maxScroll = std::max(0, static_cast<int>(search.matches.size()) - listLines);
-        const int scroll = std::clamp(search.scroll, 0, maxScroll);
+        const int searchScroll = std::clamp(search.scroll, 0, maxScroll);
 
         SDL_SetRenderDrawColor(renderer, 6, 10, 18, 240);
         SDL_Rect bg{overlayX, overlayY, overlayW, overlayH};
@@ -748,7 +748,7 @@ void drawMemoryPanel(
         drawHexTextFit(renderer, innerX, buttonsY, overlayW - 16, "RUN SNAP CLR", SDL_Color{176, 208, 246, 255}, 1);
 
         for (int i = 0; i < listLines; ++i) {
-            const int idx = scroll + i;
+            const int idx = searchScroll + i;
             if (idx < 0 || idx >= static_cast<int>(search.matches.size())) {
                 break;
             }

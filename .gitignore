@@ -15,3 +15,5 @@ roms/*
 
 states/*
 captures/*
+*.bmp
+scratch

@@ -964,13 +964,43 @@ TEST_CASE("cpu", "gba_cpu_irq_thumb_pop_bx_trampoline_restores_sp") {
     T_EQ(cpu.cpsr() & 0x1FU, 0x1FU);
 }
 
-TEST_CASE("cpu", "gba_swi_vblank_intr_wait_wakes_only_on_masked_flag") {
+TEST_CASE("cpu", "gba_cpu_irq_updates_bios_interrupt_flags") {
     gb::gba::Memory memory;
-    std::vector<gb::u8> rom(0x200, 0x00);
-    writeWordLe(rom, 0x000, 0xEF000005U); // SWI VBlankIntrWait
-    writeWordLe(rom, 0x004, 0xE3A00033U); // MOV r0, #0x33 (executa apos wake)
+    std::vector<gb::u8> rom(0x400, 0x00);
+    writeWordLe(rom, 0x000, 0xEF000002U); // SWI Halt
+    writeWordLe(rom, 0x004, 0xE12FFF1EU); // BX LR
     rom[0xB2] = 0x96;
     T_REQUIRE(memory.loadRom(rom));
+
+    memory.write32(0x03007FFCU, 0x08000004U);
+    memory.writeIo16(gb::gba::Memory::IeOffset, 0x0001U);
+    memory.writeIo16(gb::gba::Memory::ImeOffset, 0x0001U);
+    memory.write16(0x03007FF8U, 0x0000U);
+
+    gb::gba::CpuArm7tdmi cpu;
+    cpu.connectMemory(&memory);
+    cpu.reset();
+
+    (void)cpu.step(); // HALT
+    memory.requestInterrupt(0x0001U);
+    (void)cpu.step(); // entra no handler
+
+    T_EQ(memory.read16(0x03007FF8U), static_cast<gb::u16>(0x0001U));
+}
+
+TEST_CASE("cpu", "gba_swi_vblank_intr_wait_uses_bios_interrupt_flags_and_forces_ime") {
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x400, 0x00);
+    writeWordLe(rom, 0x000, 0xEF000005U); // SWI VBlankIntrWait
+    writeWordLe(rom, 0x004, 0xE3A00033U); // MOV r0, #0x33 (executa apos wake)
+    writeWordLe(rom, 0x040, 0xE12FFF1EU); // IRQ handler: BX LR
+    rom[0xB2] = 0x96;
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.write32(0x03007FFCU, 0x08000040U);
+    memory.writeIo16(gb::gba::Memory::IeOffset, 0x0001U);
+    memory.writeIo16(gb::gba::Memory::ImeOffset, 0x0000U);
+    memory.write16(0x03007FF8U, 0x0000U);
 
     gb::gba::CpuArm7tdmi cpu;
     cpu.connectMemory(&memory);
@@ -979,6 +1009,7 @@ TEST_CASE("cpu", "gba_swi_vblank_intr_wait_wakes_only_on_masked_flag") {
     (void)cpu.step(); // entra em espera por VBlank
     const gb::u32 waitPc = cpu.pc();
     T_EQ(waitPc, 0x08000004U);
+    T_EQ(memory.readIo16(gb::gba::Memory::ImeOffset), static_cast<gb::u16>(0x0001U));
 
     memory.requestInterrupt(static_cast<gb::u16>(1U << 1U)); // HBlank (nao deve acordar)
     (void)cpu.step();
@@ -986,9 +1017,11 @@ TEST_CASE("cpu", "gba_swi_vblank_intr_wait_wakes_only_on_masked_flag") {
     T_EQ(cpu.reg(0), 0U);
 
     memory.requestInterrupt(static_cast<gb::u16>(1U << 0U)); // VBlank
+    (void)cpu.step(); // IRQ entra, atualiza BIOS flags e retorna
+    T_EQ(memory.read16(0x03007FF8U), static_cast<gb::u16>(0x0000U));
+    memory.clearInterrupt(static_cast<gb::u16>(1U << 0U));
     (void)cpu.step(); // acorda + executa MOV
     T_EQ(cpu.reg(0), 0x33U);
-    T_EQ(memory.interruptFlagsRaw() & static_cast<gb::u16>(1U << 0U), static_cast<gb::u16>(0U));
 }
 
 TEST_CASE("state", "gba_system_runframe_executes_cpu_phase2") {
@@ -1803,6 +1836,79 @@ TEST_CASE("cpu", "gba_ppu_render_uses_completed_frame_snapshots_after_wrap") {
     const std::size_t line2 = static_cast<std::size_t>(2U) * static_cast<std::size_t>(gb::gba::Ppu::ScreenWidth);
     T_EQ(fb[line0], static_cast<gb::u16>(0x07E0U));
     T_EQ(fb[line2], static_cast<gb::u16>(0x07E0U));
+}
+
+TEST_CASE("cpu", "gba_ppu_forced_blank_is_applied_per_scanline_snapshot") {
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x0003U); // mode3
+    memory.write16(0x06000000U, 0x03E0U); // pixel(0,0) = green
+    memory.write16(0x060001E0U, 0x03E0U); // pixel(0,1) = green
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x0083U); // mode3 + forced blank para linha 1
+    ppu.step(static_cast<int>(gb::gba::Ppu::CyclesPerLine));
+
+    std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
+    T_REQUIRE(ppu.render(fb));
+
+    const std::size_t line0 = 0U;
+    const std::size_t line1 = static_cast<std::size_t>(gb::gba::Ppu::ScreenWidth);
+    T_EQ(fb[line0], static_cast<gb::u16>(0x07E0U));
+    T_EQ(fb[line1], static_cast<gb::u16>(0xFFFFU));
+}
+
+TEST_CASE("cpu", "gba_ppu_mode4_uses_snapshotted_frame_page_after_wrap") {
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x0004U); // mode4, page 0
+    memory.write16(0x05000002U, 0x03E0U); // palette index 1 = green
+    memory.write16(0x05000004U, 0x001FU); // palette index 2 = red
+    memory.write8(0x06000000U, 0x01U); // page 0 pixel(0,0)
+    memory.write8(0x0600A000U, 0x02U); // page 1 pixel(0,0)
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    ppu.step(static_cast<int>(gb::gba::Ppu::CyclesPerLine * gb::gba::Ppu::TotalLines));
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x0014U); // novo frame seleciona page 1
+
+    std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
+    T_REQUIRE(ppu.render(fb));
+    T_EQ(fb[0], static_cast<gb::u16>(0x07E0U));
+}
+
+TEST_CASE("cpu", "gba_ppu_render_uses_snapshotted_display_mode_for_mode4_obj_rules") {
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x1004U); // mode4 + OBJ
+    memory.write16(0x05000202U, 0x7C00U); // OBJ palette index 1 = blue
+    memory.write8(0x06010000U, 0x01U); // tile 0 valido apenas se o render cair em mode0
+
+    memory.write16(0x07000000U, 0x0000U); // attr0: y=0, square, 4bpp
+    memory.write16(0x07000002U, 0x0000U); // attr1: x=0, size 0
+    memory.write16(0x07000004U, 0x0000U); // attr2: tile 0 (invalido em mode4)
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    ppu.step(static_cast<int>(gb::gba::Ppu::CyclesPerLine * gb::gba::Ppu::TotalLines));
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x1000U); // novo frame em mode0 + OBJ
+
+    std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
+    T_REQUIRE(ppu.render(fb));
+    T_EQ(fb[0], static_cast<gb::u16>(0x0000U));
 }
 
 TEST_CASE("cpu", "gba_ppu_mode4_uses_tile_number_512_as_first_valid_obj_tile") {

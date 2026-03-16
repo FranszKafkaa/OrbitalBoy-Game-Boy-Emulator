@@ -4,7 +4,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "gb/app/app_options.hpp"
 #include "gb/app/headless_runner.hpp"
@@ -39,6 +41,138 @@ bool hasGbaExtension(const std::string& romPath) {
     }
     const std::string ext = toLowerAscii(std::filesystem::path(romPath).extension().string());
     return ext == ".gba";
+}
+
+struct HeadlessGbaInputStep {
+    int startFrame = 0;
+    int endFrame = 0;
+    gb::gba::InputState state{};
+};
+
+std::optional<gb::gba::InputState> parseHeadlessGbaInputButtons(const std::string& text) {
+    gb::gba::InputState state{};
+    std::size_t start = 0;
+    bool sawButton = false;
+    while (start <= text.size()) {
+        const std::size_t end = text.find(',', start);
+        const std::string token = toLowerAscii(text.substr(start, end == std::string::npos ? std::string::npos : end - start));
+        if (!token.empty()) {
+            sawButton = true;
+            if (token == "a") {
+                state.a = true;
+            } else if (token == "b") {
+                state.b = true;
+            } else if (token == "select") {
+                state.select = true;
+            } else if (token == "start") {
+                state.start = true;
+            } else if (token == "right") {
+                state.right = true;
+            } else if (token == "left") {
+                state.left = true;
+            } else if (token == "up") {
+                state.up = true;
+            } else if (token == "down") {
+                state.down = true;
+            } else if (token == "r") {
+                state.r = true;
+            } else if (token == "l") {
+                state.l = true;
+            } else {
+                return std::nullopt;
+            }
+        }
+
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    if (!sawButton) {
+        return std::nullopt;
+    }
+    return state;
+}
+
+std::optional<HeadlessGbaInputStep> parseHeadlessGbaInputStep(const std::string& text) {
+    const std::size_t atPos = text.find('@');
+    if (atPos == std::string::npos || atPos == 0U || atPos + 1U >= text.size()) {
+        return std::nullopt;
+    }
+
+    const auto state = parseHeadlessGbaInputButtons(text.substr(0, atPos));
+    if (!state.has_value()) {
+        return std::nullopt;
+    }
+
+    const std::string frameRangeText = text.substr(atPos + 1U);
+    const std::size_t dashPos = frameRangeText.find('-');
+    const std::string startText = frameRangeText.substr(0, dashPos);
+    const std::string endText = dashPos == std::string::npos ? startText : frameRangeText.substr(dashPos + 1U);
+    if (startText.empty() || endText.empty()) {
+        return std::nullopt;
+    }
+
+    try {
+        const int startFrame = std::stoi(startText);
+        const int endFrame = std::stoi(endText);
+        if (startFrame < 0 || endFrame < startFrame) {
+            return std::nullopt;
+        }
+        return HeadlessGbaInputStep{startFrame, endFrame, *state};
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::vector<HeadlessGbaInputStep> parseHeadlessGbaInputScript(const std::string& text) {
+    std::vector<HeadlessGbaInputStep> steps;
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        const std::size_t end = text.find(';', start);
+        const std::string token = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (!token.empty()) {
+            const auto step = parseHeadlessGbaInputStep(token);
+            if (!step.has_value()) {
+                return {};
+            }
+            steps.push_back(*step);
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    std::sort(steps.begin(), steps.end(), [](const HeadlessGbaInputStep& lhs, const HeadlessGbaInputStep& rhs) {
+        if (lhs.startFrame != rhs.startFrame) {
+            return lhs.startFrame < rhs.startFrame;
+        }
+        return lhs.endFrame < rhs.endFrame;
+    });
+    return steps;
+}
+
+gb::gba::InputState headlessGbaInputForFrame(const std::vector<HeadlessGbaInputStep>& script, int frame) {
+    gb::gba::InputState state{};
+    for (const HeadlessGbaInputStep& step : script) {
+        if (frame < step.startFrame) {
+            break;
+        }
+        if (frame > step.endFrame) {
+            continue;
+        }
+        state.a = state.a || step.state.a;
+        state.b = state.b || step.state.b;
+        state.select = state.select || step.state.select;
+        state.start = state.start || step.state.start;
+        state.right = state.right || step.state.right;
+        state.left = state.left || step.state.left;
+        state.up = state.up || step.state.up;
+        state.down = state.down || step.state.down;
+        state.r = state.r || step.state.r;
+        state.l = state.l || step.state.l;
+    }
+    return state;
 }
 
 void writeLittleEndian32(std::ofstream& out, std::uint32_t value) {
@@ -237,6 +371,28 @@ bool openRomSelector(gb::AppOptions& options) {
 
 int runRealtimeFlow(gb::AppOptions& options) {
     while (true) {
+        const ResolvedTargetSystem targetSystem = resolveTargetSystem(options);
+        if (targetSystem == ResolvedTargetSystem::Gba) {
+            gb::gba::System gbaSystem;
+            if (!loadGbaGame(gbaSystem, options)) {
+                return 1;
+            }
+
+            const std::string batteryPath = gb::batteryRamPathForRom(options.romPath);
+            const int rc = gb::runGbaRealtime(gbaSystem, options.scale);
+            if (gbaSystem.hasPersistentBackup() && gbaSystem.saveBackupToFile(batteryPath)) {
+                std::cout << "save interno GBA gravado: " << batteryPath << "\n";
+            }
+
+            if (rc == 2) {
+                if (!openRomSelector(options)) {
+                    return 0;
+                }
+                continue;
+            }
+            return rc;
+        }
+
         gb::GameBoy gb;
         if (!loadGame(gb, options)) {
             return 1;
@@ -339,6 +495,16 @@ int main(int argc, char** argv) {
 
     resolvedTargetSystem = resolveTargetSystem(options);
 
+#ifdef GBEMU_USE_SDL2
+    if (!options.headless) {
+        return runRealtimeFlow(options);
+    }
+#else
+    if (!options.headless && resolvedTargetSystem == ResolvedTargetSystem::Gba) {
+        std::cout << "SDL2 nao detectado no build. Executando GBA em modo headless.\n";
+    }
+#endif
+
     if (resolvedTargetSystem == ResolvedTargetSystem::Gba) {
         if (options.hardwareMode != gb::HardwareModePreference::Auto) {
             std::cerr << "aviso: --hardware so se aplica ao modo GB, ignorando para GBA\n";
@@ -350,23 +516,19 @@ int main(int argc, char** argv) {
         }
 
         const std::string batteryPath = gb::batteryRamPathForRom(options.romPath);
-
-#ifdef GBEMU_USE_SDL2
-        if (!options.headless) {
-            const int rc = gb::runGbaRealtime(gbaSystem, options.scale);
-            if (gbaSystem.hasPersistentBackup() && gbaSystem.saveBackupToFile(batteryPath)) {
-                std::cout << "save interno GBA gravado: " << batteryPath << "\n";
+        std::vector<HeadlessGbaInputStep> headlessInputScript{};
+        if (const auto inputScriptText = gb::readEnvironmentVariable("GBEMU_GBA_HEADLESS_INPUT_SCRIPT")) {
+            headlessInputScript = parseHeadlessGbaInputScript(*inputScriptText);
+            if (headlessInputScript.empty()) {
+                std::cerr << "aviso: script invalido em GBEMU_GBA_HEADLESS_INPUT_SCRIPT, ignorando\n";
             }
-            return rc;
         }
-#else
-        if (!options.headless) {
-            std::cout << "SDL2 nao detectado no build. Executando GBA em modo headless.\n";
-        }
-#endif
 
         const int frames = std::max(1, options.frames);
         for (int i = 0; i < frames; ++i) {
+            if (!headlessInputScript.empty()) {
+                gbaSystem.setInputState(headlessGbaInputForFrame(headlessInputScript, i));
+            }
             gbaSystem.runFrame();
         }
         if (gbaSystem.hasPersistentBackup() && gbaSystem.saveBackupToFile(batteryPath)) {
@@ -411,11 +573,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-#ifdef GBEMU_USE_SDL2
-    if (!options.headless) {
-        return runRealtimeFlow(options);
-    }
-#else
+#ifndef GBEMU_USE_SDL2
     if (!options.headless) {
         std::cout << "SDL2 nao detectado no build. Executando em modo headless.\n";
     }

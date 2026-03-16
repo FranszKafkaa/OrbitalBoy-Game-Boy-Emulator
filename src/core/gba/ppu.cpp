@@ -166,6 +166,18 @@ int mosaicSampleCoord(int coord, int span) {
     return coord - (coord % span);
 }
 
+void fillScanline(std::array<gb::u16, gb::gba::Ppu::FramebufferSize>& framebuffer, int y, gb::u16 color) {
+    const std::size_t lineStart = static_cast<std::size_t>(y) * static_cast<std::size_t>(gb::gba::Ppu::ScreenWidth);
+    const std::size_t lineEnd = lineStart + static_cast<std::size_t>(gb::gba::Ppu::ScreenWidth);
+    std::fill(framebuffer.begin() + static_cast<std::ptrdiff_t>(lineStart), framebuffer.begin() + static_cast<std::ptrdiff_t>(lineEnd), color);
+}
+
+void resolveObjRenderConfig(u16 dispcnt, u16& mode, std::size_t& objTileBase, bool& obj1D) {
+    mode = static_cast<u16>(dispcnt & kDisplayModeMask);
+    objTileBase = mode >= 3U ? kObjTileBaseMode345Offset : kObjTileBaseMode012Offset;
+    obj1D = (dispcnt & kObjMapping1dMask) != 0U;
+}
+
 } // namespace
 
 void Ppu::connectMemory(Memory* memory) {
@@ -191,6 +203,26 @@ void Ppu::reset() {
 void Ppu::step(int cpuCycles) {
     if (memory_ == nullptr || cpuCycles <= 0) {
         return;
+    }
+
+    const std::uint32_t delta = static_cast<std::uint32_t>(cpuCycles);
+    if (scanlineCycles_ < HblankStartCycle) {
+        const std::uint32_t nextCycles = scanlineCycles_ + delta;
+        if (nextCycles < HblankStartCycle) {
+            scanlineCycles_ = nextCycles;
+            return;
+        }
+        if (nextCycles < CyclesPerLine) {
+            scanlineCycles_ = nextCycles;
+            updateIoRegisters();
+            return;
+        }
+    } else {
+        const std::uint32_t nextCycles = scanlineCycles_ + delta;
+        if (nextCycles < CyclesPerLine) {
+            scanlineCycles_ = nextCycles;
+            return;
+        }
     }
 
     std::uint32_t remainingCycles = static_cast<std::uint32_t>(cpuCycles);
@@ -237,11 +269,8 @@ bool Ppu::render(std::array<u16, FramebufferSize>& framebuffer) const {
         return false;
     }
 
-    const u16 dispcnt = memory_->readIo16(DispcntOffset);
-    if ((dispcnt & kForcedBlankMask) != 0U) {
-        std::fill(framebuffer.begin(), framebuffer.end(), static_cast<u16>(0xFFFFU));
-        return true;
-    }
+    const RasterLineSnapshot line0 = rasterSnapshotForLine(0);
+    const u16 dispcnt = line0.dispcnt;
     const u16 mode = static_cast<u16>(dispcnt & kDisplayModeMask);
     switch (mode) {
     case 0U:
@@ -262,8 +291,8 @@ bool Ppu::render(std::array<u16, FramebufferSize>& framebuffer) const {
 }
 
 bool Ppu::renderMode0(std::array<u16, FramebufferSize>& framebuffer) const {
-    std::array<LayerPixel, FramebufferSize> layerPixels{};
-    std::array<bool, FramebufferSize> objWindowMask{};
+    auto& layerPixels = layerScratch_;
+    auto& objWindowMask = objWindowScratch_;
     const u16 backdropRaw = readBgPaletteColor(0);
     const u16 backdrop = bgr555ToRgb565(backdropRaw);
     for (auto& px : layerPixels) {
@@ -302,6 +331,10 @@ bool Ppu::renderMode0(std::array<u16, FramebufferSize>& framebuffer) const {
 
     for (int y = 0; y < ScreenHeight; ++y) {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
+        if ((line.dispcnt & kForcedBlankMask) != 0U) {
+            fillScanline(framebuffer, y, static_cast<u16>(0xFFFFU));
+            continue;
+        }
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u16 bldcnt = line.bldCnt;
         static_cast<void>(bldcnt);
@@ -318,8 +351,8 @@ bool Ppu::renderMode0(std::array<u16, FramebufferSize>& framebuffer) const {
 }
 
 bool Ppu::renderMode1(std::array<u16, FramebufferSize>& framebuffer) const {
-    std::array<LayerPixel, FramebufferSize> layerPixels{};
-    std::array<bool, FramebufferSize> objWindowMask{};
+    auto& layerPixels = layerScratch_;
+    auto& objWindowMask = objWindowScratch_;
     const u16 backdropRaw = readBgPaletteColor(0);
     const u16 backdrop = bgr555ToRgb565(backdropRaw);
     for (auto& px : layerPixels) {
@@ -358,6 +391,10 @@ bool Ppu::renderMode1(std::array<u16, FramebufferSize>& framebuffer) const {
 
     for (int y = 0; y < ScreenHeight; ++y) {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
+        if ((line.dispcnt & kForcedBlankMask) != 0U) {
+            fillScanline(framebuffer, y, static_cast<u16>(0xFFFFU));
+            continue;
+        }
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u16 bldcnt = line.bldCnt;
         static_cast<void>(bldcnt);
@@ -374,8 +411,8 @@ bool Ppu::renderMode1(std::array<u16, FramebufferSize>& framebuffer) const {
 }
 
 bool Ppu::renderMode2(std::array<u16, FramebufferSize>& framebuffer) const {
-    std::array<LayerPixel, FramebufferSize> layerPixels{};
-    std::array<bool, FramebufferSize> objWindowMask{};
+    auto& layerPixels = layerScratch_;
+    auto& objWindowMask = objWindowScratch_;
     const u16 backdropRaw = readBgPaletteColor(0);
     const u16 backdrop = bgr555ToRgb565(backdropRaw);
     for (auto& px : layerPixels) {
@@ -413,6 +450,10 @@ bool Ppu::renderMode2(std::array<u16, FramebufferSize>& framebuffer) const {
 
     for (int y = 0; y < ScreenHeight; ++y) {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
+        if ((line.dispcnt & kForcedBlankMask) != 0U) {
+            fillScanline(framebuffer, y, static_cast<u16>(0xFFFFU));
+            continue;
+        }
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u16 bldcnt = line.bldCnt;
         static_cast<void>(bldcnt);
@@ -429,8 +470,8 @@ bool Ppu::renderMode2(std::array<u16, FramebufferSize>& framebuffer) const {
 }
 
 bool Ppu::renderMode3(std::array<u16, FramebufferSize>& framebuffer) const {
-    std::array<LayerPixel, FramebufferSize> layerPixels{};
-    std::array<bool, FramebufferSize> objWindowMask{};
+    auto& layerPixels = layerScratch_;
+    auto& objWindowMask = objWindowScratch_;
     const u16 backdropRaw = readBgPaletteColor(0);
     const u16 backdrop = bgr555ToRgb565(backdropRaw);
     for (auto& px : layerPixels) {
@@ -486,6 +527,10 @@ bool Ppu::renderMode3(std::array<u16, FramebufferSize>& framebuffer) const {
     renderObjects(layerPixels);
     for (int y = 0; y < ScreenHeight; ++y) {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
+        if ((line.dispcnt & kForcedBlankMask) != 0U) {
+            fillScanline(framebuffer, y, static_cast<u16>(0xFFFFU));
+            continue;
+        }
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u16 bldcnt = line.bldCnt;
         static_cast<void>(bldcnt);
@@ -502,8 +547,8 @@ bool Ppu::renderMode3(std::array<u16, FramebufferSize>& framebuffer) const {
 }
 
 bool Ppu::renderMode4(std::array<u16, FramebufferSize>& framebuffer) const {
-    std::array<LayerPixel, FramebufferSize> layerPixels{};
-    std::array<bool, FramebufferSize> objWindowMask{};
+    auto& layerPixels = layerScratch_;
+    auto& objWindowMask = objWindowScratch_;
     const u16 backdropRaw = readBgPaletteColor(0);
     const u16 backdrop = bgr555ToRgb565(backdropRaw);
     for (auto& px : layerPixels) {
@@ -521,7 +566,6 @@ bool Ppu::renderMode4(std::array<u16, FramebufferSize>& framebuffer) const {
         };
     }
 
-    const u16 dispcnt = memory_->readIo16(DispcntOffset);
     bool objWindowNeeded = false;
     for (int y = 0; y < ScreenHeight; ++y) {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
@@ -536,11 +580,11 @@ bool Ppu::renderMode4(std::array<u16, FramebufferSize>& framebuffer) const {
     } else {
         activeObjWindowMask_ = nullptr;
     }
-    const bool frame1 = (dispcnt & kFrameSelectMask) != 0U;
-    const std::size_t pageBase = frame1 ? kBitmapPage1Offset : 0U;
     const auto& vram = memory_->vram();
     for (int y = 0; y < ScreenHeight; ++y) {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
+        const bool frame1 = (line.dispcnt & kFrameSelectMask) != 0U;
+        const std::size_t pageBase = frame1 ? kBitmapPage1Offset : 0U;
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u8 bgPriority = static_cast<u8>(line.bgCnt[2] & 0x3U);
         const bool mosaicEnabled = (line.bgCnt[2] & kBgMosaicMask) != 0U;
@@ -566,6 +610,10 @@ bool Ppu::renderMode4(std::array<u16, FramebufferSize>& framebuffer) const {
     renderObjects(layerPixels);
     for (int y = 0; y < ScreenHeight; ++y) {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
+        if ((line.dispcnt & kForcedBlankMask) != 0U) {
+            fillScanline(framebuffer, y, static_cast<u16>(0xFFFFU));
+            continue;
+        }
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u16 bldcnt = line.bldCnt;
         static_cast<void>(bldcnt);
@@ -582,8 +630,8 @@ bool Ppu::renderMode4(std::array<u16, FramebufferSize>& framebuffer) const {
 }
 
 bool Ppu::renderMode5(std::array<u16, FramebufferSize>& framebuffer) const {
-    std::array<LayerPixel, FramebufferSize> layerPixels{};
-    std::array<bool, FramebufferSize> objWindowMask{};
+    auto& layerPixels = layerScratch_;
+    auto& objWindowMask = objWindowScratch_;
     const u16 backdropRaw = readBgPaletteColor(0);
     const u16 backdrop = bgr555ToRgb565(backdropRaw);
     for (auto& px : layerPixels) {
@@ -601,7 +649,6 @@ bool Ppu::renderMode5(std::array<u16, FramebufferSize>& framebuffer) const {
         };
     }
 
-    const u16 dispcnt = memory_->readIo16(DispcntOffset);
     bool objWindowNeeded = false;
     for (int y = 0; y < ScreenHeight; ++y) {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
@@ -616,13 +663,12 @@ bool Ppu::renderMode5(std::array<u16, FramebufferSize>& framebuffer) const {
     } else {
         activeObjWindowMask_ = nullptr;
     }
-    const bool frame1 = (dispcnt & kFrameSelectMask) != 0U;
-    const std::size_t pageBase = frame1 ? kBitmapPage1Offset : 0U;
-
     constexpr int kMode5Width = 160;
     constexpr int kMode5Height = 128;
     for (int y = 0; y < kMode5Height; ++y) {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
+        const bool frame1 = (line.dispcnt & kFrameSelectMask) != 0U;
+        const std::size_t pageBase = frame1 ? kBitmapPage1Offset : 0U;
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u8 bgPriority = static_cast<u8>(line.bgCnt[2] & 0x3U);
         const bool mosaicEnabled = (line.bgCnt[2] & kBgMosaicMask) != 0U;
@@ -647,6 +693,10 @@ bool Ppu::renderMode5(std::array<u16, FramebufferSize>& framebuffer) const {
     renderObjects(layerPixels);
     for (int y = 0; y < ScreenHeight; ++y) {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
+        if ((line.dispcnt & kForcedBlankMask) != 0U) {
+            fillScanline(framebuffer, y, static_cast<u16>(0xFFFFU));
+            continue;
+        }
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
         const u16 bldcnt = line.bldCnt;
         static_cast<void>(bldcnt);
@@ -747,6 +797,104 @@ void Ppu::renderTextBackground(int bgIndex, std::array<LayerPixel, FramebufferSi
 
 void Ppu::renderAffineBackground(int bgIndex, std::array<LayerPixel, FramebufferSize>& layerPixels) const {
     if (bgIndex < 2 || bgIndex > 3) {
+        return;
+    }
+
+    bool anyVisibleMosaic = false;
+    for (int y = 0; y < ScreenHeight; ++y) {
+        const RasterLineSnapshot line = rasterSnapshotForLine(y);
+        const u16 bgcnt = line.bgCnt[static_cast<std::size_t>(bgIndex)];
+        if ((line.dispcnt & kBgEnableMasks[bgIndex]) != 0U && (bgcnt & kBgMosaicMask) != 0U) {
+            anyVisibleMosaic = true;
+            break;
+        }
+    }
+
+    if (!anyVisibleMosaic) {
+        std::int64_t prevLineStartX = 0;
+        std::int64_t prevLineStartY = 0;
+        std::int32_t prevPb = 0;
+        std::int32_t prevPd = 0;
+        std::int32_t prevRegX = 0;
+        std::int32_t prevRegY = 0;
+        bool havePreviousLine = false;
+
+        for (int y = 0; y < ScreenHeight; ++y) {
+            const AffineLineSnapshot affine = affineSnapshotForLine(bgIndex, y);
+            const RasterLineSnapshot line = rasterSnapshotForLine(y);
+            std::int64_t lineStartX = affine.xRef;
+            std::int64_t lineStartY = affine.yRef;
+            if (havePreviousLine) {
+                const bool explicitRefWrite = affine.xRef != prevRegX || affine.yRef != prevRegY;
+                if (!explicitRefWrite) {
+                    lineStartX = prevLineStartX + static_cast<std::int64_t>(prevPb);
+                    lineStartY = prevLineStartY + static_cast<std::int64_t>(prevPd);
+                }
+            }
+
+            const u16 bgcnt = line.bgCnt[static_cast<std::size_t>(bgIndex)];
+            const bool layerEnabled = (line.dispcnt & kBgEnableMasks[bgIndex]) != 0U;
+            const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
+            const u8 priority = static_cast<u8>(bgcnt & 0x3U);
+            const bool wrap = (bgcnt & kBgWrapMask) != 0U;
+            const u32 charBase = static_cast<u32>((bgcnt >> 2U) & 0x3U) * 0x4000U;
+            const u32 screenBase = static_cast<u32>((bgcnt >> 8U) & 0x1FU) * 0x800U;
+            const u32 sizeIndex = static_cast<u32>((bgcnt >> 14U) & 0x3U);
+            const int affineSize = 128 << static_cast<int>(sizeIndex);
+            const int tilesPerLine = affineSize / 8;
+
+            if (layerEnabled) {
+                for (int x = 0; x < ScreenWidth; ++x) {
+                    const u8 windowMask = windowingEnabled ? windowMaskForPixel(x, y, line) : 0x3FU;
+                    if (!layerEnabledByWindowMask(windowMask, static_cast<u8>(bgIndex))) {
+                        continue;
+                    }
+                    const std::int64_t affineX =
+                        lineStartX + static_cast<std::int64_t>(affine.pa) * static_cast<std::int64_t>(x);
+                    const std::int64_t affineY =
+                        lineStartY + static_cast<std::int64_t>(affine.pc) * static_cast<std::int64_t>(x);
+
+                    int sx = static_cast<int>(affineX >> 8U);
+                    int sy = static_cast<int>(affineY >> 8U);
+                    if (wrap) {
+                        sx = wrapCoordinate(sx, affineSize);
+                        sy = wrapCoordinate(sy, affineSize);
+                    } else if (sx < 0 || sx >= affineSize || sy < 0 || sy >= affineSize) {
+                        continue;
+                    }
+
+                    const u32 tileX = static_cast<u32>(sx / 8);
+                    const u32 tileY = static_cast<u32>(sy / 8);
+                    const u32 inTileX = static_cast<u32>(sx & 7);
+                    const u32 inTileY = static_cast<u32>(sy & 7);
+
+                    const std::size_t mapIndex = static_cast<std::size_t>(screenBase)
+                        + static_cast<std::size_t>(tileY) * static_cast<std::size_t>(tilesPerLine)
+                        + static_cast<std::size_t>(tileX);
+                    const u32 tileNumber = static_cast<u32>(readBgVram8(mapIndex));
+                    const std::size_t texelOffset = static_cast<std::size_t>(charBase)
+                        + static_cast<std::size_t>(tileNumber) * 64U
+                        + static_cast<std::size_t>(inTileY) * 8U
+                        + static_cast<std::size_t>(inTileX);
+                    const u8 colorIndex = readBgVram8(texelOffset);
+                    if (colorIndex == 0U) {
+                        continue;
+                    }
+
+                    const std::size_t pixelIndex = static_cast<std::size_t>(y) * static_cast<std::size_t>(ScreenWidth)
+                        + static_cast<std::size_t>(x);
+                    composeLayer(layerPixels, pixelIndex, readBgPaletteColor(colorIndex), priority, static_cast<u8>(bgIndex));
+                }
+            }
+
+            prevLineStartX = lineStartX;
+            prevLineStartY = lineStartY;
+            prevPb = affine.pb;
+            prevPd = affine.pd;
+            prevRegX = affine.xRef;
+            prevRegY = affine.yRef;
+            havePreviousLine = true;
+        }
         return;
     }
 
@@ -866,10 +1014,6 @@ void Ppu::buildObjWindowMask(std::array<bool, FramebufferSize>& objWindowMask) c
         return;
     }
 
-    const u16 dispcnt = memory_->readIo16(DispcntOffset);
-    const u16 mode = static_cast<u16>(dispcnt & kDisplayModeMask);
-    const std::size_t objTileBase = mode >= 3U ? kObjTileBaseMode345Offset : kObjTileBaseMode012Offset;
-    const bool obj1D = (dispcnt & kObjMapping1dMask) != 0U;
     const auto& vram = memory_->vram();
 
     for (int obj = 0; obj < 128; ++obj) {
@@ -912,11 +1056,6 @@ void Ppu::buildObjWindowMask(std::array<bool, FramebufferSize>& objWindowMask) c
 
         const bool hflip = !affine && (attr1 & 0x1000U) != 0U;
         const bool vflip = !affine && (attr1 & 0x2000U) != 0U;
-        u32 tileBase = 0;
-        u32 totalObjBlocks = 0;
-        if (!resolveObjTileNumber(mode, attr2, color256, tileBase, totalObjBlocks)) {
-            continue;
-        }
         const int tilesPerRow1D = std::max(1, baseWidth / 8);
 
         std::int32_t pa = 0;
@@ -937,13 +1076,22 @@ void Ppu::buildObjWindowMask(std::array<bool, FramebufferSize>& objWindowMask) c
             if (screenY < 0 || screenY >= ScreenHeight) {
                 continue;
             }
+            const RasterLineSnapshot line = rasterSnapshotForLine(screenY);
+            if ((line.dispcnt & kObjWinEnableMask) == 0U) {
+                continue;
+            }
+            u16 lineMode = 0U;
+            std::size_t lineObjTileBase = 0U;
+            bool lineObj1D = false;
+            resolveObjRenderConfig(line.dispcnt, lineMode, lineObjTileBase, lineObj1D);
+            u32 tileBase = 0U;
+            u32 totalObjBlocks = 0U;
+            if (!resolveObjTileNumber(lineMode, attr2, color256, tileBase, totalObjBlocks)) {
+                continue;
+            }
             for (int px = 0; px < renderWidth; ++px) {
                 const int screenX = x + px;
                 if (screenX < 0 || screenX >= ScreenWidth) {
-                    continue;
-                }
-                const RasterLineSnapshot line = rasterSnapshotForLine(screenY);
-                if ((line.dispcnt & kObjWinEnableMask) == 0U) {
                     continue;
                 }
                 const int objMosaicXSpan = mosaicEnabled ? mosaicSpan(line.mosaic, 8U) : 1;
@@ -974,7 +1122,7 @@ void Ppu::buildObjWindowMask(std::array<bool, FramebufferSize>& objWindowMask) c
                 const int inTileY = localY & 7;
                 const u32 blockStrideX = color256 ? 2U : 1U;
                 u32 blockOffset = 0;
-                if (obj1D) {
+                if (lineObj1D) {
                     const u32 rowBlocks = static_cast<u32>(tilesPerRow1D) * blockStrideX;
                     blockOffset = static_cast<u32>(tileY) * rowBlocks + static_cast<u32>(tileX) * blockStrideX;
                 } else {
@@ -984,7 +1132,7 @@ void Ppu::buildObjWindowMask(std::array<bool, FramebufferSize>& objWindowMask) c
 
                 bool opaquePixel = false;
                 if (color256) {
-                    const std::size_t texelOffset = objTileBase
+                    const std::size_t texelOffset = lineObjTileBase
                         + static_cast<std::size_t>(blockNumber) * 32U
                         + static_cast<std::size_t>(inTileY) * 8U
                         + static_cast<std::size_t>(inTileX);
@@ -992,7 +1140,7 @@ void Ppu::buildObjWindowMask(std::array<bool, FramebufferSize>& objWindowMask) c
                         opaquePixel = vram[texelOffset] != 0U;
                     }
                 } else {
-                    const std::size_t texelOffset = objTileBase
+                    const std::size_t texelOffset = lineObjTileBase
                         + static_cast<std::size_t>(blockNumber) * 32U
                         + static_cast<std::size_t>(inTileY) * 4U
                         + static_cast<std::size_t>(inTileX / 2);
@@ -1017,10 +1165,6 @@ void Ppu::buildObjWindowMask(std::array<bool, FramebufferSize>& objWindowMask) c
 }
 
 void Ppu::renderObjects(std::array<LayerPixel, FramebufferSize>& layerPixels) const {
-    const u16 dispcnt = memory_->readIo16(DispcntOffset);
-    const u16 mode = static_cast<u16>(dispcnt & kDisplayModeMask);
-    const std::size_t objTileBase = mode >= 3U ? kObjTileBaseMode345Offset : kObjTileBaseMode012Offset;
-    const bool obj1D = (dispcnt & kObjMapping1dMask) != 0U;
     const auto& vram = memory_->vram();
 
     for (int obj = 0; obj < 128; ++obj) {
@@ -1065,11 +1209,6 @@ void Ppu::renderObjects(std::array<LayerPixel, FramebufferSize>& layerPixels) co
 
         const bool hflip = !affine && (attr1 & 0x1000U) != 0U;
         const bool vflip = !affine && (attr1 & 0x2000U) != 0U;
-        u32 tileBase = 0;
-        u32 totalObjBlocks = 0;
-        if (!resolveObjTileNumber(mode, attr2, color256, tileBase, totalObjBlocks)) {
-            continue;
-        }
         const u8 objPriority = static_cast<u8>((attr2 >> 10U) & 0x3U);
         const u8 paletteBank = static_cast<u8>((attr2 >> 12U) & 0x0FU);
         const int tilesPerRow1D = std::max(1, baseWidth / 8);
@@ -1094,6 +1233,15 @@ void Ppu::renderObjects(std::array<LayerPixel, FramebufferSize>& layerPixels) co
             }
             const RasterLineSnapshot line = rasterSnapshotForLine(screenY);
             if ((line.dispcnt & kObjEnableMask) == 0U) {
+                continue;
+            }
+            u16 lineMode = 0U;
+            std::size_t lineObjTileBase = 0U;
+            bool lineObj1D = false;
+            resolveObjRenderConfig(line.dispcnt, lineMode, lineObjTileBase, lineObj1D);
+            u32 tileBase = 0U;
+            u32 totalObjBlocks = 0U;
+            if (!resolveObjTileNumber(lineMode, attr2, color256, tileBase, totalObjBlocks)) {
                 continue;
             }
             const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
@@ -1135,7 +1283,7 @@ void Ppu::renderObjects(std::array<LayerPixel, FramebufferSize>& layerPixels) co
                 const u32 blockStrideX = color256 ? 2U : 1U;
 
                 u32 blockOffset = 0;
-                if (obj1D) {
+                if (lineObj1D) {
                     const u32 rowBlocks = static_cast<u32>(tilesPerRow1D) * blockStrideX;
                     blockOffset = static_cast<u32>(tileY) * rowBlocks + static_cast<u32>(tileX) * blockStrideX;
                 } else {
@@ -1145,7 +1293,7 @@ void Ppu::renderObjects(std::array<LayerPixel, FramebufferSize>& layerPixels) co
 
                 u8 colorIndex = 0;
                 if (color256) {
-                    const std::size_t texelOffset = objTileBase
+                    const std::size_t texelOffset = lineObjTileBase
                         + static_cast<std::size_t>(blockNumber) * 32U
                         + static_cast<std::size_t>(inTileY) * 8U
                         + static_cast<std::size_t>(inTileX);
@@ -1157,7 +1305,7 @@ void Ppu::renderObjects(std::array<LayerPixel, FramebufferSize>& layerPixels) co
                         continue;
                     }
                 } else {
-                    const std::size_t texelOffset = objTileBase
+                    const std::size_t texelOffset = lineObjTileBase
                         + static_cast<std::size_t>(blockNumber) * 32U
                         + static_cast<std::size_t>(inTileY) * 4U
                         + static_cast<std::size_t>(inTileX / 2);
