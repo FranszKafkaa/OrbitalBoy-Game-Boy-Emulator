@@ -25,6 +25,7 @@ public:
     void setPc(u32 value);
 
     [[nodiscard]] u32 cpsr() const;
+    void setCpsr(u32 value);
 
     [[nodiscard]] bool flagN() const;
     [[nodiscard]] bool flagZ() const;
@@ -99,7 +100,9 @@ private:
 
     void updateNz(u32 result);
     void updateAddFlags(u32 lhs, u32 rhs, u32 result);
+    void updateAdcFlags(u32 lhs, u32 rhs, u32 carry, u32 result);
     void updateSubFlags(u32 lhs, u32 rhs, u32 result);
+    void updateSbcFlags(u32 lhs, u32 rhs, u32 borrow, u32 result);
     void setFlag(u32 mask, bool enabled);
     void refreshLogFlags();
 

@@ -17,3 +17,8 @@ states/*
 captures/*
 *.bmp
 scratch
+*.log
+logs
+
+.vscode
+.idea

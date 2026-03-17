@@ -41,6 +41,45 @@ constexpr double kTwoPi = 6.2831853071795864769;
 constexpr u32 kBiosIrqFlagsAddress = 0x03007FF8U;
 constexpr std::size_t kAffineTrigTableSize = 256U;
 
+bool vramTransferLoggingEnabled() {
+    return gb::environmentVariableEnabled("GBEMU_GBA_LOG_VRAM_TRANSFERS");
+}
+
+int readIntEnvironmentBase0OrDefault(const char* name, int fallback) {
+    const auto value = gb::readEnvironmentVariable(name);
+    if (!value.has_value()) {
+        return fallback;
+    }
+    try {
+        return std::stoi(*value, nullptr, 0);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+bool isDecompressionSwi(u32 id) {
+    return id == 0x11U || id == 0x12U || id == 0x14U || id == 0x15U;
+}
+
+bool isVramAddress(u32 address) {
+    return (address >> 24U) == 0x06U;
+}
+
+void logVramTransfer(const char* kind, u32 src, u32 dst, std::size_t bytes, bool vramMode = false) {
+    if (!vramTransferLoggingEnabled() || !isVramAddress(dst) || bytes == 0U) {
+        return;
+    }
+    std::cerr << std::hex
+              << "[GBA][VRAM-XFER] kind=" << kind
+              << " src=0x" << src
+              << " dst=0x" << dst
+              << " end=0x" << (dst + static_cast<u32>(bytes - 1U))
+              << " bytes=0x" << bytes
+              << std::dec
+              << " vramMode=" << static_cast<unsigned>(vramMode)
+              << '\n';
+}
+
 bool isValidExecuteAddress(u32 address) {
     const u8 region = static_cast<u8>(address >> 24U);
     if (region == 0x00U) {
@@ -99,6 +138,7 @@ bool zeroMemoryRange(Memory& memory, u32 address, std::size_t size) {
 
 bool copyHalfwords(Memory& memory, u32 dst, u32 src, u32 count) {
     const std::size_t bytes = static_cast<std::size_t>(count) * 2U;
+    logVramTransfer("copy16", src, dst, bytes);
     const u8* srcPtr = memory.directReadPointer(src, bytes);
     u8* dstPtr = memory.directWritePointer(dst, bytes);
     if (srcPtr == nullptr || dstPtr == nullptr) {
@@ -110,6 +150,7 @@ bool copyHalfwords(Memory& memory, u32 dst, u32 src, u32 count) {
 
 bool copyWords(Memory& memory, u32 dst, u32 src, u32 count) {
     const std::size_t bytes = static_cast<std::size_t>(count) * 4U;
+    logVramTransfer("copy32", src, dst, bytes);
     const u8* srcPtr = memory.directReadPointer(src, bytes);
     u8* dstPtr = memory.directWritePointer(dst, bytes);
     if (srcPtr == nullptr || dstPtr == nullptr) {
@@ -121,6 +162,7 @@ bool copyWords(Memory& memory, u32 dst, u32 src, u32 count) {
 
 bool fillHalfwords(Memory& memory, u32 dst, u16 value, u32 count) {
     const std::size_t bytes = static_cast<std::size_t>(count) * 2U;
+    logVramTransfer("fill16", static_cast<u32>(value), dst, bytes);
     u8* dstPtr = memory.directWritePointer(dst, bytes);
     if (dstPtr == nullptr) {
         return false;
@@ -132,6 +174,7 @@ bool fillHalfwords(Memory& memory, u32 dst, u16 value, u32 count) {
 
 bool fillWords(Memory& memory, u32 dst, u32 value, u32 count) {
     const std::size_t bytes = static_cast<std::size_t>(count) * 4U;
+    logVramTransfer("fill32", value, dst, bytes);
     u8* dstPtr = memory.directWritePointer(dst, bytes);
     if (dstPtr == nullptr) {
         return false;
@@ -143,6 +186,7 @@ bool fillWords(Memory& memory, u32 dst, u32 value, u32 count) {
 
 void writeDecodedBuffer(Memory& memory, u32 dst, const std::vector<u8>& decoded, bool vramMode) {
     const std::size_t directSize = decoded.size() + ((vramMode && (decoded.size() & 1U) != 0U) ? 1U : 0U);
+    logVramTransfer("decode", 0U, dst, directSize, vramMode);
     if (u8* directDst = memory.directWritePointer(dst, directSize); directDst != nullptr) {
         if (!decoded.empty()) {
             std::memcpy(directDst, decoded.data(), decoded.size());
@@ -161,7 +205,28 @@ void writeDecodedBuffer(Memory& memory, u32 dst, const std::vector<u8>& decoded,
     for (std::size_t i = 0; i < decoded.size(); i += 2U) {
         const u16 lo = decoded[i];
         const u16 hi = (i + 1U < decoded.size()) ? static_cast<u16>(decoded[i + 1U]) : 0U;
-        memory.write16(dst + static_cast<u32>(i), static_cast<u16>(lo | static_cast<u16>(hi << 8U)));
+        memory.write16(dst + static_cast<u32>(i), static_cast<u16>(lo | (hi << 8U)));
+    }
+}
+
+void writeDecodedBufferAligned32(Memory& memory, u32 dst, const std::vector<u8>& decoded) {
+    const std::size_t paddedSize = (decoded.size() + 3U) & ~std::size_t{3U};
+    logVramTransfer("decode", 0U, dst, paddedSize, false);
+    if (u8* directDst = memory.directWritePointer(dst, paddedSize); directDst != nullptr) {
+        std::fill_n(directDst, static_cast<std::ptrdiff_t>(paddedSize), 0U);
+        if (!decoded.empty()) {
+            std::memcpy(directDst, decoded.data(), decoded.size());
+        }
+        return;
+    }
+    for (std::size_t i = 0; i < paddedSize; i += 4U) {
+        u32 word = 0U;
+        for (std::size_t byte = 0; byte < 4U; ++byte) {
+            const std::size_t index = i + byte;
+            const u32 value = index < decoded.size() ? decoded[index] : 0U;
+            word |= value << (byte * 8U);
+        }
+        memory.write32(dst + static_cast<u32>(i), word);
     }
 }
 
@@ -231,6 +296,74 @@ void runRlUnComp(Memory& memory, u32 src, u32 dst, bool vramMode) {
         }
     }
     writeDecodedBuffer(memory, dst, decoded, vramMode);
+}
+
+void runHuffUnComp(Memory& memory, u32 src, u32 dst) {
+    const u32 header = memory.read32(src);
+    const u32 dataSizeBits = header & 0x0FU;
+    if (((header >> 4U) & 0x0FU) != 0x2U || dataSizeBits == 0U || dataSizeBits > 8U) {
+        return;
+    }
+
+    const u32 outputSize = header >> 8U;
+    src += 4U;
+    const u32 treeSize = memory.read8(src++);
+    const u32 rootNode = src;
+    const u32 bitstreamStart = src + treeSize * 2U + 1U;
+    std::vector<u8> decoded(static_cast<std::size_t>(outputSize), 0U);
+
+    u32 stream = bitstreamStart;
+    u32 bitWord = 0U;
+    u32 bitMask = 0U;
+    u32 nodeAddr = rootNode;
+    u32 written = 0U;
+    u32 pendingBits = 0U;
+    unsigned pendingCount = 0U;
+    const u8 dataMask = static_cast<u8>((1U << dataSizeBits) - 1U);
+
+    const auto emitValue = [&](u8 value) {
+        if (dataSizeBits == 8U) {
+            if (written < outputSize) {
+                decoded[written++] = value;
+            }
+            return;
+        }
+        pendingBits |= static_cast<u32>(value & dataMask) << pendingCount;
+        pendingCount += static_cast<unsigned>(dataSizeBits);
+        while (pendingCount >= 8U && written < outputSize) {
+            decoded[written++] = static_cast<u8>(pendingBits & 0xFFU);
+            pendingBits >>= 8U;
+            pendingCount -= 8U;
+        }
+    };
+
+    while (written < outputSize) {
+        if (bitMask == 0U) {
+            bitWord = memory.read32(stream);
+            stream += 4U;
+            bitMask = 0x80000000U;
+        }
+
+        const u8 node = memory.read8(nodeAddr);
+        const bool takeRight = (bitWord & bitMask) != 0U;
+        bitMask >>= 1U;
+
+        const u32 childBase = (nodeAddr & ~1U) + static_cast<u32>(node & 0x3FU) * 2U + 2U;
+        const u32 childAddr = childBase + (takeRight ? 1U : 0U);
+        const bool isDataNode = takeRight ? ((node & 0x40U) != 0U) : ((node & 0x80U) != 0U);
+        if (!isDataNode) {
+            nodeAddr = childAddr;
+            continue;
+        }
+
+        emitValue(static_cast<u8>(memory.read8(childAddr) & dataMask));
+        nodeAddr = rootNode;
+    }
+
+    if (pendingCount != 0U && written < outputSize) {
+        decoded[written] = static_cast<u8>(pendingBits & 0xFFU);
+    }
+    writeDecodedBufferAligned32(memory, dst, decoded);
 }
 
 } // namespace
@@ -496,6 +629,10 @@ void CpuArm7tdmi::setPc(u32 value) {
 
 u32 CpuArm7tdmi::cpsr() const {
     return cpsr_;
+}
+
+void CpuArm7tdmi::setCpsr(u32 value) {
+    cpsr_ = value;
 }
 
 bool CpuArm7tdmi::flagN() const {
@@ -1170,22 +1307,28 @@ bool CpuArm7tdmi::executeThumbInstruction(u16 instruction, u32 currentPc) {
         case 0x5: { // ADC
             const u32 carry = flagC() ? 1U : 0U;
             result = lhs + rhs + carry;
-            updateAddFlags(lhs, rhs + carry, result);
+            updateAdcFlags(lhs, rhs, carry, result);
             break;
         }
         case 0x6: { // SBC
             const u32 borrow = flagC() ? 0U : 1U;
             result = lhs - rhs - borrow;
-            updateSubFlags(lhs, rhs + borrow, result);
+            updateSbcFlags(lhs, rhs, borrow, result);
             break;
         }
         case 0x7: { // ROR
-            const unsigned amount = static_cast<unsigned>(rhs & 0x1FU);
-            if (amount == 0U) {
+            const unsigned low8 = static_cast<unsigned>(rhs & 0xFFU);
+            if (low8 == 0U) {
                 result = lhs;
             } else {
-                result = rotateRight(lhs, amount);
-                setFlag(kCpsrC, (result & 0x80000000U) != 0U);
+                const unsigned effectiveRor = low8 & 0x1FU;
+                if (effectiveRor == 0U) {
+                    result = lhs;
+                    setFlag(kCpsrC, (lhs & 0x80000000U) != 0U);
+                } else {
+                    result = rotateRight(lhs, effectiveRor);
+                    setFlag(kCpsrC, (result & 0x80000000U) != 0U);
+                }
             }
             updateNz(result);
             break;
@@ -1315,7 +1458,12 @@ bool CpuArm7tdmi::executeThumbInstruction(u16 instruction, u32 currentPc) {
             regs_[rd] = memory_->read8(addr);
             return true;
         case 0x7: // LDSH
-            regs_[rd] = static_cast<u32>(static_cast<std::int32_t>(static_cast<std::int16_t>(memory_->read16(addr))));
+            if ((addr & 1U) != 0U) {
+                // Unaligned LDRSH reads a single byte and sign-extends it.
+                regs_[rd] = static_cast<u32>(static_cast<std::int32_t>(static_cast<std::int8_t>(memory_->read8(addr))));
+            } else {
+                regs_[rd] = static_cast<u32>(static_cast<std::int32_t>(static_cast<std::int16_t>(memory_->read16(addr))));
+            }
             return true;
         default:
             return false;
@@ -1435,6 +1583,7 @@ bool CpuArm7tdmi::executeThumbInstruction(u16 instruction, u32 currentPc) {
         const bool load = (instruction & 0x0800U) != 0U;
         const std::size_t rb = static_cast<std::size_t>((instruction >> 8U) & 0x7U);
         const u16 regList = static_cast<u16>(instruction & 0x00FFU);
+        const bool baseInList = load && (regList & static_cast<u16>(1U << rb)) != 0U;
         u32 addr = regs_[rb];
         for (int r = 0; r < 8; ++r) {
             if ((regList & static_cast<u16>(1U << r)) == 0U) {
@@ -1447,7 +1596,9 @@ bool CpuArm7tdmi::executeThumbInstruction(u16 instruction, u32 currentPc) {
             }
             addr += 4U;
         }
-        regs_[rb] = addr;
+        if (!baseInList) {
+            regs_[rb] = addr;
+        }
         return true;
     }
 
@@ -1624,8 +1775,11 @@ bool CpuArm7tdmi::executeDataProcessing(u32 instruction) {
     bool updateFlagsLogical = false;
     bool updateFlagsAdd = false;
     bool updateFlagsSub = false;
+    bool updateFlagsAdc = false;
+    bool updateFlagsSbc = false;
     u32 lhsForFlags = lhs;
     u32 rhsForFlags = op2;
+    u32 carryOrBorrowForFlags = 0U;
 
     switch (opcode) {
     case 0x0: // AND
@@ -1653,23 +1807,24 @@ bool CpuArm7tdmi::executeDataProcessing(u32 instruction) {
     case 0x5: { // ADC
         const u32 carry = flagC() ? 1U : 0U;
         result = lhs + op2 + carry;
-        updateFlagsAdd = true;
-        rhsForFlags = op2 + carry;
+        updateFlagsAdc = true;
+        carryOrBorrowForFlags = carry;
         break;
     }
     case 0x6: { // SBC
         const u32 borrow = flagC() ? 0U : 1U;
         result = lhs - op2 - borrow;
-        updateFlagsSub = true;
-        rhsForFlags = op2 + borrow;
+        updateFlagsSbc = true;
+        carryOrBorrowForFlags = borrow;
         break;
     }
     case 0x7: { // RSC
         const u32 borrow = flagC() ? 0U : 1U;
         result = op2 - lhs - borrow;
-        updateFlagsSub = true;
+        updateFlagsSbc = true;
         lhsForFlags = op2;
-        rhsForFlags = lhs + borrow;
+        rhsForFlags = lhs;
+        carryOrBorrowForFlags = borrow;
         break;
     }
     case 0x8: // TST
@@ -1722,8 +1877,12 @@ bool CpuArm7tdmi::executeDataProcessing(u32 instruction) {
         if (updateFlagsLogical) {
             updateNz(result);
             setFlag(kCpsrC, shifterCarry);
+        } else if (updateFlagsAdc) {
+            updateAdcFlags(lhsForFlags, rhsForFlags, carryOrBorrowForFlags, result);
         } else if (updateFlagsAdd) {
             updateAddFlags(lhsForFlags, rhsForFlags, result);
+        } else if (updateFlagsSbc) {
+            updateSbcFlags(lhsForFlags, rhsForFlags, carryOrBorrowForFlags, result);
         } else if (updateFlagsSub) {
             updateSubFlags(lhsForFlags, rhsForFlags, result);
         }
@@ -1958,7 +2117,7 @@ bool CpuArm7tdmi::executeBlockDataTransfer(u32 instruction) {
 
     if (writeBack) {
         const u32 blockBytes = static_cast<u32>(count) * 4U;
-        regs_[rn] = addOffset ? (regs_[rn] + blockBytes) : (regs_[rn] - blockBytes);
+        regs_[rn] = addOffset ? (base + blockBytes) : (base - blockBytes);
     }
     if (load && (regList & (1U << 15U)) != 0U) {
         if (restoringFromSpsr) {
@@ -2096,7 +2255,7 @@ bool CpuArm7tdmi::executeSoftwareInterrupt(u32 instruction) {
     if ((instruction & 0x0F000000U) != 0x0F000000U) {
         return false;
     }
-    handleSwi(instruction & 0x00FFFFFFU);
+    handleSwi((instruction >> 16U) & 0xFFU);
     return true;
 }
 
@@ -2226,7 +2385,9 @@ void CpuArm7tdmi::handleSwi(u32 swiNumber) {
     static std::array<std::uint64_t, 256> swiCounts{};
     ++swiCounts[id];
     const bool logSwi = logFlags_.swi;
-    if (logSwi && swiCounts[id] <= 8U) {
+    static const std::uint64_t swiLogLimit = static_cast<std::uint64_t>(
+        std::max(0, readIntEnvironmentBase0OrDefault("GBEMU_GBA_LOG_SWI_LIMIT", 8)));
+    if (logSwi && (swiCounts[id] <= swiLogLimit || isDecompressionSwi(id))) {
         std::cerr << "[GBA][SWI] id=0x" << std::hex << id << " count=" << std::dec << swiCounts[id]
                   << " pc=0x" << std::hex << regs_[15]
                   << " r0=0x" << regs_[0]
@@ -2269,6 +2430,11 @@ void CpuArm7tdmi::handleSwi(u32 swiNumber) {
     case 0x01: // RegisterRamReset
         if (memory_ != nullptr) {
             const u32 flags = regs_[0] & 0xFFU;
+            const auto clearIoRange = [this](u32 start, u32 end) {
+                for (u32 offset = start; offset <= end; offset += 2U) {
+                    memory_->writeIo16(offset, 0U);
+                }
+            };
             if ((flags & 0x01U) != 0U) { // EWRAM
                 if (!zeroMemoryRange(*memory_, 0x02000000U, Memory::EwramSize)) {
                     for (u32 i = 0; i < Memory::EwramSize; ++i) {
@@ -2303,6 +2469,41 @@ void CpuArm7tdmi::handleSwi(u32 swiNumber) {
                         memory_->write8(0x07000000U + i, 0U);
                     }
                 }
+            }
+
+            // BIOS sempre deixa a tela em forced blank apos o reset de registradores.
+            memory_->writeIo16(0x000U, 0x0080U);
+
+            // Quirk documentado do BIOS: os 16 bits baixos de SIODATA32 sao destruídos
+            // mesmo quando o reset de SIO nao foi solicitado.
+            memory_->writeIo16(0x120U, 0U);
+
+            if ((flags & 0x20U) != 0U) { // SIO
+                clearIoRange(0x120U, 0x12AU);
+                memory_->writeIo16(0x134U, 0U);
+                memory_->writeIo16(0x140U, 0U);
+                clearIoRange(0x150U, 0x158U);
+            }
+
+            if ((flags & 0x40U) != 0U) { // Sound
+                clearIoRange(0x060U, 0x084U);
+                memory_->writeIo16(0x082U, 0x8800U);
+                memory_->writeIo16(0x082U, 0U);
+                memory_->writeIo16(0x088U, 0x0200U);
+                clearIoRange(0x090U, 0x0A6U);
+            }
+
+            if ((flags & 0x80U) != 0U) { // All other IO (except SIO, Sound)
+                memory_->writeIo16(0x002U, 0U);
+                clearIoRange(0x004U, 0x054U);
+                clearIoRange(0x0B0U, 0x0DEU);
+                clearIoRange(0x100U, 0x10EU);
+                memory_->writeIo16(Memory::KeyControlOffset, 0U);
+                memory_->writeIo16(Memory::IeOffset, 0U);
+                memory_->writeIo16(Memory::IfOffset, 0x3FFFU);
+                memory_->writeIo16(Memory::WaitcntOffset, 0U);
+                memory_->writeIo16(Memory::ImeOffset, 0U);
+                memory_->writeIo16(0x000U, 0x0080U);
             }
         }
         return;
@@ -2465,10 +2666,10 @@ void CpuArm7tdmi::handleSwi(u32 swiNumber) {
         const u32 ctrl = regs_[2];
         const bool fill = (ctrl & (1U << 24U)) != 0U;
         // GBA BIOS: bits 0..20 representam quantidade em words (32-bit).
-        // CpuFastSet processa em blocos de 8 words (32 bytes), entao os
-        // 3 bits baixos sao ignorados.
+        // CpuFastSet sempre executa blocos de 8 words (32 bytes); na pratica,
+        // comprimentos nao multiplos de 8 sao arredondados para cima.
         const u32 requestedWords = ctrl & 0x001FFFFFU;
-        const u32 wordCount = requestedWords & ~0x7U;
+        const u32 wordCount = (requestedWords + 7U) & ~0x7U;
         if (wordCount == 0U) {
             return;
         }
@@ -2566,6 +2767,9 @@ void CpuArm7tdmi::handleSwi(u32 swiNumber) {
     case 0x12: // LZ77UnCompVram
         runLz77UnComp(*memory_, regs_[0], regs_[1], true);
         return;
+    case 0x13: // HuffUnComp
+        runHuffUnComp(*memory_, regs_[0], regs_[1]);
+        return;
     case 0x14: // RLUnCompWram
         runRlUnComp(*memory_, regs_[0], regs_[1], false);
         return;
@@ -2592,12 +2796,37 @@ void CpuArm7tdmi::updateAddFlags(u32 lhs, u32 rhs, u32 result) {
     setFlag(kCpsrV, overflow);
 }
 
+void CpuArm7tdmi::updateAdcFlags(u32 lhs, u32 rhs, u32 carry, u32 result) {
+    updateNz(result);
+
+    const std::uint64_t sum = static_cast<std::uint64_t>(lhs) + static_cast<std::uint64_t>(rhs) + static_cast<std::uint64_t>(carry);
+    setFlag(kCpsrC, (sum >> 32U) != 0U);
+
+    // Overflow via two-step addition: t = lhs + rhs, then result = t + carry.
+    const u32 t = lhs + rhs;
+    const bool v1 = ((~(lhs ^ rhs) & (lhs ^ t)) & 0x80000000U) != 0U;
+    const bool v2 = ((~(t ^ carry) & (t ^ result)) & 0x80000000U) != 0U;
+    setFlag(kCpsrV, v1 ^ v2);
+}
+
 void CpuArm7tdmi::updateSubFlags(u32 lhs, u32 rhs, u32 result) {
     updateNz(result);
 
     setFlag(kCpsrC, lhs >= rhs);
     const bool overflow = (((lhs ^ rhs) & (lhs ^ result)) & 0x80000000U) != 0U;
     setFlag(kCpsrV, overflow);
+}
+
+void CpuArm7tdmi::updateSbcFlags(u32 lhs, u32 rhs, u32 borrow, u32 result) {
+    updateNz(result);
+
+    setFlag(kCpsrC, static_cast<std::uint64_t>(lhs) >= static_cast<std::uint64_t>(rhs) + static_cast<std::uint64_t>(borrow));
+
+    // Overflow via two-step subtraction: t = lhs - rhs, then result = t - borrow.
+    const u32 t = lhs - rhs;
+    const bool v1 = (((lhs ^ rhs) & (lhs ^ t)) & 0x80000000U) != 0U;
+    const bool v2 = (((t ^ borrow) & (t ^ result)) & 0x80000000U) != 0U;
+    setFlag(kCpsrV, v1 ^ v2);
 }
 
 void CpuArm7tdmi::setFlag(u32 mask, bool enabled) {

@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -92,6 +93,112 @@ std::size_t mapVramOffset(u32 address) {
         offset -= kVramMirrorSubtract;
     }
     return static_cast<std::size_t>(offset);
+}
+
+struct VramWriteLogConfig {
+    bool enabled = false;
+    u32 start = 0U;
+    u32 end = 0x17FFFU;
+    int limit = 256;
+};
+
+int readIntEnvironmentBase0OrDefault(const char* name, int fallback) {
+    const auto value = gb::readEnvironmentVariable(name);
+    if (!value.has_value() || value->empty()) {
+        return fallback;
+    }
+    try {
+        return std::stoi(*value, nullptr, 0);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+u32 readVramLogOffset(const char* name, u32 fallback) {
+    const auto value = gb::readEnvironmentVariable(name);
+    if (!value.has_value() || value->empty()) {
+        return fallback;
+    }
+    try {
+        u32 parsed = static_cast<u32>(std::stoul(*value, nullptr, 0));
+        if (parsed >= Memory::VramBase) {
+            parsed -= Memory::VramBase;
+        }
+        return std::min(parsed, static_cast<u32>(Memory::VramSize - 1U));
+    } catch (...) {
+        return fallback;
+    }
+}
+
+const VramWriteLogConfig& vramWriteLogConfig() {
+    static const VramWriteLogConfig config = [] {
+        VramWriteLogConfig parsed{};
+        parsed.enabled = gb::environmentVariableEnabled("GBEMU_GBA_LOG_VRAM_WRITES");
+        parsed.start = readVramLogOffset("GBEMU_GBA_LOG_VRAM_WRITE_START", 0U);
+        parsed.end = readVramLogOffset("GBEMU_GBA_LOG_VRAM_WRITE_END", 0x17FFFU);
+        if (parsed.end < parsed.start) {
+            std::swap(parsed.start, parsed.end);
+        }
+        parsed.limit = std::max(1, readIntEnvironmentBase0OrDefault("GBEMU_GBA_LOG_VRAM_WRITE_LIMIT", 256));
+        return parsed;
+    }();
+    return config;
+}
+
+bool vramTransferLoggingEnabled() {
+    return gb::environmentVariableEnabled("GBEMU_GBA_LOG_VRAM_TRANSFERS");
+}
+
+void logDmaVramTransfer(std::size_t channel, u32 source, u32 dest, u32 units, bool transfer32, u16 startTiming) {
+    if (!vramTransferLoggingEnabled() || (dest >> 24U) != 0x06U || units == 0U) {
+        return;
+    }
+    const u32 stride = transfer32 ? 4U : 2U;
+    std::cerr << std::hex
+              << "[GBA][VRAM-XFER] kind=dma"
+              << " ch=" << channel
+              << " src=0x" << source
+              << " dst=0x" << dest
+              << " end=0x" << (dest + units * stride - 1U)
+              << " units=0x" << units
+              << " stride=0x" << stride
+              << " start=0x" << startTiming
+              << std::dec << '\n';
+}
+
+void logVramWriteEvent(const char* kind, u32 address, std::size_t size, std::optional<u32> value = std::nullopt) {
+    const auto& config = vramWriteLogConfig();
+    if (!config.enabled || size == 0U || (address >> 24U) != 0x06U) {
+        return;
+    }
+
+    const u32 rawOffset = address & 0x1FFFFU;
+    const u32 mappedStart = static_cast<u32>(mapVramOffset(address));
+    const u32 mappedEnd = mappedStart + static_cast<u32>(size - 1U);
+    if (mappedEnd < config.start || mappedStart > config.end) {
+        return;
+    }
+
+    static int emitted = 0;
+    if (emitted >= config.limit) {
+        return;
+    }
+
+    std::cerr << std::hex
+              << "[GBA][VRAM-WRITE] kind=" << kind
+              << " addr=0x" << address
+              << " raw=0x" << rawOffset
+              << " mapped=0x" << mappedStart
+              << " size=0x" << size;
+    if (value.has_value()) {
+        std::cerr << " value=0x" << *value;
+    }
+    std::cerr << std::dec << '\n';
+
+    ++emitted;
+    if (emitted == config.limit) {
+        std::cerr << "[GBA][VRAM-WRITE] limit reached; suppressing further logs\n";
+    }
 }
 
 constexpr bool isTimerReloadOffset(u32 offset) {
@@ -222,6 +329,9 @@ void Memory::reset() {
     resetAudioFifo(0);
     resetAudioFifo(1);
     deferredBusCycles_ = 0;
+    pramByteWriteCount_ = 0;
+    vramByteWriteCount_ = 0;
+    oamByteWriteCount_ = 0;
     resetBackupState();
     accessTimingActive_ = false;
     accessCycles_ = 0;
@@ -287,7 +397,7 @@ const Memory::AudioFifoState& Memory::audioFifo(int fifoIndex) const {
 }
 
 bool Memory::isSoundFifoAddress(u32 address, int& fifoIndex) {
-    const u32 offset = address & 0x3FFU;
+    const u32 offset = address & 0xFFFFU;
     if (offset >= kFifoAOffset && offset < kFifoAOffset + 4U) {
         fifoIndex = 0;
         return true;
@@ -454,10 +564,17 @@ void Memory::write8(u32 address, u8 value) {
     }
     if (region == 0x07U) {
         // OAM nao suporta byte-write (ignorado no hardware).
+        ++oamByteWriteCount_;
         return;
     }
     if (region == 0x05U || region == 0x06U) {
         // PRAM/VRAM sao barramentos de 16-bit: byte-write replica em ambos bytes do halfword.
+        if (region == 0x05U) {
+            ++pramByteWriteCount_;
+        } else {
+            ++vramByteWriteCount_;
+            logVramWriteEvent("write8", address & ~1U, 2U, static_cast<u32>(value));
+        }
         const u32 aligned = address & ~1U;
         u8* lo = writableBytePointer(aligned);
         u8* hi = writableBytePointer(aligned + 1U);
@@ -491,10 +608,17 @@ void Memory::write16(u32 address, u16 value) {
         return;
     }
     if ((address >> 24U) == 0x04U) {
-        writeIo16((address & 0x3FFU) & ~1U, value);
+        const u32 ioOffset = address & 0xFFFFU;
+        if (ioOffset >= 0x400U) {
+            return; // Internal Memory Control (0x800) e enderecos nao-mapeados
+        }
+        writeIo16(ioOffset & ~1U, value);
         return;
     }
     const u32 aligned = address & ~1U;
+    if ((aligned >> 24U) == 0x06U) {
+        logVramWriteEvent("write16", aligned, 2U, static_cast<u32>(value));
+    }
     u8* lo = writableBytePointer(aligned);
     u8* hi = writableBytePointer(aligned + 1U);
     if (lo != nullptr && hi != nullptr) {
@@ -522,13 +646,20 @@ void Memory::write32(u32 address, u32 value) {
         return;
     }
     if ((address >> 24U) == 0x04U) {
-        const u32 offset = (address & 0x3FFU) & ~3U;
+        const u32 ioOffset = address & 0xFFFFU;
+        if (ioOffset >= 0x400U) {
+            return; // Internal Memory Control (0x800) e enderecos nao-mapeados
+        }
+        const u32 offset = ioOffset & ~3U;
         writeIo16(offset, static_cast<u16>(value & 0xFFFFU));
         writeIo16(offset + 2U, static_cast<u16>((value >> 16U) & 0xFFFFU));
         return;
     }
 
     const u32 aligned = address & ~3U;
+    if ((aligned >> 24U) == 0x06U) {
+        logVramWriteEvent("write32", aligned, 4U, value);
+    }
     u8* b0 = writableBytePointer(aligned);
     u8* b1 = writableBytePointer(aligned + 1U);
     u8* b2 = writableBytePointer(aligned + 2U);
@@ -583,6 +714,18 @@ const std::array<u8, Memory::OamSize>& Memory::oam() const {
     return oam_;
 }
 
+std::uint64_t Memory::pramByteWriteCount() const {
+    return pramByteWriteCount_;
+}
+
+std::uint64_t Memory::vramByteWriteCount() const {
+    return vramByteWriteCount_;
+}
+
+std::uint64_t Memory::oamByteWriteCount() const {
+    return oamByteWriteCount_;
+}
+
 const u8* Memory::directReadPointer(u32 address, std::size_t size) const {
     if (size == 0U) {
         return nullptr;
@@ -620,6 +763,7 @@ const u8* Memory::directReadPointer(u32 address, std::size_t size) const {
         if (idx + size > vram_.size()) {
             return nullptr;
         }
+        logVramWriteEvent("direct", address, size);
         return vram_.data() + idx;
     }
     case 0x07U: {
@@ -1164,6 +1308,7 @@ void Memory::executeDmaTransfer(std::size_t channel, u16 triggeredStartTiming) {
     const u16 dstCtrl = soundFifoDma ? 2U : static_cast<u16>((control >> 5U) & 0x3U);
     const u16 srcCtrl = static_cast<u16>((control >> 7U) & 0x3U);
     const u32 stride = transfer32 ? 4U : 2U;
+    logDmaVramTransfer(channel, sourceInit, destInit, units, transfer32, startTiming);
     const bool eepromWriteTransfer = isEepromBackup()
         && !transfer32
         && ((destInit >> 24U) == 0x0DU);
@@ -1789,7 +1934,11 @@ u8* Memory::writableBytePointer(u32 address) {
         return &iwram_[idx];
     }
     if (region == 0x04U) {
-        const std::size_t idx = static_cast<std::size_t>(address & 0x3FFU);
+        const u32 ioOffset = address & 0xFFFFU;
+        if (ioOffset >= 0x400U) {
+            return nullptr; // Internal Memory Control (0x800) e enderecos nao-mapeados
+        }
+        const std::size_t idx = static_cast<std::size_t>(ioOffset);
         if (idx == KeyInputOffset || idx == KeyInputOffset + 1U) {
             return nullptr; // read-only para KEYINPUT
         }
@@ -1821,7 +1970,11 @@ const u8* Memory::writableBytePointer(u32 address) const {
         return &iwram_[idx];
     }
     if (region == 0x04U) {
-        const std::size_t idx = static_cast<std::size_t>(address & 0x3FFU);
+        const u32 ioOffset = address & 0xFFFFU;
+        if (ioOffset >= 0x400U) {
+            return nullptr; // Internal Memory Control (0x800) e enderecos nao-mapeados
+        }
+        const std::size_t idx = static_cast<std::size_t>(ioOffset);
         return &io_[idx];
     }
     if (region == 0x05U) {

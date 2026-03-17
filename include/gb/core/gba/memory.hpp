@@ -86,6 +86,9 @@ public:
     [[nodiscard]] int consumeDeferredBusCycles();
     [[nodiscard]] std::size_t audioFifoLevel(int fifoIndex) const;
     [[nodiscard]] u8 audioFifoLastSample(int fifoIndex) const;
+    [[nodiscard]] std::uint64_t pramByteWriteCount() const;
+    [[nodiscard]] std::uint64_t vramByteWriteCount() const;
+    [[nodiscard]] std::uint64_t oamByteWriteCount() const;
 
 private:
     enum class FlashStage {
@@ -200,6 +203,9 @@ private:
     bool accessTimingActive_ = false;
     int deferredBusCycles_ = 0;
     std::array<AudioFifoState, 2> audioFifos_{};
+    std::uint64_t pramByteWriteCount_ = 0;
+    std::uint64_t vramByteWriteCount_ = 0;
+    std::uint64_t oamByteWriteCount_ = 0;
 };
 
 } // namespace gb::gba

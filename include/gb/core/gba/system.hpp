@@ -51,6 +51,13 @@ struct CompatibilityProfile {
 
 class System {
 public:
+    struct FrameProfile {
+        std::uint64_t totalNs = 0;
+        std::uint64_t cpuNs = 0;
+        std::uint64_t renderNs = 0;
+        Ppu::RenderStats ppu{};
+    };
+
     static constexpr int ScreenWidth = 240;
     static constexpr int ScreenHeight = 160;
     static constexpr std::size_t FramebufferSize = static_cast<std::size_t>(ScreenWidth) * static_cast<std::size_t>(ScreenHeight);
@@ -71,6 +78,9 @@ public:
     [[nodiscard]] std::array<u16, FramebufferSize>& framebuffer();
     [[nodiscard]] const Memory& memory() const;
     [[nodiscard]] Memory& memory();
+    [[nodiscard]] const Ppu& ppu() const;
+    [[nodiscard]] Ppu& ppu();
+    [[nodiscard]] const FrameProfile& lastFrameProfile() const;
     [[nodiscard]] const CpuArm7tdmi& cpu() const;
     [[nodiscard]] CpuArm7tdmi& cpu();
 
@@ -95,6 +105,7 @@ private:
     Ppu ppu_{};
     CpuArm7tdmi cpu_{};
     std::array<u16, FramebufferSize> framebuffer_{};
+    FrameProfile lastFrameProfile_{};
     std::uint32_t frameCounter_ = 0;
     bool adaptiveScanlineSync_ = false;
     int startupNoDisplayFrames_ = 0;

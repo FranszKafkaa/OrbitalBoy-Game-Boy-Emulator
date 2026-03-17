@@ -14,6 +14,96 @@ public:
     static constexpr int ScreenHeight = 160;
     static constexpr std::size_t FramebufferSize = static_cast<std::size_t>(ScreenWidth) * static_cast<std::size_t>(ScreenHeight);
 
+    struct PixelDebugInfo {
+        bool valid = false;
+        int x = 0;
+        int y = 0;
+        u16 dispcnt = 0;
+        u16 bldCnt = 0;
+        u16 bldAlpha = 0;
+        u16 bldY = 0;
+        u16 win0H = 0;
+        u16 win0V = 0;
+        u16 win1H = 0;
+        u16 win1V = 0;
+        u16 winIn = 0;
+        u16 winOut = 0;
+        u16 backdropRawColor555 = 0;
+        u16 finalRawColor555 = 0;
+        u16 finalRgb565 = 0;
+        u8 windowMask = 0;
+        u8 topLayer = 0;
+        u8 topPriority = 0;
+        u8 secondLayer = 0;
+        u8 secondPriority = 0;
+        bool hasSecond = false;
+        bool semiTransparentObj = false;
+        bool insideWin0 = false;
+        bool insideWin1 = false;
+        bool insideObjWin = false;
+        u8 blendMode = 0;
+        u8 eva = 0;
+        u8 evb = 0;
+        u8 evy = 0;
+        bool colorEffectEnabledByWindow = false;
+        bool firstTarget = false;
+        bool secondTarget = false;
+        bool alphaBlendRequested = false;
+        bool alphaBlendApplied = false;
+        bool brightenApplied = false;
+        bool darkenApplied = false;
+    };
+
+    struct TextBgDebugSample {
+        bool valid = false;
+        bool visible = false;
+        int bgIndex = 0;
+        int screenX = 0;
+        int screenY = 0;
+        u16 dispcnt = 0;
+        u16 bgcnt = 0;
+        u16 hofs = 0;
+        u16 vofs = 0;
+        u8 priority = 0;
+        bool color256 = false;
+        u8 sizeIndex = 0;
+        u32 charBase = 0;
+        u32 screenBase = 0;
+        u32 screenWidth = 0;
+        u32 screenHeight = 0;
+        u32 sourceX = 0;
+        u32 sourceY = 0;
+        u32 tileX = 0;
+        u32 tileY = 0;
+        u8 pixelX = 0;
+        u8 pixelY = 0;
+        u8 blockX = 0;
+        u8 blockY = 0;
+        u8 screenBlock = 0;
+        u16 mapEntry = 0;
+        u16 tileNumber = 0;
+        bool hflip = false;
+        bool vflip = false;
+        u8 paletteBank = 0;
+        u8 colorIndex = 0;
+        u32 mapAddress = 0;
+        u32 tileAddress = 0;
+    };
+
+    struct RenderStats {
+        std::uint64_t totalNs = 0;
+        std::uint64_t bgNs = 0;
+        std::uint64_t objNs = 0;
+        std::uint64_t objWindowNs = 0;
+        std::uint64_t composeNs = 0;
+        std::uint32_t visibleObjectsFrame = 0;
+        std::uint32_t objPixelsTested = 0;
+        std::uint32_t objPixelsDrawn = 0;
+        std::uint32_t objWindowPixels = 0;
+        std::uint16_t maxVisibleObjectsOnScanline = 0;
+        std::array<std::uint16_t, ScreenHeight> visibleObjectsPerScanline{};
+    };
+
     static constexpr u32 DispcntOffset = 0x0000U;
     static constexpr u32 DispstatOffset = 0x0004U;
     static constexpr u32 VcountOffset = 0x0006U;
@@ -28,12 +118,27 @@ public:
     void step(int cpuCycles);
 
     [[nodiscard]] bool render(std::array<u16, FramebufferSize>& framebuffer) const;
+    [[nodiscard]] bool debugPixel(int x, int y, PixelDebugInfo& out) const;
+    [[nodiscard]] bool debugTextBgSample(int bgIndex, int x, int y, TextBgDebugSample& out) const;
+    [[nodiscard]] const RenderStats& lastRenderStats() const;
 
     [[nodiscard]] std::uint16_t scanline() const;
     [[nodiscard]] bool inVblank() const;
     [[nodiscard]] bool inHblank() const;
 
 private:
+    struct DebugConfig {
+        bool disableBg = false;
+        bool disableObj = false;
+        bool disableBlend = false;
+        bool disableWindow = false;
+        bool objBoundingBoxesOnly = false;
+        int logObjScanline = -1;
+        u8 bgMask = 0x0F;
+        bool anySelectedObjIds = false;
+        std::array<bool, 128> selectedObjIds{};
+    };
+
     struct AffineLineSnapshot {
         std::int32_t pa = 0;
         std::int32_t pb = 0;
@@ -85,9 +190,21 @@ private:
     [[nodiscard]] bool renderMode3(std::array<u16, FramebufferSize>& framebuffer) const;
     [[nodiscard]] bool renderMode4(std::array<u16, FramebufferSize>& framebuffer) const;
     [[nodiscard]] bool renderMode5(std::array<u16, FramebufferSize>& framebuffer) const;
+    [[nodiscard]] bool buildDebugLayerPixelsMode012(
+        std::array<LayerPixel, FramebufferSize>& layerPixels,
+        std::array<bool, FramebufferSize>& objWindowMask,
+        u16& backdropRaw
+    ) const;
     void renderTextBackground(
         int bgIndex,
         std::array<LayerPixel, FramebufferSize>& layerPixels
+    ) const;
+    [[nodiscard]] bool decodeTextBgSample(
+        const RasterLineSnapshot& line,
+        int bgIndex,
+        int screenX,
+        int screenY,
+        TextBgDebugSample& out
     ) const;
     void renderAffineBackground(
         int bgIndex,
@@ -114,6 +231,7 @@ private:
     [[nodiscard]] static bool pointInsideWindowRange(int value, int start, int end, int limit);
     [[nodiscard]] static bool pointInsideWindowRect(int x, int y, u16 winH, u16 winV);
     [[nodiscard]] static bool layerEnabledByWindowMask(u8 mask, u8 layerBit);
+    [[nodiscard]] static bool bgEnabledByDebugMask(const DebugConfig& config, int bgIndex);
     [[nodiscard]] static u16 blendAlpha555(u16 top, u16 bottom, u8 eva, u8 evb);
     [[nodiscard]] static u16 brighten555(u16 color, u8 evy);
     [[nodiscard]] static u16 darken555(u16 color, u8 evy);
@@ -125,6 +243,13 @@ private:
     [[nodiscard]] u16 readOam16(std::size_t byteIndex) const;
     [[nodiscard]] u16 readBgPaletteColor(u8 colorIndex) const;
     [[nodiscard]] u16 readObjPaletteColor(u8 colorIndex) const;
+    [[nodiscard]] const std::array<u8, Memory::VramSize>& activeVram() const;
+    [[nodiscard]] const std::array<u8, Memory::PramSize>& activePram() const;
+    [[nodiscard]] const std::array<u8, Memory::OamSize>& activeOam() const;
+    [[nodiscard]] static DebugConfig readDebugConfig();
+    [[nodiscard]] bool shouldLogObject(int objIndex) const;
+    [[nodiscard]] static u16 debugOutlineColor555(int objPriority);
+    void noteVisibleObjectOnScanlines(int startY, int endY) const;
 
     void fillBackdrop(std::array<u16, FramebufferSize>& framebuffer) const;
     void clearRasterLineSnapshots();
@@ -136,6 +261,7 @@ private:
     [[nodiscard]] AffineLineSnapshot readCurrentAffineSnapshot(int bgIndex) const;
     [[nodiscard]] AffineLineSnapshot affineSnapshotForLine(int bgIndex, int line) const;
     void updateIoRegisters();
+    void logSceneCompare() const;
     [[nodiscard]] static u16 bgr555ToRgb565(u16 pixel);
 
     Memory* memory_ = nullptr;
@@ -150,6 +276,12 @@ private:
     std::array<AffineLineSnapshot, VisibleLines> bg3LineSnapshots_{};
     std::array<AffineLineSnapshot, VisibleLines> completedBg2LineSnapshots_{};
     std::array<AffineLineSnapshot, VisibleLines> completedBg3LineSnapshots_{};
+    std::array<u8, Memory::VramSize> completedVram_{};
+    std::array<u8, Memory::PramSize> completedPram_{};
+    std::array<u8, Memory::OamSize> completedOam_{};
+    bool completedMemorySnapshotValid_ = false;
+    mutable DebugConfig activeDebugConfig_{};
+    mutable RenderStats lastRenderStats_{};
     mutable const std::array<bool, FramebufferSize>* activeObjWindowMask_ = nullptr;
     mutable std::array<LayerPixel, FramebufferSize> layerScratch_{};
     mutable std::array<bool, FramebufferSize> objWindowScratch_{};

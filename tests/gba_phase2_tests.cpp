@@ -98,6 +98,21 @@ gb::u16 bgr555ToRgb565(gb::u16 pixel) {
     return static_cast<gb::u16>((r5 << 11U) | (g6 << 5U) | b5);
 }
 
+void setBg4bppTileFirstTexel(gb::gba::Memory& memory, gb::u16 tileNumber, gb::u8 colorIndex) {
+    memory.write16(0x06000000U + static_cast<gb::u32>(tileNumber) * 32U, static_cast<gb::u16>(colorIndex & 0x0FU));
+}
+
+void setBgScreenEntry(gb::gba::Memory& memory, gb::u32 screenBase, gb::u32 screenBlock, gb::u32 localTileX, gb::u32 localTileY, gb::u16 entry) {
+    const gb::u32 entryOffset = (screenBlock * 0x800U) + ((localTileY * 32U + localTileX) * 2U);
+    memory.write16(0x06000000U + screenBase + entryOffset, entry);
+}
+
+std::array<gb::u16, gb::gba::Ppu::FramebufferSize> renderGbaFrame(gb::gba::Ppu& ppu) {
+    std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
+    T_REQUIRE(ppu.render(fb));
+    return fb;
+}
+
 template <std::size_t N>
 std::size_t countDistinctColors(const std::array<gb::u16, N>& framebuffer, std::size_t stopAfter = 64U) {
     std::vector<gb::u16> colors;
@@ -402,7 +417,7 @@ TEST_CASE("cpu", "gba_thumb_execution_and_swi_div") {
 TEST_CASE("cpu", "gba_swi_rluncomp_wram_uses_compressed_length_plus_three") {
     gb::gba::Memory memory;
     const auto rom = makeArmRom({
-        0xEF000014U, // SWI RLUnCompWram
+        0xEF140000U, // SWI RLUnCompWram
     });
     T_REQUIRE(memory.loadRom(rom));
 
@@ -439,7 +454,7 @@ TEST_CASE("cpu", "gba_swi_rluncomp_wram_uses_compressed_length_plus_three") {
 TEST_CASE("cpu", "gba_swi_rluncomp_vram_packs_bytes_in_halfwords") {
     gb::gba::Memory memory;
     const auto rom = makeArmRom({
-        0xEF000015U, // SWI RLUnCompVram
+        0xEF150000U, // SWI RLUnCompVram
     });
     T_REQUIRE(memory.loadRom(rom));
 
@@ -467,10 +482,50 @@ TEST_CASE("cpu", "gba_swi_rluncomp_vram_packs_bytes_in_halfwords") {
     T_EQ(memory.read16(dst + 4U), static_cast<gb::u16>(0x557AU));
 }
 
+TEST_CASE("cpu", "gba_swi_huffuncomp_decodes_8bit_tree_stream") {
+    gb::gba::Memory memory;
+    const auto rom = makeArmRom({
+        0xEF130000U, // SWI HuffUnComp
+    });
+    T_REQUIRE(memory.loadRom(rom));
+
+    const gb::u32 src = 0x02000080U;
+    const gb::u32 dst = 0x02000180U;
+    // Header: Huffman, 8-bit units, output size 4 bytes.
+    memory.write8(src + 0U, 0x28U);
+    memory.write8(src + 1U, 0x04U);
+    memory.write8(src + 2U, 0x00U);
+    memory.write8(src + 3U, 0x00U);
+    // Tree size byte such that compressed bitstream starts after 3 tree bytes.
+    memory.write8(src + 4U, 0x01U);
+    // Root node: node0=data at +0, node1=data at +1.
+    memory.write8(src + 5U, 0xC0U);
+    memory.write8(src + 6U, 0x41U);
+    memory.write8(src + 7U, 0x42U);
+    // Bitstream (MSB first): 0,1,0,1 => 'A','B','A','B'.
+    memory.write8(src + 8U, 0x00U);
+    memory.write8(src + 9U, 0x00U);
+    memory.write8(src + 10U, 0x00U);
+    memory.write8(src + 11U, 0x50U);
+
+    gb::gba::CpuArm7tdmi cpu;
+    cpu.connectMemory(&memory);
+    cpu.reset();
+    cpu.setReg(0, src);
+    cpu.setReg(1, dst);
+
+    (void)cpu.step();
+
+    T_EQ(memory.read8(dst + 0U), static_cast<gb::u8>(0x41U));
+    T_EQ(memory.read8(dst + 1U), static_cast<gb::u8>(0x42U));
+    T_EQ(memory.read8(dst + 2U), static_cast<gb::u8>(0x41U));
+    T_EQ(memory.read8(dst + 3U), static_cast<gb::u8>(0x42U));
+}
+
 TEST_CASE("cpu", "gba_swi_bgaffineset_uses_8bit_angle_turns") {
     gb::gba::Memory memory;
     const auto rom = makeArmRom({
-        0xEF00000EU, // SWI BgAffineSet
+        0xEF0E0000U, // SWI BgAffineSet
     });
     T_REQUIRE(memory.loadRom(rom));
 
@@ -502,7 +557,7 @@ TEST_CASE("cpu", "gba_swi_bgaffineset_uses_8bit_angle_turns") {
 TEST_CASE("cpu", "gba_swi_objaffineset_uses_8bit_angle_turns") {
     gb::gba::Memory memory;
     const auto rom = makeArmRom({
-        0xEF00000FU, // SWI ObjAffineSet
+        0xEF0F0000U, // SWI ObjAffineSet
     });
     T_REQUIRE(memory.loadRom(rom));
 
@@ -903,7 +958,7 @@ TEST_CASE("cpu", "gba_arm_subs_pc_restores_cpsr_from_spsr") {
 TEST_CASE("cpu", "gba_cpu_halt_and_irq_dispatch") {
     gb::gba::Memory memory;
     std::vector<gb::u8> rom(0x400, 0x00);
-    writeWordLe(rom, 0x000, 0xEF000002U); // SWI Halt
+    writeWordLe(rom, 0x000, 0xEF020000U); // SWI Halt
     writeWordLe(rom, 0x004, 0xE3A00001U); // MOV r0, #1
     writeWordLe(rom, 0x040, 0xE3A0002AU); // IRQ handler: MOV r0, #42
     writeWordLe(rom, 0x044, 0xE12FFF1EU); // BX LR
@@ -936,7 +991,7 @@ TEST_CASE("cpu", "gba_cpu_halt_and_irq_dispatch") {
 TEST_CASE("cpu", "gba_cpu_irq_thumb_pop_bx_trampoline_restores_sp") {
     gb::gba::Memory memory;
     std::vector<gb::u8> rom(0x400, 0x00);
-    writeWordLe(rom, 0x000, 0xEF000002U); // SWI Halt
+    writeWordLe(rom, 0x000, 0xEF020000U); // SWI Halt
     writeWordLe(rom, 0x004, 0xE1A00000U); // NOP
     writeHalfLe(rom, 0x040, 0xBC01U); // THUMB: POP {r0}
     writeHalfLe(rom, 0x042, 0x4700U); // THUMB: BX r0
@@ -967,7 +1022,7 @@ TEST_CASE("cpu", "gba_cpu_irq_thumb_pop_bx_trampoline_restores_sp") {
 TEST_CASE("cpu", "gba_cpu_irq_updates_bios_interrupt_flags") {
     gb::gba::Memory memory;
     std::vector<gb::u8> rom(0x400, 0x00);
-    writeWordLe(rom, 0x000, 0xEF000002U); // SWI Halt
+    writeWordLe(rom, 0x000, 0xEF020000U); // SWI Halt
     writeWordLe(rom, 0x004, 0xE12FFF1EU); // BX LR
     rom[0xB2] = 0x96;
     T_REQUIRE(memory.loadRom(rom));
@@ -991,7 +1046,7 @@ TEST_CASE("cpu", "gba_cpu_irq_updates_bios_interrupt_flags") {
 TEST_CASE("cpu", "gba_swi_vblank_intr_wait_uses_bios_interrupt_flags_and_forces_ime") {
     gb::gba::Memory memory;
     std::vector<gb::u8> rom(0x400, 0x00);
-    writeWordLe(rom, 0x000, 0xEF000005U); // SWI VBlankIntrWait
+    writeWordLe(rom, 0x000, 0xEF050000U); // SWI VBlankIntrWait
     writeWordLe(rom, 0x004, 0xE3A00033U); // MOV r0, #0x33 (executa apos wake)
     writeWordLe(rom, 0x040, 0xE12FFF1EU); // IRQ handler: BX LR
     rom[0xB2] = 0x96;
@@ -1125,6 +1180,199 @@ TEST_CASE("cpu", "gba_ppu_mode0_bg0_renders_text_tile") {
     std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
     T_REQUIRE(ppu.render(fb));
     T_EQ(fb[0], static_cast<gb::u16>(0x07E0));
+}
+
+TEST_CASE("cpu", "gba_ppu_debug_bg_mask_can_isolate_single_regular_bg") {
+    tests::ScopedEnvironmentVariable bgMask("GBEMU_GBA_DEBUG_BG_MASK", "0x2");
+
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x0300U); // mode0 + BG0 + BG1
+    memory.writeIo16(0x0008U, 0x0100U); // BG0 -> screen block 1
+    memory.writeIo16(0x000AU, 0x0200U); // BG1 -> screen block 2
+    memory.write16(0x05000002U, 0x001FU); // palette[1] = red
+    memory.write16(0x05000004U, 0x03E0U); // palette[2] = green
+    setBg4bppTileFirstTexel(memory, 0U, 1U);
+    setBg4bppTileFirstTexel(memory, 1U, 2U);
+    memory.write16(0x06000800U, 0x0000U); // BG0 -> tile 0
+    memory.write16(0x06001000U, 0x0001U); // BG1 -> tile 1
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    const auto fb = renderGbaFrame(ppu);
+    T_EQ(fb[0], static_cast<gb::u16>(0x07E0U));
+}
+
+TEST_CASE("cpu", "gba_ppu_debug_only_obj_flag_hides_backgrounds") {
+    tests::ScopedEnvironmentVariable onlyObj("GBEMU_GBA_DEBUG_ONLY_OBJ", "1");
+
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x1100U); // mode0 + BG0 + OBJ
+    memory.writeIo16(0x0008U, 0x0100U);
+    memory.write16(0x05000002U, 0x03E0U);
+    setBg4bppTileFirstTexel(memory, 0U, 1U);
+    memory.write16(0x06000800U, 0x0000U);
+
+    memory.write16(0x05000202U, 0x001FU);
+    memory.write8(0x06010000U, 0x01U);
+    memory.write16(0x07000000U, 0x0000U);
+    memory.write16(0x07000002U, 0x0000U);
+    memory.write16(0x07000004U, 0x0000U);
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    const auto fb = renderGbaFrame(ppu);
+    T_EQ(fb[0], static_cast<gb::u16>(0xF800U));
+}
+
+TEST_CASE("cpu", "gba_ppu_debug_disable_blend_window_restores_unmasked_unblended_pixel") {
+    tests::ScopedEnvironmentVariable disableBlendWindow("GBEMU_GBA_DEBUG_DISABLE_BLEND_WINDOW", "1");
+
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x2100U); // mode0 + BG0 + WIN0
+    memory.writeIo16(0x0008U, 0x0100U);
+    memory.write16(0x05000002U, 0x03E0U);
+    setBg4bppTileFirstTexel(memory, 0U, 1U);
+    memory.write16(0x06000800U, 0x0000U);
+    memory.writeIo16(0x0040U, 0x00F0U);
+    memory.writeIo16(0x0044U, 0x00A0U);
+    memory.writeIo16(0x0048U, 0x0000U); // BG0 mascarado dentro da janela
+    memory.writeIo16(0x004AU, 0x003FU);
+    memory.writeIo16(0x0050U, 0x0041U); // brighten BG0
+    memory.writeIo16(0x0054U, 0x0010U);
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    const auto fb = renderGbaFrame(ppu);
+    T_EQ(fb[0], static_cast<gb::u16>(0x07E0U));
+}
+
+TEST_CASE("cpu", "gba_ppu_debug_text_bg_sample_reports_screen_entry_and_tile_index") {
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x0100U); // mode0 + BG0
+    memory.writeIo16(0x0008U, 0xC100U); // BG0: size 64x64, screen block 1, 4bpp
+    memory.writeIo16(0x0010U, 256U); // BG0HOFS
+    memory.writeIo16(0x0012U, 256U); // BG0VOFS
+    memory.write16(0x0500004AU, 0x03E0U); // palette[37] = green (bank 2, index 5)
+    setBg4bppTileFirstTexel(memory, 0x0123U, 5U);
+    setBgScreenEntry(memory, 0x0800U, 3U, 0U, 0U, static_cast<gb::u16>(0x0123U | 0x0400U | 0x0800U | 0x2000U));
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    gb::gba::Ppu::TextBgDebugSample sample{};
+    T_REQUIRE(ppu.debugTextBgSample(0, 7, 7, sample));
+    T_REQUIRE(sample.valid);
+    T_EQ(sample.screenBlock, static_cast<gb::u8>(3U));
+    T_EQ(sample.mapEntry, static_cast<gb::u16>(0x2D23U));
+    T_EQ(sample.tileNumber, static_cast<gb::u16>(0x0123U));
+    T_REQUIRE(sample.hflip);
+    T_REQUIRE(sample.vflip);
+    T_EQ(sample.paletteBank, static_cast<gb::u8>(2U));
+    T_EQ(sample.tileX, static_cast<gb::u32>(32U));
+    T_EQ(sample.tileY, static_cast<gb::u32>(32U));
+    T_EQ(sample.colorIndex, static_cast<gb::u8>(37U));
+    T_REQUIRE(sample.visible);
+
+    const auto fb = renderGbaFrame(ppu);
+    const std::size_t pixelIndex = static_cast<std::size_t>(7U) * static_cast<std::size_t>(gb::gba::Ppu::ScreenWidth) + 7U;
+    T_EQ(fb[pixelIndex], static_cast<gb::u16>(0x07E0U));
+}
+
+TEST_CASE("cpu", "gba_ppu_debug_text_bg_sample_reads_tiles_above_64kb_in_obj_vram") {
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x0100U); // mode0 + BG0
+    memory.writeIo16(0x0008U, 0x018CU); // BG0: char base 3, screen block 1, 256-color
+    memory.write16(0x0500000EU, 0x03E0U); // palette[7] = green
+    memory.write16(0x06000800U, 0x0100U); // BG0 map -> tile 0x100
+    // charBase 3 = 0xC000; tile 0x100 * 64 = 0x4000; address = 0x10000.
+    // Write a nonzero pixel at that address — GBA allows BG reads in OBJ VRAM.
+    memory.write8(0x06010000U, 0x07U); // color index 7
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    gb::gba::Ppu::TextBgDebugSample sample{};
+    T_REQUIRE(ppu.debugTextBgSample(0, 0, 0, sample));
+    T_REQUIRE(sample.valid);
+    T_EQ(sample.tileNumber, static_cast<gb::u16>(0x0100U));
+    T_EQ(sample.tileAddress, static_cast<gb::u32>(0x10000U));
+    T_EQ(sample.colorIndex, static_cast<gb::u8>(7U));
+    T_REQUIRE(sample.visible);
+}
+
+TEST_CASE("cpu", "gba_ppu_mode0_regular_bg_screenblock_sizes_decode_correct_quadrants") {
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x0100U); // mode0 + BG0
+    memory.write16(0x05000002U, 0x001FU); // palette[1] = red
+    memory.write16(0x05000004U, 0x03E0U); // palette[2] = green
+    memory.write16(0x05000006U, 0x7C00U); // palette[3] = blue
+    memory.write16(0x05000008U, 0x03FFU); // palette[4] = yellow
+    setBg4bppTileFirstTexel(memory, 0U, 1U);
+    setBg4bppTileFirstTexel(memory, 1U, 2U);
+    setBg4bppTileFirstTexel(memory, 2U, 3U);
+    setBg4bppTileFirstTexel(memory, 3U, 4U);
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    memory.writeIo16(0x0008U, 0x0100U); // 32x32, screen block 1
+    memory.writeIo16(0x0010U, 0U);
+    memory.writeIo16(0x0012U, 0U);
+    setBgScreenEntry(memory, 0x0800U, 0U, 0U, 0U, 0x0000U);
+    ppu.reset();
+    auto fb = renderGbaFrame(ppu);
+    T_EQ(fb[0], static_cast<gb::u16>(0xF800U));
+
+    memory.writeIo16(0x0008U, 0x4100U); // 64x32, screen block 1
+    memory.writeIo16(0x0010U, 256U);
+    memory.writeIo16(0x0012U, 0U);
+    setBgScreenEntry(memory, 0x0800U, 1U, 0U, 0U, 0x0001U);
+    ppu.reset();
+    fb = renderGbaFrame(ppu);
+    T_EQ(fb[0], static_cast<gb::u16>(0x07E0U));
+
+    memory.writeIo16(0x0008U, 0x8100U); // 32x64, screen block 1
+    memory.writeIo16(0x0010U, 0U);
+    memory.writeIo16(0x0012U, 256U);
+    setBgScreenEntry(memory, 0x0800U, 1U, 0U, 0U, 0x0002U);
+    ppu.reset();
+    fb = renderGbaFrame(ppu);
+    T_EQ(fb[0], static_cast<gb::u16>(0x001FU));
+
+    memory.writeIo16(0x0008U, 0xC100U); // 64x64, screen block 1
+    memory.writeIo16(0x0010U, 256U);
+    memory.writeIo16(0x0012U, 256U);
+    setBgScreenEntry(memory, 0x0800U, 3U, 0U, 0U, 0x0003U);
+    ppu.reset();
+    fb = renderGbaFrame(ppu);
+    T_EQ(fb[0], static_cast<gb::u16>(0xFFE0U));
 }
 
 TEST_CASE("cpu", "gba_memory_timer_irq_and_dma_immediate") {
@@ -1414,7 +1662,7 @@ TEST_CASE("cpu", "gba_ppu_mode0_obj_8bpp_uses_32byte_tile_units") {
     T_EQ(fb[0], static_cast<gb::u16>(0xF800));
 }
 
-TEST_CASE("cpu", "gba_ppu_mode0_bg_tile_index_wraps_in_bg_vram_space") {
+TEST_CASE("cpu", "gba_ppu_mode0_bg_tile_index_beyond_64kb_reads_obj_vram") {
     gb::gba::Memory memory;
     std::vector<gb::u8> rom(0x200, 0x00);
     T_REQUIRE(memory.loadRom(rom));
@@ -1425,10 +1673,10 @@ TEST_CASE("cpu", "gba_ppu_mode0_bg_tile_index_wraps_in_bg_vram_space") {
     memory.write16(0x05000004U, 0x001FU); // palette index 2 = red
 
     // tile index 512 em 4bpp com charblock 3:
-    // addr = 0xC000 + 512*32 = 0x10000 (deve wrap para 0x0000 no espaco BG).
+    // addr = 0xC000 + 512*32 = 0x10000 — in OBJ VRAM area, readable by BG.
     memory.write16(0x06000800U, 0x0200U); // BG map entry -> tile 512
-    memory.write8(0x06000000U, 0x01U); // cor esperada (BG area wrapped): index 1 = green
-    memory.write8(0x06010000U, 0x02U); // area OBJ (nao deve ser lida): index 2 = red
+    memory.write8(0x06000000U, 0x01U); // area BG valida (tile 0)
+    memory.write8(0x06010000U, 0x02U); // tile 512 pixel(0,0) = palette 2 (red)
 
     gb::gba::Ppu ppu;
     ppu.connectMemory(&memory);
@@ -1436,7 +1684,8 @@ TEST_CASE("cpu", "gba_ppu_mode0_bg_tile_index_wraps_in_bg_vram_space") {
 
     std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
     T_REQUIRE(ppu.render(fb));
-    T_EQ(fb[0], static_cast<gb::u16>(0x07E0U)); // verde
+    // Color index 2 = red (0x001F in BGR555 -> 0xF800 in RGB565)
+    T_EQ(fb[0], static_cast<gb::u16>(0xF800U));
 }
 
 TEST_CASE("cpu", "gba_ppu_window_masks_bg_layer") {
@@ -1488,6 +1737,32 @@ TEST_CASE("cpu", "gba_ppu_window_zero_range_disables_window") {
     std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
     T_REQUIRE(ppu.render(fb));
     T_EQ(fb[0], static_cast<gb::u16>(0x07E0U)); // BG0 visivel, pois a janela esta desligada
+}
+
+TEST_CASE("cpu", "gba_ppu_window_equal_nonzero_range_disables_window") {
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x2100U); // mode0 + BG0 + WIN0
+    memory.writeIo16(0x0008U, 0x0100U); // BG0CNT: screen base block 1
+    memory.write16(0x05000002U, 0x03E0U); // palette index 1 = green
+    memory.write8(0x06000000U, 0x01U); // tile0 pixel(0,0)=1
+    memory.write16(0x06000800U, 0x0000U); // BG0 map -> tile0
+
+    // Em mGBA/GBA, start==end tambem desabilita a janela mesmo com valor != 0.
+    memory.writeIo16(0x0040U, 0x4040U); // WIN0H: x=64..64
+    memory.writeIo16(0x0044U, 0x2020U); // WIN0V: y=32..32
+    memory.writeIo16(0x0048U, 0x0000U); // WININ: dentro de WIN0 nenhuma layer habilitada
+    memory.writeIo16(0x004AU, 0x003FU); // WINOUT: fora da janela tudo habilitado
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
+    T_REQUIRE(ppu.render(fb));
+    T_EQ(fb[0], static_cast<gb::u16>(0x07E0U)); // BG0 visivel, janela desligada
 }
 
 TEST_CASE("cpu", "gba_ppu_window_registers_are_scanline_snapshotted") {
@@ -1619,6 +1894,34 @@ TEST_CASE("cpu", "gba_ppu_semitransparent_obj_does_not_blend_with_lower_obj") {
     std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
     T_REQUIRE(ppu.render(fb));
     T_EQ(fb[0], static_cast<gb::u16>(0xF800U)); // permanece vermelho; nao faz alpha com outro OBJ
+}
+
+TEST_CASE("cpu", "gba_ppu_same_priority_obj_keeps_lower_oam_index_on_top") {
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x1000U); // mode0 + OBJ
+    memory.write16(0x05000202U, 0x001FU); // OBJ color index 1 = red
+    memory.write16(0x05000204U, 0x03E0U); // OBJ color index 2 = green
+    memory.write8(0x06010000U, 0x01U); // tile0 pixel(0,0)=1
+    memory.write8(0x06010020U, 0x02U); // tile1 pixel(0,0)=2
+
+    memory.write16(0x07000000U, 0x0000U); // obj0 attr0: y=0
+    memory.write16(0x07000002U, 0x0000U); // obj0 attr1: x=0
+    memory.write16(0x07000004U, 0x0000U); // obj0 attr2: tile0, prio0
+
+    memory.write16(0x07000008U, 0x0000U); // obj1 attr0: y=0
+    memory.write16(0x0700000AU, 0x0000U); // obj1 attr1: x=0
+    memory.write16(0x0700000CU, 0x0001U); // obj1 attr2: tile1, prio0
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
+    T_REQUIRE(ppu.render(fb));
+    T_EQ(fb[0], static_cast<gb::u16>(0xF800U)); // obj0 permanece na frente de obj1 com mesma prioridade
 }
 
 TEST_CASE("cpu", "gba_ppu_blend_registers_are_scanline_snapshotted") {
@@ -1804,6 +2107,40 @@ TEST_CASE("cpu", "gba_ppu_hofs_registers_are_scanline_snapshotted") {
     T_EQ(fb[line2], static_cast<gb::u16>(0xF800U));
 }
 
+TEST_CASE("cpu", "gba_ppu_bgcnt_registers_are_scanline_snapshotted") {
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x0100U); // mode0 + BG0
+    memory.write16(0x05000002U, 0x03E0U); // index 1 = green
+    memory.write16(0x05000004U, 0x001FU); // index 2 = red
+
+    for (gb::u32 i = 0; i < 32U; ++i) {
+        memory.write8(0x06000000U + i, 0x11U); // tile0 inteiro = indice 1
+        memory.write8(0x06000020U + i, 0x22U); // tile1 inteiro = indice 2
+    }
+    memory.write16(0x06000800U, 0x0000U); // screen block 1 -> tile0
+    memory.write16(0x06001000U, 0x0001U); // screen block 2 -> tile1
+    memory.writeIo16(0x0008U, 0x0100U); // BG0CNT: screen block 1
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    ppu.step(static_cast<int>(gb::gba::Ppu::CyclesPerLine));
+    memory.writeIo16(0x0008U, 0x0200U); // BG0CNT: screen block 2 a partir da linha 2
+    ppu.step(static_cast<int>(gb::gba::Ppu::CyclesPerLine));
+
+    std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
+    T_REQUIRE(ppu.render(fb));
+
+    const std::size_t line0 = 0U;
+    const std::size_t line2 = static_cast<std::size_t>(2U) * static_cast<std::size_t>(gb::gba::Ppu::ScreenWidth);
+    T_EQ(fb[line0], static_cast<gb::u16>(0x07E0U));
+    T_EQ(fb[line2], static_cast<gb::u16>(0xF800U));
+}
+
 TEST_CASE("cpu", "gba_ppu_render_uses_completed_frame_snapshots_after_wrap") {
     gb::gba::Memory memory;
     std::vector<gb::u8> rom(0x200, 0x00);
@@ -1836,6 +2173,31 @@ TEST_CASE("cpu", "gba_ppu_render_uses_completed_frame_snapshots_after_wrap") {
     const std::size_t line2 = static_cast<std::size_t>(2U) * static_cast<std::size_t>(gb::gba::Ppu::ScreenWidth);
     T_EQ(fb[line0], static_cast<gb::u16>(0x07E0U));
     T_EQ(fb[line2], static_cast<gb::u16>(0x07E0U));
+}
+
+TEST_CASE("cpu", "gba_ppu_render_uses_completed_vram_and_palette_snapshots_after_wrap") {
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x0100U); // mode0 + BG0
+    memory.writeIo16(0x0008U, 0x0100U); // BG0CNT
+    memory.write16(0x05000002U, 0x03E0U); // index 1 = green
+    memory.write16(0x05000004U, 0x001FU); // index 2 = red
+    memory.write8(0x06000000U, 0x11U); // tile0 inteiro = indice 1
+    memory.write16(0x06000800U, 0x0000U); // map(0,0)=tile0
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    ppu.step(static_cast<int>(gb::gba::Ppu::CyclesPerLine * gb::gba::Ppu::TotalLines));
+    memory.write8(0x06000000U, 0x22U); // novo frame altera tile para indice 2
+    memory.write16(0x05000002U, 0x7C00U); // e muda palette index 1 para azul
+
+    std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
+    T_REQUIRE(ppu.render(fb));
+    T_EQ(fb[0], static_cast<gb::u16>(0x07E0U));
 }
 
 TEST_CASE("cpu", "gba_ppu_forced_blank_is_applied_per_scanline_snapshot") {
@@ -1977,6 +2339,219 @@ TEST_CASE("cpu", "gba_ppu_obj_8bpp_ignores_low_tile_bit") {
     std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
     T_REQUIRE(ppu.render(fb));
     T_EQ(fb[0], static_cast<gb::u16>(0xF800U)); // usa tile 2 (vermelho), nao tile 3 (verde)
+}
+
+TEST_CASE("cpu", "gba_ppu_obj_2d_mode_advances_horizontally_to_next_tile_number") {
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x1000U); // mode0 + OBJ + 2D mapping
+    memory.write16(0x05000202U, 0x001FU); // OBJ palette index 1 = red
+    memory.write16(0x05000204U, 0x03E0U); // OBJ palette index 2 = green
+    memory.write16(0x05000206U, 0x7C00U); // OBJ palette index 3 = blue
+
+    memory.write8(0x060103E0U, 0x01U); // tile 31 pixel(0,0)=1
+    memory.write8(0x06010000U, 0x02U); // tile 0 pixel(0,0)=2
+    memory.write8(0x06010400U, 0x03U); // tile 32 pixel(0,0)=3
+
+    memory.write16(0x07000000U, 0x4000U); // attr0: y=0, horizontal, 4bpp
+    memory.write16(0x07000002U, 0x0000U); // attr1: x=0, size 0 => 16x8
+    memory.write16(0x07000004U, 0x001FU); // attr2: tile 31
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
+    T_REQUIRE(ppu.render(fb));
+    T_EQ(fb[0], static_cast<gb::u16>(0xF800U));
+    T_EQ(fb[8], static_cast<gb::u16>(0x001FU)); // usa tile 32, nao faz wrap para tile 0
+}
+
+// Per GBATek, in 2D OBJ mapping the tile-slot grid is always 32 slots wide regardless of bpp.
+// Formula: TileNo = Base + (LY/8)*32 + (LX/8)*blockStrideX, where blockStrideX=2 for 8bpp.
+// The vertical stride (row advance) is always 32 slots — NOT 32*blockStrideX.
+// For an 8bpp 16x16 sprite at tile 0 in 2D mode:
+//   row 0 top-left: tile 0         (0x06010000)
+//   row 1 top-left: tile 0+32=32   (0x06010400)  <- correct
+//   (wrong old behavior: tile 0+64=64 at 0x06010800)
+TEST_CASE("cpu", "gba_ppu_obj_2d_8bpp_uses_32_block_vertical_stride") {
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x1000U); // mode0 + OBJ + 2D mapping
+    memory.write16(0x05000202U, 0x001FU); // OBJ palette index 1 = red
+    memory.write16(0x05000204U, 0x03E0U); // OBJ palette index 2 = green
+
+    // tile 0  @ 0x06010000: pixel(0,0) = color index 1 (red)  → top row of sprite
+    memory.write8(0x06010000U, 0x01U);
+    // tile 32 @ 0x06010400: pixel(0,0) = color index 2 (green) → second tile row (correct stride=32)
+    memory.write8(0x06010400U, 0x02U);
+    // tile 64 @ 0x06010800: pixel(0,0) = color index 1 (red)   → would be second row with old buggy stride=64
+    memory.write8(0x06010800U, 0x01U);
+
+    memory.write16(0x07000000U, 0x2000U); // attr0: y=0, 8bpp, square shape
+    memory.write16(0x07000002U, 0x4000U); // attr1: x=0, size=1 => 16x16
+    memory.write16(0x07000004U, 0x0000U); // attr2: tile 0
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
+    T_REQUIRE(ppu.render(fb));
+
+    const std::size_t topPixel = 0U;
+    const std::size_t bottomPixel = static_cast<std::size_t>(8U) * static_cast<std::size_t>(gb::gba::Ppu::ScreenWidth);
+    T_EQ(fb[topPixel],    static_cast<gb::u16>(0xF800U)); // tile 0 → red
+    T_EQ(fb[bottomPixel], static_cast<gb::u16>(0x07E0U)); // tile 32 → green (stride=32, not 64)
+}
+
+TEST_CASE("cpu", "gba_ppu_debug_pixel_reports_obj_over_bg_with_bg_as_second_layer") {
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    for (int i = 0; i < 128; ++i) {
+        memory.write16(0x07000000U + static_cast<gb::u32>(i) * 8U, 0x0200U); // OBJ disabled (non-affine)
+    }
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x1100U); // mode0 + BG0 + OBJ
+    memory.writeIo16(0x0008U, 0x0100U); // BG0 prio 0, screenblock 1
+    memory.write16(0x05000002U, 0x03E0U); // BG index 1 = green
+    memory.write8(0x06000000U, 0x01U); // BG tile0 pixel(0,0)=1
+    memory.write16(0x06000800U, 0x0000U); // BG0 map -> tile0
+
+    memory.write16(0x05000204U, 0x001FU); // OBJ index 2 = red
+    memory.write8(0x06010000U, 0x02U); // OBJ tile0 pixel(0,0)=2
+    memory.write16(0x07000000U, 0x0000U); // attr0: y=0, 4bpp
+    memory.write16(0x07000002U, 0x0000U); // attr1: x=0, size0
+    memory.write16(0x07000004U, 0x0000U); // attr2: tile0, prio0
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    gb::gba::Ppu::PixelDebugInfo info{};
+    T_REQUIRE(ppu.debugPixel(0, 0, info));
+    T_REQUIRE(info.valid);
+    T_EQ(info.topLayer, static_cast<gb::u8>(5U));
+    T_REQUIRE(info.hasSecond);
+    T_EQ(info.finalRgb565, static_cast<gb::u16>(0xF800U));
+}
+
+TEST_CASE("cpu", "gba_ppu_debug_flag_can_disable_bg") {
+    tests::ScopedEnvironmentVariable disableBg("GBEMU_GBA_DEBUG_DISABLE_BG", "1");
+
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x0100U); // mode0 + BG0
+    memory.writeIo16(0x0008U, 0x0100U);
+    memory.write16(0x05000002U, 0x03E0U);
+    memory.write8(0x06000000U, 0x01U);
+    memory.write16(0x06000800U, 0x0000U);
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
+    T_REQUIRE(ppu.render(fb));
+    T_EQ(fb[0], static_cast<gb::u16>(0x0000U));
+}
+
+TEST_CASE("cpu", "gba_ppu_debug_flag_can_disable_obj") {
+    tests::ScopedEnvironmentVariable disableObj("GBEMU_GBA_DEBUG_DISABLE_OBJ", "1");
+
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x1100U); // mode0 + BG0 + OBJ
+    memory.writeIo16(0x0008U, 0x0101U); // BG0 prio 1
+    memory.write16(0x05000002U, 0x03E0U);
+    memory.write8(0x06000000U, 0x01U);
+    memory.write16(0x06000800U, 0x0000U);
+
+    memory.write16(0x05000204U, 0x001FU);
+    memory.write8(0x06010000U, 0x02U);
+    memory.write16(0x07000000U, 0x0000U);
+    memory.write16(0x07000002U, 0x0000U);
+    memory.write16(0x07000004U, 0x0000U);
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
+    T_REQUIRE(ppu.render(fb));
+    T_EQ(fb[0], static_cast<gb::u16>(0x07E0U));
+}
+
+TEST_CASE("cpu", "gba_ppu_debug_flag_can_draw_obj_bounding_boxes") {
+    tests::ScopedEnvironmentVariable bboxOnly("GBEMU_GBA_DEBUG_OBJ_BBOX", "1");
+
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x1000U); // mode0 + OBJ
+    memory.write16(0x07000000U, 0x0000U); // y=0
+    memory.write16(0x07000002U, 0x4000U); // x=0, size 8x16
+    memory.write16(0x07000004U, 0x0000U); // prio0
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
+    T_REQUIRE(ppu.render(fb));
+
+    const std::size_t edgePixel = 0U;
+    const std::size_t innerPixel = static_cast<std::size_t>(1U) * static_cast<std::size_t>(gb::gba::Ppu::ScreenWidth) + 1U;
+    T_EQ(fb[edgePixel], static_cast<gb::u16>(0xF800U));
+    T_EQ(fb[innerPixel], static_cast<gb::u16>(0x0000U));
+}
+
+TEST_CASE("cpu", "gba_ppu_render_stats_track_visible_objs_by_scanline") {
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    for (int i = 0; i < 128; ++i) {
+        memory.write16(0x07000000U + static_cast<gb::u32>(i) * 8U, 0x0200U); // OBJ disabled (non-affine)
+    }
+
+    memory.writeIo16(gb::gba::Ppu::DispcntOffset, 0x1000U); // mode0 + OBJ
+    memory.write16(0x05000202U, 0x001FU);
+    memory.write8(0x06010000U, 0x01U);
+
+    memory.write16(0x07000000U, 0x0000U); // obj0 y=0 8x8
+    memory.write16(0x07000002U, 0x0000U);
+    memory.write16(0x07000004U, 0x0000U);
+
+    memory.write16(0x07000008U, 0x0004U); // obj1 y=4 8x8
+    memory.write16(0x0700000AU, 0x0008U);
+    memory.write16(0x0700000CU, 0x0000U);
+
+    gb::gba::Ppu ppu;
+    ppu.connectMemory(&memory);
+    ppu.reset();
+
+    std::array<gb::u16, gb::gba::Ppu::FramebufferSize> fb{};
+    T_REQUIRE(ppu.render(fb));
+
+    const auto& stats = ppu.lastRenderStats();
+    T_EQ(stats.visibleObjectsFrame, static_cast<std::uint32_t>(2U));
+    T_EQ(stats.visibleObjectsPerScanline[0], static_cast<std::uint16_t>(1U));
+    T_EQ(stats.visibleObjectsPerScanline[4], static_cast<std::uint16_t>(2U));
+    T_EQ(stats.visibleObjectsPerScanline[8], static_cast<std::uint16_t>(1U));
+    T_EQ(stats.visibleObjectsPerScanline[12], static_cast<std::uint16_t>(0U));
+    T_REQUIRE(stats.objNs > 0U);
 }
 
 TEST_CASE("cpu", "gba_ppu_mode1_bg2_affine_renders_tile") {
@@ -2475,6 +3050,61 @@ TEST_CASE("state", "gba_smoke_super_mario_advance_2_local_rom_boots_to_visible_f
     T_REQUIRE(countDistinctColors(system.framebuffer()) >= 2U);
 }
 
+TEST_CASE("state", "gba_smoke_super_mario_advance_2_local_rom_bg1_visible_sample_matches_scene") {
+    const auto romPath = localRomPath(std::filesystem::path("roms") / "Super Mario Advance" / "Super Mario Advance 2 - Super Mario World (USA).gba");
+    if (!std::filesystem::exists(romPath)) {
+        return;
+    }
+
+    gb::gba::System system;
+    T_REQUIRE(system.loadRomFromFile(romPath.string()));
+    for (int i = 0; i < 170; ++i) {
+        system.runFrame();
+    }
+
+    T_EQ(system.memory().readIo16(0x000AU), static_cast<gb::u16>(0x7E01U));
+    const std::size_t pixelIndex = static_cast<std::size_t>(56U) * static_cast<std::size_t>(gb::gba::Ppu::ScreenWidth) + 176U;
+    T_EQ(system.framebuffer()[pixelIndex], static_cast<gb::u16>(0x6FE9U));
+}
+
+TEST_CASE("state", "gba_smoke_super_mario_advance_2_local_rom_window_mask_blocks_global_darken_on_scene_pixel") {
+    const auto romPath = localRomPath(std::filesystem::path("roms") / "Super Mario Advance" / "Super Mario Advance 2 - Super Mario World (USA).gba");
+    if (!std::filesystem::exists(romPath)) {
+        return;
+    }
+
+    const std::size_t pixelIndex = static_cast<std::size_t>(56U) * static_cast<std::size_t>(gb::gba::Ppu::ScreenWidth) + 176U;
+
+    {
+        gb::gba::System system;
+        T_REQUIRE(system.loadRomFromFile(romPath.string()));
+        for (int i = 0; i < 170; ++i) {
+            system.runFrame();
+        }
+        T_EQ(system.framebuffer()[pixelIndex], static_cast<gb::u16>(0x6FE9U));
+    }
+
+    {
+        tests::ScopedEnvironmentVariable disableWindow("GBEMU_GBA_DEBUG_DISABLE_WINDOW", "1");
+        gb::gba::System system;
+        T_REQUIRE(system.loadRomFromFile(romPath.string()));
+        for (int i = 0; i < 170; ++i) {
+            system.runFrame();
+        }
+        T_EQ(system.framebuffer()[pixelIndex], static_cast<gb::u16>(0x0000U));
+    }
+
+    {
+        tests::ScopedEnvironmentVariable disableBlendWindow("GBEMU_GBA_DEBUG_DISABLE_BLEND_WINDOW", "1");
+        gb::gba::System system;
+        T_REQUIRE(system.loadRomFromFile(romPath.string()));
+        for (int i = 0; i < 170; ++i) {
+            system.runFrame();
+        }
+        T_EQ(system.framebuffer()[pixelIndex], static_cast<gb::u16>(0x6FE9U));
+    }
+}
+
 TEST_CASE("state", "gba_smoke_advance_wars_local_rom_boots_past_flash_probe") {
     const auto romPath = localRomPath(std::filesystem::path("roms") / "Advance Wars" / "Advance Wars (USA).gba");
     if (!std::filesystem::exists(romPath)) {
@@ -2490,4 +3120,231 @@ TEST_CASE("state", "gba_smoke_advance_wars_local_rom_boots_past_flash_probe") {
     T_EQ(system.metadata().gameCode, std::string("AWRE"));
     T_REQUIRE(system.memory().readIo16(gb::gba::Ppu::DispcntOffset) != 0U);
     T_REQUIRE(countDistinctColors(system.framebuffer()) >= 8U);
+}
+TEST_CASE("cpu", "gba_arm_adcs_carry_flag_when_op2_plus_carry_overflows_u32") {
+    // ADCS with op2=0xFFFFFFFF and carry=1 must detect unsigned overflow.
+    gb::gba::Memory memory;
+    const auto rom = makeArmRom({
+        0xE3A00001U, // MOV r0, #1
+        0xE3E01000U, // MVN r1, #0          ; r1 = 0xFFFFFFFF
+        0xE1500000U, // CMP r0, r0          ; sets C=1 (equal → no borrow)
+        0xE0B02001U, // ADCS r2, r0, r1     ; r2 = 1 + 0xFFFFFFFF + 1 = 1
+    });
+    T_REQUIRE(memory.loadRom(rom));
+
+    gb::gba::CpuArm7tdmi cpu;
+    cpu.connectMemory(&memory);
+    cpu.reset();
+
+    for (int i = 0; i < 4; ++i) {
+        (void)cpu.step();
+    }
+
+    T_EQ(cpu.reg(2), 1U);
+    T_REQUIRE(cpu.flagC());
+}
+
+TEST_CASE("cpu", "gba_arm_sbcs_carry_flag_when_rhs_plus_borrow_overflows_u32") {
+    gb::gba::Memory memory;
+    const auto rom = makeArmRom({
+        0xE3A00005U, // MOV r0, #5
+        0xE3E01000U, // MVN r1, #0          ; r1 = 0xFFFFFFFF
+        0xE350000AU, // CMP r0, #10         ; 5 < 10 → C=0 (borrow)
+        0xE0D02001U, // SBCS r2, r0, r1     ; r2 = 5 - 0xFFFFFFFF - 1 = 5
+    });
+    T_REQUIRE(memory.loadRom(rom));
+
+    gb::gba::CpuArm7tdmi cpu;
+    cpu.connectMemory(&memory);
+    cpu.reset();
+
+    for (int i = 0; i < 4; ++i) {
+        (void)cpu.step();
+    }
+
+    T_EQ(cpu.reg(2), 5U);
+    T_REQUIRE(!cpu.flagC());
+}
+
+TEST_CASE("cpu", "gba_thumb_adc_carry_flag_wrapping") {
+    gb::gba::Memory memory;
+    const auto rom = makeArmRom({});
+    T_REQUIRE(memory.loadRom(rom));
+
+    gb::gba::CpuArm7tdmi cpu;
+    cpu.connectMemory(&memory);
+    cpu.reset();
+
+    // Write THUMB instructions into IWRAM
+    const gb::u32 iwramBase = 0x03000000U;
+    memory.write16(iwramBase + 0U, 0x4292U); // CMP r2, r2 → sets C=1
+    memory.write16(iwramBase + 2U, 0x4148U); // ADC r0, r1 → r0 = r0 + r1 + 1
+
+    cpu.setReg(0, 1U);
+    cpu.setReg(1, 0xFFFFFFFFU);
+    cpu.setReg(15, iwramBase);
+    cpu.setThumbMode(true);
+
+    (void)cpu.step(); // CMP r2, r2 → C=1
+    (void)cpu.step(); // ADC r0, r1
+
+    T_EQ(cpu.reg(0), 1U);
+    T_REQUIRE(cpu.flagC());
+}
+
+TEST_CASE("cpu", "gba_thumb_ldmia_skips_writeback_when_base_in_register_list") {
+    gb::gba::Memory memory;
+    const auto rom = makeArmRom({});
+    T_REQUIRE(memory.loadRom(rom));
+
+    gb::gba::CpuArm7tdmi cpu;
+    cpu.connectMemory(&memory);
+    cpu.reset();
+
+    // Write test data at EWRAM
+    memory.write32(0x02000000U, 0xDEADBEEFU); // value for r0
+    memory.write32(0x02000004U, 0x12345678U); // value for r1
+
+    // Write THUMB LDMIA r0!, {r0, r1} into IWRAM
+    const gb::u32 iwramBase = 0x03000000U;
+    memory.write16(iwramBase, 0xC803U); // LDMIA r0!, {r0, r1}
+
+    cpu.setReg(0, 0x02000000U);
+    cpu.setReg(15, iwramBase);
+    cpu.setThumbMode(true);
+
+    (void)cpu.step();
+
+    T_EQ(cpu.reg(0), 0xDEADBEEFU);
+    T_EQ(cpu.reg(1), 0x12345678U);
+}
+
+TEST_CASE("cpu", "gba_thumb_ror_register_shift_amount_uses_low_byte") {
+    gb::gba::Memory memory;
+    const auto rom = makeArmRom({});
+    T_REQUIRE(memory.loadRom(rom));
+
+    gb::gba::CpuArm7tdmi cpu;
+    cpu.connectMemory(&memory);
+    cpu.reset();
+
+    // Write THUMB ROR r0, r1 into IWRAM
+    const gb::u32 iwramBase = 0x03000000U;
+    memory.write16(iwramBase, 0x41C8U); // ROR r0, r1
+
+    cpu.setReg(0, 0x80000001U);
+    cpu.setReg(1, 32U); // shift amount = 32
+    cpu.setReg(15, iwramBase);
+    cpu.setThumbMode(true);
+
+    (void)cpu.step();
+
+    // ROR by 32: result unchanged, C = bit31
+    T_EQ(cpu.reg(0), 0x80000001U);
+    T_REQUIRE(cpu.flagC());
+}
+
+TEST_CASE("cpu", "gba_arm_ldm_writeback_uses_original_base") {
+    // LDM r0!, {r0, r1} — writeback must use the ORIGINAL base, not
+    // the value loaded into r0 from memory.
+    gb::gba::Memory memory;
+    const auto rom = makeArmRom({
+        0xE3A00702U, // MOV r0, #0x02000000 (shifted: 0x02 << 24 = 0x08000000... need different)
+    });
+    // Embed LDM in IWRAM, set up via register writes
+    T_REQUIRE(memory.loadRom(rom));
+
+    gb::gba::CpuArm7tdmi cpu;
+    cpu.connectMemory(&memory);
+    cpu.reset();
+
+    // Put test data at EWRAM 0x02000000
+    memory.write32(0x02000000U, 0xDEADBEEFU); // value for r0
+    memory.write32(0x02000004U, 0x12345678U); // value for r1
+
+    // Write ARM LDMIA r0!, {r0, r1} into IWRAM
+    const gb::u32 iwramBase = 0x03000000U;
+    memory.write32(iwramBase, 0xE8B00003U); // LDMIA r0!, {r0, r1}
+
+    cpu.setReg(0, 0x02000000U);
+    cpu.setReg(15, iwramBase);
+
+    (void)cpu.step();
+
+    // Writeback: original base (0x02000000) + 8 = 0x02000008
+    // But r0 also loaded 0xDEADBEEF from memory.
+    // Per ARM7TDMI: if Rn is in list, writeback result is UNPREDICTABLE
+    // but on real hardware writeback wins (final value = base + offset).
+    // Key point: writeback must NOT use the corrupted 0xDEADBEEF as base.
+    T_EQ(cpu.reg(0), 0x02000008U);
+    T_EQ(cpu.reg(1), 0x12345678U);
+}
+
+TEST_CASE("cpu", "gba_swi_register_ram_reset_forces_blank_and_resets_sio") {
+    gb::gba::Memory memory;
+    const auto rom = makeArmRom({
+        0xE3A00020U, // MOV r0, #0x20
+        0xEF010000U, // SWI 0x01 (RegisterRamReset)
+    });
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(0x000U, 0x1740U);
+    memory.writeIo16(0x120U, 0xAAAAU);
+    memory.writeIo16(0x122U, 0xBBBBU);
+    memory.writeIo16(0x128U, 0xCCCCU);
+    memory.writeIo16(0x134U, 0xDDDDU);
+    memory.writeIo16(0x140U, 0xEEEEU);
+    memory.writeIo16(0x150U, 0x1357U);
+    memory.writeIo16(0x158U, 0x2468U);
+
+    gb::gba::CpuArm7tdmi cpu;
+    cpu.connectMemory(&memory);
+    cpu.reset();
+
+    (void)cpu.step();
+    (void)cpu.step();
+
+    T_EQ(memory.readIo16(0x000U), static_cast<gb::u16>(0x0080U));
+    T_EQ(memory.readIo16(0x120U), static_cast<gb::u16>(0x0000U));
+    T_EQ(memory.readIo16(0x122U), static_cast<gb::u16>(0x0000U));
+    T_EQ(memory.readIo16(0x128U), static_cast<gb::u16>(0x0000U));
+    T_EQ(memory.readIo16(0x134U), static_cast<gb::u16>(0x0000U));
+    T_EQ(memory.readIo16(0x140U), static_cast<gb::u16>(0x0000U));
+    T_EQ(memory.readIo16(0x150U), static_cast<gb::u16>(0x0000U));
+    T_EQ(memory.readIo16(0x158U), static_cast<gb::u16>(0x0000U));
+}
+
+TEST_CASE("cpu", "gba_swi_register_ram_reset_bit7_clears_other_io_registers") {
+    gb::gba::Memory memory;
+    const auto rom = makeArmRom({
+        0xEF010000U, // SWI 0x01 (RegisterRamReset)
+    });
+    T_REQUIRE(memory.loadRom(rom));
+
+    memory.writeIo16(0x000U, 0x1740U);
+    memory.writeIo16(0x048U, 0x3F3FU);
+    memory.writeIo16(0x050U, 0x00FFU);
+    memory.writeIo16(0x100U, 0x1234U);
+    memory.writeIo16(0x102U, 0x0080U);
+    memory.writeIo16(gb::gba::Memory::IeOffset, 0x3FFFU);
+    memory.requestInterrupt(0x0003U);
+    memory.writeIo16(gb::gba::Memory::WaitcntOffset, 0x4317U);
+    memory.writeIo16(gb::gba::Memory::ImeOffset, 0x0000U);
+
+    gb::gba::CpuArm7tdmi cpu;
+    cpu.connectMemory(&memory);
+    cpu.reset();
+    cpu.setReg(0, 0x80U);
+
+    (void)cpu.step();
+
+    T_EQ(memory.readIo16(0x000U), static_cast<gb::u16>(0x0080U));
+    T_EQ(memory.readIo16(0x048U), static_cast<gb::u16>(0x0000U));
+    T_EQ(memory.readIo16(0x050U), static_cast<gb::u16>(0x0000U));
+    T_EQ(memory.readIo16(0x100U), static_cast<gb::u16>(0x0000U));
+    T_EQ(memory.readIo16(0x102U), static_cast<gb::u16>(0x0000U));
+    T_EQ(memory.interruptEnableRaw(), static_cast<gb::u16>(0x0000U));
+    T_EQ(memory.interruptFlagsRaw(), static_cast<gb::u16>(0x0000U));
+    T_EQ(memory.readIo16(gb::gba::Memory::WaitcntOffset), static_cast<gb::u16>(0x0000U));
+    T_REQUIRE(!memory.interruptMasterEnabled());
 }

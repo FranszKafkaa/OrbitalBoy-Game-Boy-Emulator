@@ -2,8 +2,11 @@
 
 #ifdef GBEMU_USE_SDL2
 #include "gb/app/sdl_compat.hpp"
+#include "gb/core/environment.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstdio>
 #include <string>
 
 namespace gb::frontend {
@@ -29,6 +32,46 @@ SDL_Rect computeDestinationRect(int outputW, int outputH, int srcW, int srcH) {
     };
 }
 
+bool profileTitleEnabledByDefault() {
+    return gb::environmentVariableEnabled("GBEMU_GBA_SHOW_PROFILE_TITLE");
+}
+
+std::string buildWindowTitle(
+    const std::string& baseTitle,
+    const gba::System::FrameProfile& profile,
+    bool showProfile,
+    std::uint32_t visibleFrameCounter
+) {
+    if (!showProfile) {
+        return baseTitle;
+    }
+
+    char buffer[320]{};
+    const double totalMs = static_cast<double>(profile.totalNs) / 1000000.0;
+    const double cpuMs = static_cast<double>(profile.cpuNs) / 1000000.0;
+    const double renderMs = static_cast<double>(profile.renderNs) / 1000000.0;
+    const double bgMs = static_cast<double>(profile.ppu.bgNs) / 1000000.0;
+    const double objMs = static_cast<double>(profile.ppu.objNs) / 1000000.0;
+    const double objWinMs = static_cast<double>(profile.ppu.objWindowNs) / 1000000.0;
+    const double composeMs = static_cast<double>(profile.ppu.composeNs) / 1000000.0;
+    std::snprintf(
+        buffer,
+        sizeof(buffer),
+        "%s | frame %.2f cpu %.2f render %.2f bg %.2f obj %.2f win %.2f comp %.2f | obj/line %u vis %u",
+        baseTitle.c_str(),
+        totalMs,
+        cpuMs,
+        renderMs,
+        bgMs,
+        objMs,
+        objWinMs,
+        composeMs,
+        static_cast<unsigned>(profile.ppu.maxVisibleObjectsOnScanline),
+        static_cast<unsigned>(visibleFrameCounter)
+    );
+    return std::string(buffer);
+}
+
 } // namespace
 
 int runGbaRealtime(gba::System& system, int scale) {
@@ -50,6 +93,7 @@ int runGbaRealtime(gba::System& system, int scale) {
         title += " - ";
         title += system.metadata().title;
     }
+    const std::string baseTitle = title;
 
     SDL_Window* window = SDL_CreateWindow(
         title.c_str(),
@@ -103,7 +147,14 @@ int runGbaRealtime(gba::System& system, int scale) {
 
     bool running = true;
     bool backToMenu = false;
+    bool showProfileTitle = profileTitleEnabledByDefault();
     gba::InputState eventInput{};
+    std::array<std::uint32_t, 30> recentVisibleObjects{};
+    std::size_t recentVisibleIndex = 0;
+    std::uint64_t recentVisibleSum = 0;
+    std::uint32_t recentVisibleAverage = 0;
+    std::uint32_t frameCounter = 0;
+    SDL_SetWindowTitle(window, baseTitle.c_str());
     const auto applyKeyToInput = [](gba::InputState& input, SDL_Keycode key, bool pressed) {
         switch (key) {
         case SDLK_RIGHT:
@@ -166,6 +217,11 @@ int runGbaRealtime(gba::System& system, int scale) {
                     running = false;
                     continue;
                 }
+                if (event.key.keysym.sym == SDLK_F3 && event.key.repeat == 0) {
+                    showProfileTitle = !showProfileTitle;
+                    SDL_SetWindowTitle(window, baseTitle.c_str());
+                    continue;
+                }
                 if (event.key.keysym.sym == SDLK_l && (event.key.keysym.mod & KMOD_CTRL) == 0) {
                     backToMenu = true;
                     running = false;
@@ -225,6 +281,24 @@ int runGbaRealtime(gba::System& system, int scale) {
         system.setInputState(input);
 
         system.runFrame();
+        const auto& frameProfile = system.lastFrameProfile();
+        recentVisibleSum -= recentVisibleObjects[recentVisibleIndex];
+        recentVisibleObjects[recentVisibleIndex] = frameProfile.ppu.visibleObjectsFrame;
+        recentVisibleSum += recentVisibleObjects[recentVisibleIndex];
+        recentVisibleIndex = (recentVisibleIndex + 1U) % recentVisibleObjects.size();
+        ++frameCounter;
+        const std::size_t sampleCount = std::min<std::size_t>(frameCounter, recentVisibleObjects.size());
+        recentVisibleAverage = sampleCount == 0U
+            ? 0U
+            : static_cast<std::uint32_t>(recentVisibleSum / sampleCount);
+
+        if (showProfileTitle && (frameCounter % 15U) == 0U) {
+            const std::string profileTitle = buildWindowTitle(baseTitle, frameProfile, true, recentVisibleAverage);
+            SDL_SetWindowTitle(window, profileTitle.c_str());
+        } else if (!showProfileTitle && (frameCounter % 15U) == 0U) {
+            SDL_SetWindowTitle(window, baseTitle.c_str());
+        }
+
         const auto& frame = system.framebuffer();
         SDL_UpdateTexture(
             texture,

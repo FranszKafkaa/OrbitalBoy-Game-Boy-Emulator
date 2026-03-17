@@ -3,10 +3,13 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <iostream>
+#include <optional>
+#include <sstream>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -107,6 +110,323 @@ bool renderFrameSafely(Ppu& ppu, std::array<u16, System::FramebufferSize>& frame
 #else
     return ppu.render(framebuffer);
 #endif
+}
+
+using Clock = std::chrono::steady_clock;
+
+std::uint64_t elapsedNs(Clock::time_point start) {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
+}
+
+bool frameProfileLoggingEnabled() {
+    return gb::environmentVariableEnabled("GBEMU_GBA_LOG_PROFILE");
+}
+
+bool frameSceneLoggingEnabled() {
+    return gb::environmentVariableEnabled("GBEMU_GBA_LOG_SCENE")
+        || gb::environmentVariableEnabled("GBEMU_GBA_LOG_FRAME_STATE");
+}
+
+int frameProfileLogEvery() {
+    const auto value = gb::readEnvironmentVariable("GBEMU_GBA_LOG_PROFILE_EVERY");
+    if (!value.has_value() || value->empty()) {
+        return 60;
+    }
+    try {
+        return std::max(1, std::stoi(*value));
+    } catch (...) {
+        return 60;
+    }
+}
+
+int frameSceneLogEvery() {
+    const auto value = gb::readEnvironmentVariable("GBEMU_GBA_LOG_SCENE_EVERY");
+    if (!value.has_value() || value->empty()) {
+        return 1;
+    }
+    try {
+        return std::max(1, std::stoi(*value));
+    } catch (...) {
+        return 1;
+    }
+}
+
+int readIntEnvironmentBase0OrDefault(const char* name, int fallback) {
+    const auto value = gb::readEnvironmentVariable(name);
+    if (!value.has_value() || value->empty()) {
+        return fallback;
+    }
+    try {
+        return std::stoi(*value, nullptr, 0);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+int frameSceneBgProbeWordCount() {
+    return std::clamp(readIntEnvironmentBase0OrDefault("GBEMU_GBA_LOG_BG_SAMPLE_WORDS", 0), 0, 8);
+}
+
+u32 bgScreenBlockBase(const Ppu::TextBgDebugSample& sample) {
+    return (sample.screenBase + static_cast<u32>(sample.screenBlock) * 0x800U) & 0x1FFFEU;
+}
+
+u32 bgCharBlockEnd(const Ppu::TextBgDebugSample& sample) {
+    return sample.charBase + 0x3FFFU;
+}
+
+u32 bgTileBaseAddress(const Ppu::TextBgDebugSample& sample) {
+    const u32 bytesPerTile = sample.color256 ? 64U : 32U;
+    return sample.charBase + static_cast<u32>(sample.tileNumber) * bytesPerTile;
+}
+
+u32 bgTileEndAddress(const Ppu::TextBgDebugSample& sample) {
+    const u32 bytesPerTile = sample.color256 ? 64U : 32U;
+    return bgTileBaseAddress(sample) + bytesPerTile - 1U;
+}
+
+std::string dumpBgVramWords(const Memory& memory, u32 startOffset, int wordCount) {
+    if (wordCount <= 0) {
+        return {};
+    }
+
+    std::ostringstream out;
+    out << std::hex;
+    for (int index = 0; index < wordCount; ++index) {
+        if (index != 0) {
+            out << ',';
+        }
+        const u32 offset = (startOffset + static_cast<u32>(index * 2)) & 0x1FFFEU;
+        out << "0x" << memory.read16(Memory::VramBase + offset);
+    }
+    return out.str();
+}
+
+struct FrameSceneBgProbeConfig {
+    int bgIndex = -1;
+    int x = 0;
+    int y = 0;
+    int width = 1;
+    int height = 1;
+    int limit = 4;
+};
+
+std::optional<FrameSceneBgProbeConfig> frameSceneBgProbeConfig() {
+    const int bgIndex = readIntEnvironmentBase0OrDefault("GBEMU_GBA_LOG_BG_SAMPLE_BG", -1);
+    if (bgIndex < 0 || bgIndex > 3) {
+        return std::nullopt;
+    }
+
+    FrameSceneBgProbeConfig config{};
+    config.bgIndex = bgIndex;
+    config.x = readIntEnvironmentBase0OrDefault("GBEMU_GBA_LOG_BG_SAMPLE_X", 0);
+    config.y = readIntEnvironmentBase0OrDefault("GBEMU_GBA_LOG_BG_SAMPLE_Y", 0);
+    config.width = std::max(1, readIntEnvironmentBase0OrDefault("GBEMU_GBA_LOG_BG_SAMPLE_W", 1));
+    config.height = std::max(1, readIntEnvironmentBase0OrDefault("GBEMU_GBA_LOG_BG_SAMPLE_H", 1));
+    config.limit = std::clamp(readIntEnvironmentBase0OrDefault("GBEMU_GBA_LOG_BG_SAMPLE_LIMIT", 4), 1, 8);
+    return config;
+}
+
+struct FrameSceneBgProbeHit {
+    bool valid = false;
+    int x = 0;
+    int y = 0;
+    Ppu::TextBgDebugSample sample{};
+};
+
+std::array<FrameSceneBgProbeHit, 8> collectFrameSceneBgProbeHits(
+    const System& system,
+    const FrameSceneBgProbeConfig& config,
+    int& hitCount,
+    bool& sampledOrigin,
+    Ppu::TextBgDebugSample& originSample
+) {
+    std::array<FrameSceneBgProbeHit, 8> hits{};
+    hitCount = 0;
+    sampledOrigin = false;
+    originSample = Ppu::TextBgDebugSample{};
+
+    sampledOrigin = system.ppu().debugTextBgSample(config.bgIndex, config.x, config.y, originSample);
+
+    const int startX = std::clamp(config.x, 0, Ppu::ScreenWidth - 1);
+    const int startY = std::clamp(config.y, 0, Ppu::ScreenHeight - 1);
+    const int endX = std::clamp(config.x + config.width, 0, Ppu::ScreenWidth);
+    const int endY = std::clamp(config.y + config.height, 0, Ppu::ScreenHeight);
+    for (int y = startY; y < endY && hitCount < config.limit; ++y) {
+        for (int x = startX; x < endX && hitCount < config.limit; ++x) {
+            Ppu::TextBgDebugSample sample{};
+            if (!system.ppu().debugTextBgSample(config.bgIndex, x, y, sample) || !sample.visible) {
+                continue;
+            }
+            hits[hitCount].valid = true;
+            hits[hitCount].x = x;
+            hits[hitCount].y = y;
+            hits[hitCount].sample = sample;
+            ++hitCount;
+        }
+    }
+    return hits;
+}
+
+void logGbaFrameSceneState(const System& system, std::uint32_t frameNumber) {
+    const Memory& memory = system.memory();
+    const u16 dispcnt = memory.readIo16(Ppu::DispcntOffset);
+    const u16 bg0cnt = memory.readIo16(0x0008U);
+    const u16 bg1cnt = memory.readIo16(0x000AU);
+    const u16 bg2cnt = memory.readIo16(0x000CU);
+    const u16 bg3cnt = memory.readIo16(0x000EU);
+    const u16 bg0hofs = memory.readIo16(0x0010U);
+    const u16 bg0vofs = memory.readIo16(0x0012U);
+    const u16 bg1hofs = memory.readIo16(0x0014U);
+    const u16 bg1vofs = memory.readIo16(0x0016U);
+    const u16 bg2hofs = memory.readIo16(0x0018U);
+    const u16 bg2vofs = memory.readIo16(0x001AU);
+    const u16 bg3hofs = memory.readIo16(0x001CU);
+    const u16 bg3vofs = memory.readIo16(0x001EU);
+    const u16 bldcnt = memory.readIo16(0x0050U);
+    const u16 bldalpha = memory.readIo16(0x0052U);
+    const u16 bldy = memory.readIo16(0x0054U);
+    const u16 win0h = memory.readIo16(0x0040U);
+    const u16 win1h = memory.readIo16(0x0042U);
+    const u16 win0v = memory.readIo16(0x0044U);
+    const u16 win1v = memory.readIo16(0x0046U);
+    const u16 winin = memory.readIo16(0x0048U);
+    const u16 winout = memory.readIo16(0x004AU);
+    const u16 mode = static_cast<u16>(dispcnt & 0x0007U);
+    const bool obj1d = (dispcnt & 0x0040U) != 0U;
+    const bool objEnable = (dispcnt & 0x1000U) != 0U;
+    const unsigned bgEnables = static_cast<unsigned>((dispcnt >> 8U) & 0x0FU);
+    const auto& stats = system.lastFrameProfile().ppu;
+    const auto bgProbe = frameSceneBgProbeConfig();
+    const int bgProbeWordCount = frameSceneBgProbeWordCount();
+    int bgProbeHitCount = 0;
+    bool bgProbeOriginValid = false;
+    Ppu::TextBgDebugSample bgProbeOriginSample{};
+    const std::array<FrameSceneBgProbeHit, 8> bgProbeHits = bgProbe.has_value()
+        ? collectFrameSceneBgProbeHits(system, *bgProbe, bgProbeHitCount, bgProbeOriginValid, bgProbeOriginSample)
+        : std::array<FrameSceneBgProbeHit, 8>{};
+
+    std::cerr << "[GBA][SCENE] frame=" << frameNumber
+              << " mode=" << mode
+              << " objMap=" << (obj1d ? "1D" : "2D")
+              << " bgEn=0x" << std::hex << bgEnables
+              << " objEn=" << static_cast<unsigned>(objEnable)
+              << " dispcnt=0x" << dispcnt
+              << " bg0cnt=0x" << bg0cnt
+              << " bg1cnt=0x" << bg1cnt
+              << " bg2cnt=0x" << bg2cnt
+              << " bg3cnt=0x" << bg3cnt
+              << " bg0ofs=(" << std::dec << bg0hofs << "," << bg0vofs << ")"
+              << " bg1ofs=(" << bg1hofs << "," << bg1vofs << ")"
+              << " bg2ofs=(" << bg2hofs << "," << bg2vofs << ")"
+              << " bg3ofs=(" << bg3hofs << "," << bg3vofs << ")"
+              << std::hex
+              << " bldcnt=0x" << bldcnt
+              << " bldalpha=0x" << bldalpha
+              << " bldy=0x" << bldy
+              << " win0h=0x" << win0h
+              << " win0v=0x" << win0v
+              << " win1h=0x" << win1h
+              << " win1v=0x" << win1v
+              << " winin=0x" << winin
+              << " winout=0x" << winout
+              << std::dec
+              << " objVisible=" << stats.visibleObjectsFrame
+              << " objMaxLine=" << stats.maxVisibleObjectsOnScanline
+              << " objPixels=" << stats.objPixelsDrawn
+              << " bgMs=" << (static_cast<double>(stats.bgNs) / 1000000.0)
+              << " objMs=" << (static_cast<double>(stats.objNs) / 1000000.0)
+              << " compMs=" << (static_cast<double>(stats.composeNs) / 1000000.0);
+
+    if (bgProbe.has_value()) {
+        std::cerr << " probe=bg" << bgProbe->bgIndex
+                  << "@(" << bgProbe->x << "," << bgProbe->y << ")";
+        if (bgProbe->width > 1 || bgProbe->height > 1) {
+            std::cerr << " probeRect=" << bgProbe->width << "x" << bgProbe->height
+                      << " probeHits=" << bgProbeHitCount;
+            if (bgProbeOriginValid) {
+                const u32 blockBase = bgScreenBlockBase(bgProbeOriginSample);
+                const u32 mapBase = bgProbeOriginSample.mapAddress & 0x1FFFEU;
+                const u32 tileBase = bgTileBaseAddress(bgProbeOriginSample);
+                const u32 tileEnd = bgTileEndAddress(bgProbeOriginSample);
+                std::cerr << " probeOriginVisible=" << static_cast<unsigned>(bgProbeOriginSample.visible)
+                          << std::hex
+                          << " probeOriginCnt=0x" << bgProbeOriginSample.bgcnt
+                          << " probeOriginScreenBase=0x" << bgProbeOriginSample.screenBase
+                          << " probeOriginMapAddr=0x" << bgProbeOriginSample.mapAddress
+                          << " probeOriginTileAddr=0x" << bgProbeOriginSample.tileAddress
+                          << " probeOriginEntry=0x" << bgProbeOriginSample.mapEntry
+                          << std::dec
+                          << " probeOriginSb=" << static_cast<unsigned>(bgProbeOriginSample.screenBlock)
+                          << " probeOriginTile=(" << bgProbeOriginSample.tileX << "," << bgProbeOriginSample.tileY << ")"
+                          << " probeOriginTileNo=" << bgProbeOriginSample.tileNumber
+                          << " probeOriginColor=" << static_cast<unsigned>(bgProbeOriginSample.colorIndex)
+                          << std::hex
+                          << " probeWatchMap=0x" << blockBase << "-0x" << (blockBase + 0x7FFU)
+                          << " probeWatchChar=0x" << bgProbeOriginSample.charBase << "-0x" << bgCharBlockEnd(bgProbeOriginSample)
+                          << " probeWatchTile=0x" << tileBase << "-0x" << tileEnd
+                          << std::dec;
+                if (bgProbeWordCount > 0) {
+                    std::cerr << std::hex
+                              << " probeBlockWords@0x" << blockBase << '=' << dumpBgVramWords(memory, blockBase, bgProbeWordCount)
+                              << " probeMapWords@0x" << mapBase << '=' << dumpBgVramWords(memory, mapBase, bgProbeWordCount)
+                              << std::dec;
+                }
+            } else {
+                std::cerr << " probeOriginValid=0";
+            }
+            for (int hitIndex = 0; hitIndex < bgProbeHitCount; ++hitIndex) {
+                const auto& hit = bgProbeHits[hitIndex];
+                std::cerr << " probeHit" << hitIndex
+                          << "=(" << hit.x << "," << hit.y << ")"
+                          << std::hex
+                          << "#cnt=0x" << hit.sample.bgcnt
+                          << "#entry=0x" << hit.sample.mapEntry
+                          << std::dec
+                          << "#sb=" << static_cast<unsigned>(hit.sample.screenBlock)
+                          << "#tile=(" << hit.sample.tileX << "," << hit.sample.tileY << ")"
+                          << "#tileNo=" << hit.sample.tileNumber
+                          << "#pal=" << static_cast<unsigned>(hit.sample.paletteBank)
+                          << "#flip=" << (hit.sample.hflip ? 'H' : '-') << (hit.sample.vflip ? 'V' : '-')
+                          << "#color=" << static_cast<unsigned>(hit.sample.colorIndex);
+            }
+        } else if (bgProbeOriginValid) {
+            const u32 blockBase = bgScreenBlockBase(bgProbeOriginSample);
+            const u32 mapBase = bgProbeOriginSample.mapAddress & 0x1FFFEU;
+            const u32 tileBase = bgTileBaseAddress(bgProbeOriginSample);
+            const u32 tileEnd = bgTileEndAddress(bgProbeOriginSample);
+            std::cerr << " probeValid=" << static_cast<unsigned>(bgProbeOriginSample.valid)
+                      << " probeVisible=" << static_cast<unsigned>(bgProbeOriginSample.visible)
+                      << std::hex
+                      << " probeCnt=0x" << bgProbeOriginSample.bgcnt
+                      << " probeScreenBase=0x" << bgProbeOriginSample.screenBase
+                      << " probeMapAddr=0x" << bgProbeOriginSample.mapAddress
+                      << " probeTileAddr=0x" << bgProbeOriginSample.tileAddress
+                      << " probeEntry=0x" << bgProbeOriginSample.mapEntry
+                      << std::dec
+                      << " probeSb=" << static_cast<unsigned>(bgProbeOriginSample.screenBlock)
+                      << " probeTile=(" << bgProbeOriginSample.tileX << "," << bgProbeOriginSample.tileY << ")"
+                      << " probeTileNo=" << bgProbeOriginSample.tileNumber
+                      << " probePal=" << static_cast<unsigned>(bgProbeOriginSample.paletteBank)
+                      << " probeFlip=" << (bgProbeOriginSample.hflip ? 'H' : '-') << (bgProbeOriginSample.vflip ? 'V' : '-')
+                      << " probeColor=" << static_cast<unsigned>(bgProbeOriginSample.colorIndex)
+                      << std::hex
+                      << " probeWatchMap=0x" << blockBase << "-0x" << (blockBase + 0x7FFU)
+                      << " probeWatchChar=0x" << bgProbeOriginSample.charBase << "-0x" << bgCharBlockEnd(bgProbeOriginSample)
+                      << " probeWatchTile=0x" << tileBase << "-0x" << tileEnd
+                      << std::dec;
+            if (bgProbeWordCount > 0) {
+                std::cerr << std::hex
+                          << " probeBlockWords@0x" << blockBase << '=' << dumpBgVramWords(memory, blockBase, bgProbeWordCount)
+                          << " probeMapWords@0x" << mapBase << '=' << dumpBgVramWords(memory, mapBase, bgProbeWordCount)
+                          << std::dec;
+            }
+        } else {
+            std::cerr << " probeValid=0";
+        }
+    }
+
+    std::cerr << "\n";
 }
 
 } // namespace
@@ -218,6 +538,18 @@ Memory& System::memory() {
     return memory_;
 }
 
+const Ppu& System::ppu() const {
+    return ppu_;
+}
+
+Ppu& System::ppu() {
+    return ppu_;
+}
+
+const System::FrameProfile& System::lastFrameProfile() const {
+    return lastFrameProfile_;
+}
+
 const CpuArm7tdmi& System::cpu() const {
     return cpu_;
 }
@@ -241,8 +573,11 @@ void System::reset() {
 void System::runFrame() {
     if (romData_.empty()) {
         framebuffer_.fill(0);
+        lastFrameProfile_ = FrameProfile{};
         return;
     }
+
+    const auto frameStart = Clock::now();
 
     ++frameCounter_;
     if (compatibilityProfile_.enableAdaptiveScanlineFallback && frameCounter_ <= 600U) {
@@ -263,6 +598,7 @@ void System::runFrame() {
     }
     constexpr int kNominalBusCyclesPerFrame =
         static_cast<int>(Ppu::CyclesPerLine) * static_cast<int>(Ppu::TotalLines);
+    const auto cpuStart = Clock::now();
     if (!frameSyncScanline) {
         runUntilFrameBoundary(kNominalBusCyclesPerFrame, 90000);
     } else {
@@ -270,7 +606,38 @@ void System::runFrame() {
         // sem perder o fechamento do frame no wrap do PPU.
         runUntilFrameBoundary(kNominalBusCyclesPerFrame, 300000);
     }
+    lastFrameProfile_.cpuNs = elapsedNs(cpuStart);
+
+    const auto renderStart = Clock::now();
     renderExecutionFrame();
+    lastFrameProfile_.renderNs = elapsedNs(renderStart);
+    lastFrameProfile_.ppu = ppu_.lastRenderStats();
+    lastFrameProfile_.totalNs = elapsedNs(frameStart);
+
+    if (frameProfileLoggingEnabled()) {
+        const int logEvery = frameProfileLogEvery();
+        if (logEvery > 0 && (frameCounter_ % static_cast<std::uint32_t>(logEvery)) == 0U) {
+            std::cerr << "[GBA][PROFILE] frame=" << frameCounter_
+                      << " totalMs=" << (static_cast<double>(lastFrameProfile_.totalNs) / 1000000.0)
+                      << " cpuMs=" << (static_cast<double>(lastFrameProfile_.cpuNs) / 1000000.0)
+                      << " renderMs=" << (static_cast<double>(lastFrameProfile_.renderNs) / 1000000.0)
+                      << " bgMs=" << (static_cast<double>(lastFrameProfile_.ppu.bgNs) / 1000000.0)
+                      << " objMs=" << (static_cast<double>(lastFrameProfile_.ppu.objNs) / 1000000.0)
+                      << " objWinMs=" << (static_cast<double>(lastFrameProfile_.ppu.objWindowNs) / 1000000.0)
+                      << " composeMs=" << (static_cast<double>(lastFrameProfile_.ppu.composeNs) / 1000000.0)
+                      << " objVisible=" << lastFrameProfile_.ppu.visibleObjectsFrame
+                      << " objPixelsTested=" << lastFrameProfile_.ppu.objPixelsTested
+                      << " objPixelsDrawn=" << lastFrameProfile_.ppu.objPixelsDrawn
+                      << " maxObjScanline=" << lastFrameProfile_.ppu.maxVisibleObjectsOnScanline
+                      << "\n";
+        }
+    }
+    if (frameSceneLoggingEnabled()) {
+        const int logEvery = frameSceneLogEvery();
+        if (logEvery > 0 && (frameCounter_ % static_cast<std::uint32_t>(logEvery)) == 0U) {
+            logGbaFrameSceneState(*this, frameCounter_);
+        }
+    }
 }
 
 void System::runInstructions(int instructionCount) {

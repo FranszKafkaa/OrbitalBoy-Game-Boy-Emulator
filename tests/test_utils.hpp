@@ -4,8 +4,10 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <iterator>
 #include <stdexcept>
 #include <string>
@@ -60,6 +62,68 @@ private:
     }
 
     std::filesystem::path path_;
+};
+
+struct ScopedEnvironmentVariable {
+    ScopedEnvironmentVariable(const std::string& name, const std::string& value)
+        : name_(name), previous_(read(name)) {
+        set(value);
+    }
+
+    ScopedEnvironmentVariable(const std::string& name, std::nullptr_t)
+        : name_(name), previous_(read(name)) {
+        clear();
+    }
+
+    ScopedEnvironmentVariable(const ScopedEnvironmentVariable&) = delete;
+    ScopedEnvironmentVariable& operator=(const ScopedEnvironmentVariable&) = delete;
+
+    ~ScopedEnvironmentVariable() {
+        if (previous_.has_value()) {
+            set(*previous_);
+        } else {
+            clear();
+        }
+    }
+
+private:
+    static std::optional<std::string> read(const std::string& name) {
+#if defined(_WIN32)
+        char* buffer = nullptr;
+        std::size_t size = 0;
+        if (_dupenv_s(&buffer, &size, name.c_str()) != 0 || buffer == nullptr) {
+            return std::nullopt;
+        }
+        std::string value(buffer);
+        std::free(buffer);
+        return value;
+#else
+        const char* value = std::getenv(name.c_str());
+        if (value == nullptr) {
+            return std::nullopt;
+        }
+        return std::string(value);
+#endif
+    }
+
+    void set(const std::string& value) {
+#if defined(_WIN32)
+        _putenv_s(name_.c_str(), value.c_str());
+#else
+        setenv(name_.c_str(), value.c_str(), 1);
+#endif
+    }
+
+    void clear() {
+#if defined(_WIN32)
+        _putenv_s(name_.c_str(), "");
+#else
+        unsetenv(name_.c_str());
+#endif
+    }
+
+    std::string name_;
+    std::optional<std::string> previous_;
 };
 
 struct RomPatch {
