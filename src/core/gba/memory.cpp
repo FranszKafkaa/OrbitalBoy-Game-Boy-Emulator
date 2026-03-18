@@ -21,6 +21,7 @@ constexpr std::array<u16, 4> kTimerIrqMasks = {
     static_cast<u16>(1U << 6U),
 };
 constexpr u16 kKeypadIrqMask = static_cast<u16>(1U << 12U);
+constexpr u32 kSoundBiasOffset = 0x0088U;
 constexpr u32 kSoundCntHOffset = 0x0082U;
 constexpr u32 kFifoAOffset = 0x00A0U;
 constexpr u32 kFifoBOffset = 0x00A4U;
@@ -326,8 +327,12 @@ void Memory::reset() {
     writeIo16(IfOffset, 0);
     writeIo16(ImeOffset, 0);
     writeIo16(WaitcntOffset, 0);
+    writeIo16(kSoundBiasOffset, 0x0200U);
     resetAudioFifo(0);
     resetAudioFifo(1);
+    audioFifoEvents_.clear();
+    audioRegisterWriteEvents_.clear();
+    audioFifoEventBaseCycles_ = 0;
     deferredBusCycles_ = 0;
     pramByteWriteCount_ = 0;
     vramByteWriteCount_ = 0;
@@ -346,6 +351,7 @@ void Memory::step(int cpuCycles) {
         return;
     }
     stepTimers(static_cast<std::uint32_t>(cpuCycles));
+    audioFifoEventBaseCycles_ += static_cast<std::uint32_t>(cpuCycles);
 }
 
 void Memory::beginAccessTiming() {
@@ -388,6 +394,23 @@ u8 Memory::audioFifoLastSample(int fifoIndex) const {
     return audioFifos_[static_cast<std::size_t>(fifoIndex)].lastSample;
 }
 
+const std::vector<Memory::AudioFifoEvent>& Memory::audioFifoEvents() const {
+    return audioFifoEvents_;
+}
+
+const std::vector<Memory::AudioRegisterWriteEvent>& Memory::audioRegisterWriteEvents() const {
+    return audioRegisterWriteEvents_;
+}
+
+void Memory::clearAudioFifoEvents() {
+    audioFifoEvents_.clear();
+    audioFifoEventBaseCycles_ = 0;
+}
+
+void Memory::clearAudioRegisterWriteEvents() {
+    audioRegisterWriteEvents_.clear();
+}
+
 Memory::AudioFifoState& Memory::audioFifo(int fifoIndex) {
     return audioFifos_[static_cast<std::size_t>(fifoIndex)];
 }
@@ -408,6 +431,22 @@ bool Memory::isSoundFifoAddress(u32 address, int& fifoIndex) {
     }
     fifoIndex = -1;
     return false;
+}
+
+bool Memory::isAudioRegisterEventOffset(u32 ioOffset) {
+    return (ioOffset >= 0x0060U && ioOffset <= 0x007DU)
+        || (ioOffset >= 0x0090U && ioOffset <= 0x009FU);
+}
+
+void Memory::recordAudioRegisterWrite(u32 ioOffset, u8 value) {
+    if (!isAudioRegisterEventOffset(ioOffset)) {
+        return;
+    }
+    audioRegisterWriteEvents_.push_back(AudioRegisterWriteEvent{
+        audioFifoEventBaseCycles_,
+        static_cast<u16>(ioOffset),
+        value,
+    });
 }
 
 void Memory::resetAudioFifo(int fifoIndex) {
@@ -472,7 +511,7 @@ void Memory::triggerSoundFifoDma(int fifoIndex) {
     }
 }
 
-void Memory::tickAudioFifosForTimer(std::size_t timerIndex, std::uint32_t overflowCount) {
+void Memory::tickAudioFifosForTimer(std::size_t timerIndex, std::uint32_t overflowCount, std::uint32_t cycleOffset) {
     if (overflowCount == 0U || timerIndex > 1U) {
         return;
     }
@@ -487,6 +526,11 @@ void Memory::tickAudioFifosForTimer(std::size_t timerIndex, std::uint32_t overfl
                 fifo.readPos = (fifo.readPos + 1U) % fifo.data.size();
                 --fifo.size;
             }
+            audioFifoEvents_.push_back(AudioFifoEvent{
+                audioFifoEventBaseCycles_ + cycleOffset,
+                static_cast<u8>(fifoIndex),
+                fifo.lastSample,
+            });
             if (fifo.size <= 16U) {
                 triggerSoundFifoDma(fifoIndex);
             }
@@ -548,9 +592,20 @@ void Memory::write8(u32 address, u8 value) {
     accountAccessTiming(address, 1, true);
     const u32 region = address >> 24U;
     if (region == 0x04U) {
+        const u32 ioOffset = address & 0xFFFFU;
         int fifoIndex = -1;
         if (isSoundFifoAddress(address, fifoIndex)) {
             writeAudioFifo(fifoIndex, value, 1);
+            return;
+        }
+        if (ioOffset < 0x400U) {
+            if (ioOffset == KeyInputOffset) {
+                return;
+            }
+            if (u8* ptr = writableBytePointer(address); ptr != nullptr) {
+                *ptr = value;
+                recordAudioRegisterWrite(ioOffset, value);
+            }
             return;
         }
     }
@@ -958,6 +1013,8 @@ void Memory::writeIo16(u32 ioOffset, u16 value) {
 
     io_[static_cast<std::size_t>(ioOffset)] = static_cast<u8>(value & 0xFFU);
     io_[static_cast<std::size_t>(ioOffset + 1U)] = static_cast<u8>((value >> 8U) & 0xFFU);
+    recordAudioRegisterWrite(ioOffset, io_[static_cast<std::size_t>(ioOffset)]);
+    recordAudioRegisterWrite(ioOffset + 1U, io_[static_cast<std::size_t>(ioOffset + 1U)]);
 
     if (ioOffset == KeyControlOffset) {
         updateKeypadInterrupt();
@@ -1222,13 +1279,19 @@ std::uint32_t Memory::tickTimer(std::size_t timerIndex, std::uint32_t cpuCycles,
 
     std::uint32_t increments = 0;
     const bool cascadeMode = timerIndex > 0 && (timer.control & 0x0004U) != 0U;
+    std::uint32_t prescaler = 1U;
+    std::uint32_t firstIncrementOffset = cpuCycles;
     if (cascadeMode) {
         increments = cascadedTicks;
     } else {
-        const std::uint32_t prescaler = timerPrescaler(timer.control);
+        prescaler = timerPrescaler(timer.control);
+        const std::uint32_t previousPrescalerCycles = timer.prescalerCycles;
         timer.prescalerCycles += cpuCycles;
         increments = timer.prescalerCycles / prescaler;
         timer.prescalerCycles %= prescaler;
+        if (increments != 0U) {
+            firstIncrementOffset = prescaler - previousPrescalerCycles;
+        }
     }
     if (increments == 0U) {
         return 0;
@@ -1236,10 +1299,14 @@ std::uint32_t Memory::tickTimer(std::size_t timerIndex, std::uint32_t cpuCycles,
 
     std::uint32_t overflowCount = 0;
     for (std::uint32_t i = 0; i < increments; ++i) {
+        const std::uint32_t incrementOffset = cascadeMode
+            ? cpuCycles
+            : std::min(cpuCycles, firstIncrementOffset + i * prescaler);
         const u32 next = static_cast<u32>(timer.counter) + 1U;
         if (next > 0xFFFFU) {
             timer.counter = timer.reload;
             ++overflowCount;
+            tickAudioFifosForTimer(timerIndex, 1U, incrementOffset);
             if ((timer.control & 0x0040U) != 0U) {
                 requestInterrupt(kTimerIrqMasks[timerIndex]);
             }
@@ -1251,10 +1318,6 @@ std::uint32_t Memory::tickTimer(std::size_t timerIndex, std::uint32_t cpuCycles,
     const std::size_t base = timerOffset(timerIndex);
     io_[base] = static_cast<u8>(timer.counter & 0xFFU);
     io_[base + 1U] = static_cast<u8>((timer.counter >> 8U) & 0xFFU);
-
-    if (overflowCount != 0U) {
-        tickAudioFifosForTimer(timerIndex, overflowCount);
-    }
 
     return overflowCount;
 }

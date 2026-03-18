@@ -4,6 +4,15 @@ project(gameboy_emulator_cpp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+foreach(_cfg ${CMAKE_CONFIGURATION_TYPES})
+    string(TOUPPER ${_cfg} _cfg_upper)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${_cfg_upper} ${CMAKE_BINARY_DIR})
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${_cfg_upper} ${CMAKE_BINARY_DIR})
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${_cfg_upper} ${CMAKE_BINARY_DIR})
+endforeach()
 
 if (NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
@@ -37,6 +46,7 @@ add_library(gbcore
     src/core/gba/memory.cpp
     src/core/gba/cpu.cpp
     src/core/gba/ppu.cpp
+    src/core/gba/apu.cpp
     src/core/cartridge.cpp
     src/core/cartridge/mappers/no_mbc.cpp
     src/core/cartridge/mappers/mbc1.cpp
@@ -99,10 +109,16 @@ if (GBEMU_USE_SDL2)
             target_link_libraries(gbemu PRIVATE ole32 windowscodecs)
         endif()
         target_compile_definitions(gbemu PRIVATE GBEMU_USE_SDL2=1 SDL_MAIN_HANDLED=1)
+        add_custom_command(TARGET gbemu POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL2::SDL2> $<TARGET_FILE_DIR:gbemu>
+        )
         find_package(SDL2_image CONFIG QUIET)
         if (SDL2_image_FOUND)
             target_link_libraries(gbemu PRIVATE SDL2_image::SDL2_image)
             target_compile_definitions(gbemu PRIVATE GBEMU_USE_SDL2_IMAGE=1)
+            add_custom_command(TARGET gbemu POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL2_image::SDL2_image> $<TARGET_FILE_DIR:gbemu>
+            )
         endif()
     else()
         message(WARNING "SDL2 not found. Building without realtime frontend (headless only).")
@@ -110,8 +126,8 @@ if (GBEMU_USE_SDL2)
 endif()
 
 if (MSVC)
-    target_compile_options(gbcore PRIVATE /W4)
-    target_compile_options(gbemu PRIVATE /W4)
+    target_compile_options(gbcore PRIVATE /W4 /EHsc)
+    target_compile_options(gbemu PRIVATE /W4 /EHsc)
 else()
     target_compile_options(gbcore PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(gbemu PRIVATE -Wall -Wextra -Wpedantic)
@@ -141,7 +157,7 @@ if (BUILD_TESTING)
     )
     target_link_libraries(gbemu_tests PRIVATE gbcore)
     if (MSVC)
-        target_compile_options(gbemu_tests PRIVATE /W4)
+        target_compile_options(gbemu_tests PRIVATE /W4 /EHsc)
         target_link_options(gbemu_tests PRIVATE /STACK:8388608)
     else()
         target_compile_options(gbemu_tests PRIVATE -Wall -Wextra -Wpedantic)

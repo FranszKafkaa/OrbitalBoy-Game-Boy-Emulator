@@ -25,6 +25,16 @@ public:
         std::vector<u8> mapper;
     };
 
+    Cartridge() = default;
+    ~Cartridge() = default;
+
+    // Non-copyable and non-movable: mappers hold references to rom_/ram_
+    // so moving would leave them dangling.
+    Cartridge(const Cartridge&) = delete;
+    Cartridge& operator=(const Cartridge&) = delete;
+    Cartridge(Cartridge&&) = delete;
+    Cartridge& operator=(Cartridge&&) = delete;
+
     bool loadFromFile(const std::string& path);
     u8 read(u16 address) const;
     void write(u16 address, u8 value);

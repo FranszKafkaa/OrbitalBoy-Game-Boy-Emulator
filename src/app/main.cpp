@@ -51,6 +51,9 @@ struct HeadlessGbaInputStep {
     gb::gba::InputState state{};
 };
 
+void writeLittleEndian32(std::ofstream& out, std::uint32_t value);
+void writeLittleEndian16(std::ofstream& out, std::uint16_t value);
+
 std::optional<gb::gba::InputState> parseHeadlessGbaInputButtons(const std::string& text) {
     gb::gba::InputState state{};
     std::size_t start = 0;
@@ -101,7 +104,6 @@ std::optional<HeadlessGbaInputStep> parseHeadlessGbaInputStep(const std::string&
     if (atPos == std::string::npos || atPos == 0U || atPos + 1U >= text.size()) {
         return std::nullopt;
     }
-
     const auto state = parseHeadlessGbaInputButtons(text.substr(0, atPos));
     if (!state.has_value()) {
         return std::nullopt;
@@ -125,6 +127,38 @@ std::optional<HeadlessGbaInputStep> parseHeadlessGbaInputStep(const std::string&
     } catch (const std::exception&) {
         return std::nullopt;
     }
+}
+
+bool writeStereoPcm16Wav(const std::string& path, int sampleRate, const std::vector<std::int16_t>& samples) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        return false;
+    }
+
+    const std::uint16_t channels = 2;
+    const std::uint16_t bitsPerSample = 16;
+    const std::uint32_t byteRate = static_cast<std::uint32_t>(sampleRate * channels * (bitsPerSample / 8));
+    const std::uint16_t blockAlign = static_cast<std::uint16_t>(channels * (bitsPerSample / 8));
+    const std::uint32_t dataBytes = static_cast<std::uint32_t>(samples.size() * sizeof(std::int16_t));
+    const std::uint32_t riffBytes = 36U + dataBytes;
+
+    out.write("RIFF", 4);
+    writeLittleEndian32(out, riffBytes);
+    out.write("WAVE", 4);
+    out.write("fmt ", 4);
+    writeLittleEndian32(out, 16U);
+    writeLittleEndian16(out, 1U);
+    writeLittleEndian16(out, channels);
+    writeLittleEndian32(out, static_cast<std::uint32_t>(sampleRate));
+    writeLittleEndian32(out, byteRate);
+    writeLittleEndian16(out, blockAlign);
+    writeLittleEndian16(out, bitsPerSample);
+    out.write("data", 4);
+    writeLittleEndian32(out, dataBytes);
+    if (!samples.empty()) {
+        out.write(reinterpret_cast<const char*>(samples.data()), static_cast<std::streamsize>(dataBytes));
+    }
+    return static_cast<bool>(out);
 }
 
 std::vector<HeadlessGbaInputStep> parseHeadlessGbaInputScript(const std::string& text) {
@@ -990,6 +1024,10 @@ int main(int argc, char** argv) {
 
         const std::string batteryPath = gb::batteryRamPathForRom(options.romPath);
         std::vector<HeadlessGbaInputStep> headlessInputScript{};
+        const bool dumpAudio = gb::environmentVariableEnabled("GBEMU_GBA_HEADLESS_DUMP_AUDIO");
+        const std::string dumpAudioPath = gb::readEnvironmentVariable("GBEMU_GBA_HEADLESS_DUMP_AUDIO_PATH")
+            .value_or("frame_gba.wav");
+        std::vector<std::int16_t> capturedAudio{};
         if (const auto inputScriptText = gb::readEnvironmentVariable("GBEMU_GBA_HEADLESS_INPUT_SCRIPT")) {
             headlessInputScript = parseHeadlessGbaInputScript(*inputScriptText);
             if (headlessInputScript.empty()) {
@@ -1003,9 +1041,26 @@ int main(int argc, char** argv) {
                 gbaSystem.setInputState(headlessGbaInputForFrame(headlessInputScript, i));
             }
             gbaSystem.runFrame();
+            if (dumpAudio) {
+                auto frameSamples = gbaSystem.apu().takeSamples();
+                if (!frameSamples.empty()) {
+                    capturedAudio.insert(capturedAudio.end(), frameSamples.begin(), frameSamples.end());
+                }
+            }
+        }
+        if (!dumpAudio) {
+            (void)gbaSystem.apu().takeSamples();
         }
         if (gbaSystem.hasPersistentBackup() && gbaSystem.saveBackupToFile(batteryPath)) {
             std::cout << "save interno GBA gravado: " << batteryPath << "\n";
+        }
+        if (dumpAudio) {
+            if (writeStereoPcm16Wav(dumpAudioPath, gb::gba::Apu::SampleRate, capturedAudio)) {
+                std::cout << "audio GBA salvo em " << dumpAudioPath
+                          << " (" << capturedAudio.size() / 2U << " amostras stereo)\n";
+            } else {
+                std::cerr << "falha ao salvar audio GBA em " << dumpAudioPath << "\n";
+            }
         }
         if (gb::environmentVariableEnabled("GBEMU_GBA_HEADLESS_DUMP_FRAME")) {
             const std::string dumpPath = gb::readEnvironmentVariable("GBEMU_GBA_HEADLESS_DUMP_PATH")

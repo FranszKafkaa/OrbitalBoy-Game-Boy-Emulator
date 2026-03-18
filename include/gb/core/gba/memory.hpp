@@ -11,6 +11,18 @@ namespace gb::gba {
 
 class Memory {
 public:
+    struct AudioFifoEvent {
+        std::uint32_t cycleOffset = 0;
+        u8 fifoIndex = 0;
+        u8 sample = 0;
+    };
+
+    struct AudioRegisterWriteEvent {
+        std::uint32_t cycleOffset = 0;
+        u16 ioOffset = 0;
+        u8 value = 0;
+    };
+
     enum class BackupType {
         None,
         Sram,
@@ -86,6 +98,10 @@ public:
     [[nodiscard]] int consumeDeferredBusCycles();
     [[nodiscard]] std::size_t audioFifoLevel(int fifoIndex) const;
     [[nodiscard]] u8 audioFifoLastSample(int fifoIndex) const;
+    [[nodiscard]] const std::vector<AudioFifoEvent>& audioFifoEvents() const;
+    [[nodiscard]] const std::vector<AudioRegisterWriteEvent>& audioRegisterWriteEvents() const;
+    void clearAudioFifoEvents();
+    void clearAudioRegisterWriteEvents();
     [[nodiscard]] std::uint64_t pramByteWriteCount() const;
     [[nodiscard]] std::uint64_t vramByteWriteCount() const;
     [[nodiscard]] std::uint64_t oamByteWriteCount() const;
@@ -134,10 +150,12 @@ private:
     void handleSoundControlWrite(u16 value);
     void resetAudioFifo(int fifoIndex);
     void writeAudioFifo(int fifoIndex, u32 value, int bytes);
-    void tickAudioFifosForTimer(std::size_t timerIndex, std::uint32_t overflowCount);
+    void tickAudioFifosForTimer(std::size_t timerIndex, std::uint32_t overflowCount, std::uint32_t cycleOffset);
     void triggerSoundFifoDma(int fifoIndex);
     [[nodiscard]] bool isSoundFifoTimerSelected(int fifoIndex, std::size_t timerIndex) const;
     [[nodiscard]] static bool isSoundFifoAddress(u32 address, int& fifoIndex);
+    [[nodiscard]] static bool isAudioRegisterEventOffset(u32 ioOffset);
+    void recordAudioRegisterWrite(u32 ioOffset, u8 value);
     [[nodiscard]] AudioFifoState& audioFifo(int fifoIndex);
     [[nodiscard]] const AudioFifoState& audioFifo(int fifoIndex) const;
 
@@ -203,6 +221,9 @@ private:
     bool accessTimingActive_ = false;
     int deferredBusCycles_ = 0;
     std::array<AudioFifoState, 2> audioFifos_{};
+    std::vector<AudioFifoEvent> audioFifoEvents_{};
+    std::vector<AudioRegisterWriteEvent> audioRegisterWriteEvents_{};
+    std::uint32_t audioFifoEventBaseCycles_ = 0;
     std::uint64_t pramByteWriteCount_ = 0;
     std::uint64_t vramByteWriteCount_ = 0;
     std::uint64_t oamByteWriteCount_ = 0;

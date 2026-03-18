@@ -213,7 +213,7 @@ void writeDecodedBufferAligned32(Memory& memory, u32 dst, const std::vector<u8>&
     const std::size_t paddedSize = (decoded.size() + 3U) & ~std::size_t{3U};
     logVramTransfer("decode", 0U, dst, paddedSize, false);
     if (u8* directDst = memory.directWritePointer(dst, paddedSize); directDst != nullptr) {
-        std::fill_n(directDst, static_cast<std::ptrdiff_t>(paddedSize), 0U);
+        std::fill_n(directDst, static_cast<std::ptrdiff_t>(paddedSize), static_cast<u8>(0U));
         if (!decoded.empty()) {
             std::memcpy(directDst, decoded.data(), decoded.size());
         }

@@ -1464,12 +1464,38 @@ void Ppu::renderTextBackground(int bgIndex, std::array<LayerPixel, FramebufferSi
     if (bgIndex < 0 || bgIndex >= 4 || !bgEnabledByDebugMask(activeDebugConfig_, bgIndex)) {
         return;
     }
+
+    const auto& vram = activeVram();
+    const auto& pram = activePram();
+    const bool logBg = ppuBgLoggingEnabled();
+    const bool logBgPipeline = ppuBgPipelineLoggingEnabled();
+    const bool needDebugSamples = logBg || logBgPipeline;
+    const int logLayerFilter = ppuBgLogLayerFilter();
+    const int logXFilter = ppuBgLogXFilter();
+    const int logYFilter = ppuBgLogYFilter();
+
     for (int y = 0; y < ScreenHeight; ++y) {
         const RasterLineSnapshot line = rasterSnapshotForLine(y);
         if ((line.dispcnt & kBgEnableMasks[bgIndex]) == 0U) {
             continue;
         }
+
+        const u16 bgcnt = line.bgCnt[static_cast<std::size_t>(bgIndex)];
+        const u16 hofs = static_cast<u16>(line.bgHofs[static_cast<std::size_t>(bgIndex)] & 0x01FFU);
+        const u16 vofs = static_cast<u16>(line.bgVofs[static_cast<std::size_t>(bgIndex)] & 0x01FFU);
+        const u8 priority = static_cast<u8>(bgcnt & 0x3U);
+        const bool color256 = (bgcnt & 0x0080U) != 0U;
+        const bool mosaicEnabled = (bgcnt & kBgMosaicMask) != 0U;
+        const u32 charBase = static_cast<u32>((bgcnt >> 2U) & 0x3U) * 0x4000U;
+        const u32 screenBase = static_cast<u32>((bgcnt >> 8U) & 0x1FU) * 0x800U;
+        const u32 sizeIndex = static_cast<u32>((bgcnt >> 14U) & 0x3U);
+        const u32 screenWidth = textBgScreenWidth(sizeIndex);
+        const u32 screenHeight = textBgScreenHeight(sizeIndex);
+        const int mosaicXSpan = mosaicEnabled ? mosaicSpan(line.mosaic, 0U) : 1;
+        const int mosaicYSpan = mosaicEnabled ? mosaicSpan(line.mosaic, 4U) : 1;
+        const int sourceY = mosaicEnabled ? mosaicSampleCoord(y, mosaicYSpan) : y;
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
+
         for (int x = 0; x < ScreenWidth; ++x) {
             const auto pixelIndex = static_cast<std::size_t>(y) * static_cast<std::size_t>(ScreenWidth)
                 + static_cast<std::size_t>(x);
@@ -1477,26 +1503,90 @@ void Ppu::renderTextBackground(int bgIndex, std::array<LayerPixel, FramebufferSi
             if (!layerEnabledByWindowMask(windowMask, static_cast<u8>(bgIndex))) {
                 continue;
             }
-            TextBgDebugSample sample{};
-            if (!decodeTextBgSample(line, bgIndex, x, y, sample) || !sample.visible) {
+
+            const int sourceX = mosaicEnabled ? mosaicSampleCoord(x, mosaicXSpan) : x;
+            const u32 sx = (static_cast<u32>(sourceX) + static_cast<u32>(hofs)) % screenWidth;
+            const u32 sy = (static_cast<u32>(sourceY) + static_cast<u32>(vofs)) % screenHeight;
+            const u32 tileX = sx / 8U;
+            const u32 tileY = sy / 8U;
+            const u8 pixelX = static_cast<u8>(sx & 7U);
+            const u8 pixelY = static_cast<u8>(sy & 7U);
+            const std::size_t mapBase = static_cast<std::size_t>(screenBase) + mode0ScreenBlockOffset(sizeIndex, tileX, tileY);
+            const std::size_t mapIndex = static_cast<std::size_t>((tileY % 32U) * 32U + (tileX % 32U));
+            const std::size_t mapAddress = mapBase + mapIndex * 2U;
+            if (mapAddress + 1U >= vram.size()) {
                 continue;
             }
+            const u16 mapEntry = static_cast<u16>(
+                static_cast<u16>(vram[mapAddress])
+                | static_cast<u16>(static_cast<u16>(vram[mapAddress + 1U]) << 8U)
+            );
+            const u16 tileNumber = static_cast<u16>(mapEntry & 0x03FFU);
+            const bool hflip = (mapEntry & 0x0400U) != 0U;
+            const bool vflip = (mapEntry & 0x0800U) != 0U;
+            const u8 paletteBank = static_cast<u8>((mapEntry >> 12U) & 0x0FU);
+            const u8 tilePx = hflip ? static_cast<u8>(7U - pixelX) : pixelX;
+            const u8 tilePy = vflip ? static_cast<u8>(7U - pixelY) : pixelY;
 
-            // Only call the logger when it will actually emit something:
-            // at the corner pixels (unconditional early samples) or when
-            // the per-pixel filter selects this exact pixel/layer.
-            if ((x < 4 && y < 2)
-                || (ppuBgLogLayerFilter() == bgIndex
-                    && (ppuBgLogXFilter() < 0 || ppuBgLogXFilter() == x)
-                    && (ppuBgLogYFilter() < 0 || ppuBgLogYFilter() == y))) {
-                logBgDecodeSample(sample);
+            u8 colorIndex = 0U;
+            if (color256) {
+                const std::size_t tileAddress = static_cast<std::size_t>(charBase)
+                    + static_cast<std::size_t>(tileNumber) * 64U
+                    + static_cast<std::size_t>(tilePy) * 8U
+                    + static_cast<std::size_t>(tilePx);
+                if (tileAddress >= kTextBgCharDataLimit || tileAddress >= vram.size()) {
+                    continue;
+                }
+                colorIndex = vram[tileAddress];
+                if (colorIndex == 0U) {
+                    continue;
+                }
+            } else {
+                const std::size_t tileAddress = static_cast<std::size_t>(charBase)
+                    + static_cast<std::size_t>(tileNumber) * 32U
+                    + static_cast<std::size_t>(tilePy) * 4U
+                    + static_cast<std::size_t>(tilePx / 2U);
+                if (tileAddress >= kTextBgCharDataLimit || tileAddress >= vram.size()) {
+                    continue;
+                }
+                const u8 packed = vram[tileAddress];
+                const u8 index4 = (tilePx & 1U) == 0U
+                    ? static_cast<u8>(packed & 0x0FU)
+                    : static_cast<u8>((packed >> 4U) & 0x0FU);
+                if (index4 == 0U) {
+                    continue;
+                }
+                colorIndex = static_cast<u8>(paletteBank * 16U + index4);
+            }
+
+            const std::size_t paletteByteIndex = static_cast<std::size_t>(colorIndex) * 2U;
+            if (paletteByteIndex + 1U >= pram.size()) {
+                continue;
+            }
+            const u16 rawColor555 = static_cast<u16>(
+                static_cast<u16>(pram[paletteByteIndex])
+                | static_cast<u16>(static_cast<u16>(pram[paletteByteIndex + 1U]) << 8U)
+            );
+
+            if (needDebugSamples) {
+                const bool selectedByFilter = (logLayerFilter < 0 || logLayerFilter == bgIndex)
+                    && (logXFilter < 0 || logXFilter == x)
+                    && (logYFilter < 0 || logYFilter == y);
+                const bool anyExplicitFilter = logLayerFilter >= 0 || logXFilter >= 0 || logYFilter >= 0;
+                const bool earlyProbe = !anyExplicitFilter && (x < 4 && y < 2);
+                if (selectedByFilter || earlyProbe) {
+                    TextBgDebugSample sample{};
+                    if (decodeTextBgSample(line, bgIndex, x, y, sample) && sample.visible && logBg) {
+                        logBgDecodeSample(sample);
+                    }
+                }
             }
 
             composeLayer(
                 layerPixels,
                 pixelIndex,
-                readBgPaletteColor(sample.colorIndex),
-                sample.priority,
+                rawColor555,
+                priority,
                 static_cast<u8>(bgIndex)
             );
         }

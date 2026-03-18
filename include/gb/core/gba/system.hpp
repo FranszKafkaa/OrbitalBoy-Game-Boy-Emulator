@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "gb/core/gba/apu.hpp"
 #include "gb/core/gba/cpu.hpp"
 #include "gb/core/gba/memory.hpp"
 #include "gb/core/gba/ppu.hpp"
@@ -55,6 +56,10 @@ public:
         std::uint64_t totalNs = 0;
         std::uint64_t cpuNs = 0;
         std::uint64_t renderNs = 0;
+        std::uint64_t cpuStepNs = 0;
+        std::uint64_t memoryNs = 0;
+        std::uint64_t stepPpuNs = 0;
+        std::uint64_t apuNs = 0;
         Ppu::RenderStats ppu{};
     };
 
@@ -83,14 +88,17 @@ public:
     [[nodiscard]] const FrameProfile& lastFrameProfile() const;
     [[nodiscard]] const CpuArm7tdmi& cpu() const;
     [[nodiscard]] CpuArm7tdmi& cpu();
+    [[nodiscard]] const Apu& apu() const;
+    [[nodiscard]] Apu& apu();
 
     void reset();
-    void runFrame();
+    void runFrame(bool renderFrame = true);
     void runInstructions(int instructionCount);
     void setInputState(const InputState& input);
 
 private:
-    void drainDeferredBusCycles(int& accumulatedBusCycles);
+    void flushPendingApuCycles(int& pendingApuCycles);
+    void drainDeferredBusCycles(int& accumulatedBusCycles, int& pendingApuCycles);
     void runUntilFrameBoundary(int targetBusCycles, int instructionLimit);
     void refreshMetadata();
     void configureCompatibilityProfile();
@@ -104,11 +112,17 @@ private:
     Memory memory_{};
     Ppu ppu_{};
     CpuArm7tdmi cpu_{};
+    Apu apu_{};
     std::array<u16, FramebufferSize> framebuffer_{};
     FrameProfile lastFrameProfile_{};
     std::uint32_t frameCounter_ = 0;
     bool adaptiveScanlineSync_ = false;
     int startupNoDisplayFrames_ = 0;
+    bool collectStageTiming_ = false;
+    std::uint64_t frameCpuStepNs_ = 0;
+    std::uint64_t frameMemoryNs_ = 0;
+    std::uint64_t frameStepPpuNs_ = 0;
+    std::uint64_t frameApuNs_ = 0;
 };
 
 } // namespace gb::gba

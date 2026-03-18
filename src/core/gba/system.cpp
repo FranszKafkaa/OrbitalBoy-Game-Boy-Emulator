@@ -122,6 +122,11 @@ bool frameProfileLoggingEnabled() {
     return gb::environmentVariableEnabled("GBEMU_GBA_LOG_PROFILE");
 }
 
+bool frameStageTimingEnabled() {
+    return gb::environmentVariableEnabled("GBEMU_GBA_LOG_FRAME_TIMING")
+        || frameProfileLoggingEnabled();
+}
+
 bool frameSceneLoggingEnabled() {
     return gb::environmentVariableEnabled("GBEMU_GBA_LOG_SCENE")
         || gb::environmentVariableEnabled("GBEMU_GBA_LOG_FRAME_STATE");
@@ -558,10 +563,23 @@ CpuArm7tdmi& System::cpu() {
     return cpu_;
 }
 
+const Apu& System::apu() const {
+    return apu_;
+}
+
+Apu& System::apu() {
+    return apu_;
+}
+
 void System::reset() {
     frameCounter_ = 0;
     adaptiveScanlineSync_ = false;
     startupNoDisplayFrames_ = 0;
+    collectStageTiming_ = false;
+    frameCpuStepNs_ = 0;
+    frameMemoryNs_ = 0;
+    frameStepPpuNs_ = 0;
+    frameApuNs_ = 0;
     memory_.reset();
     ppu_.connectMemory(&memory_);
     ppu_.reset();
@@ -570,7 +588,7 @@ void System::reset() {
     renderBootstrapFrame();
 }
 
-void System::runFrame() {
+void System::runFrame(bool renderFrame) {
     if (romData_.empty()) {
         framebuffer_.fill(0);
         lastFrameProfile_ = FrameProfile{};
@@ -598,6 +616,11 @@ void System::runFrame() {
     }
     constexpr int kNominalBusCyclesPerFrame =
         static_cast<int>(Ppu::CyclesPerLine) * static_cast<int>(Ppu::TotalLines);
+    collectStageTiming_ = frameStageTimingEnabled();
+    frameCpuStepNs_ = 0;
+    frameMemoryNs_ = 0;
+    frameStepPpuNs_ = 0;
+    frameApuNs_ = 0;
     const auto cpuStart = Clock::now();
     if (!frameSyncScanline) {
         runUntilFrameBoundary(kNominalBusCyclesPerFrame, 90000);
@@ -607,11 +630,20 @@ void System::runFrame() {
         runUntilFrameBoundary(kNominalBusCyclesPerFrame, 300000);
     }
     lastFrameProfile_.cpuNs = elapsedNs(cpuStart);
+    lastFrameProfile_.cpuStepNs = collectStageTiming_ ? frameCpuStepNs_ : 0;
+    lastFrameProfile_.memoryNs = collectStageTiming_ ? frameMemoryNs_ : 0;
+    lastFrameProfile_.stepPpuNs = collectStageTiming_ ? frameStepPpuNs_ : 0;
+    lastFrameProfile_.apuNs = collectStageTiming_ ? frameApuNs_ : 0;
 
-    const auto renderStart = Clock::now();
-    renderExecutionFrame();
-    lastFrameProfile_.renderNs = elapsedNs(renderStart);
-    lastFrameProfile_.ppu = ppu_.lastRenderStats();
+    if (renderFrame) {
+        const auto renderStart = Clock::now();
+        renderExecutionFrame();
+        lastFrameProfile_.renderNs = elapsedNs(renderStart);
+        lastFrameProfile_.ppu = ppu_.lastRenderStats();
+    } else {
+        lastFrameProfile_.renderNs = 0;
+        lastFrameProfile_.ppu = Ppu::RenderStats{};
+    }
     lastFrameProfile_.totalNs = elapsedNs(frameStart);
 
     if (frameProfileLoggingEnabled()) {
@@ -621,6 +653,10 @@ void System::runFrame() {
                       << " totalMs=" << (static_cast<double>(lastFrameProfile_.totalNs) / 1000000.0)
                       << " cpuMs=" << (static_cast<double>(lastFrameProfile_.cpuNs) / 1000000.0)
                       << " renderMs=" << (static_cast<double>(lastFrameProfile_.renderNs) / 1000000.0)
+                      << " cpuStepMs=" << (static_cast<double>(lastFrameProfile_.cpuStepNs) / 1000000.0)
+                      << " memMs=" << (static_cast<double>(lastFrameProfile_.memoryNs) / 1000000.0)
+                      << " stepPpuMs=" << (static_cast<double>(lastFrameProfile_.stepPpuNs) / 1000000.0)
+                      << " apuMs=" << (static_cast<double>(lastFrameProfile_.apuNs) / 1000000.0)
                       << " bgMs=" << (static_cast<double>(lastFrameProfile_.ppu.bgNs) / 1000000.0)
                       << " objMs=" << (static_cast<double>(lastFrameProfile_.ppu.objNs) / 1000000.0)
                       << " objWinMs=" << (static_cast<double>(lastFrameProfile_.ppu.objWindowNs) / 1000000.0)
@@ -644,27 +680,94 @@ void System::runInstructions(int instructionCount) {
     if (instructionCount <= 0) {
         return;
     }
+
+    constexpr int kApuFlushThresholdCycles = 2048;
+    int pendingApuCycles = 0;
     for (int i = 0; i < instructionCount; ++i) {
+        Clock::time_point cpuStepStart{};
+        if (collectStageTiming_) {
+            cpuStepStart = Clock::now();
+        }
         int totalBusCycles = cpu_.step();
+        if (collectStageTiming_) {
+            frameCpuStepNs_ += elapsedNs(cpuStepStart);
+        }
         if (totalBusCycles <= 0) {
             break;
         }
+        Clock::time_point memoryStart{};
+        if (collectStageTiming_) {
+            memoryStart = Clock::now();
+        }
         memory_.step(totalBusCycles);
+        if (collectStageTiming_) {
+            frameMemoryNs_ += elapsedNs(memoryStart);
+        }
         for (int extra = memory_.consumeDeferredBusCycles(); extra > 0; extra = memory_.consumeDeferredBusCycles()) {
             totalBusCycles += extra;
+            Clock::time_point extraMemoryStart{};
+            if (collectStageTiming_) {
+                extraMemoryStart = Clock::now();
+            }
             memory_.step(extra);
+            if (collectStageTiming_) {
+                frameMemoryNs_ += elapsedNs(extraMemoryStart);
+            }
+        }
+        Clock::time_point ppuStart{};
+        if (collectStageTiming_) {
+            ppuStart = Clock::now();
         }
         ppu_.step(totalBusCycles);
+        if (collectStageTiming_) {
+            frameStepPpuNs_ += elapsedNs(ppuStart);
+        }
+        pendingApuCycles += totalBusCycles;
         int ignoredAccumulatedCycles = 0;
-        drainDeferredBusCycles(ignoredAccumulatedCycles);
+        drainDeferredBusCycles(ignoredAccumulatedCycles, pendingApuCycles);
+        if (pendingApuCycles >= kApuFlushThresholdCycles) {
+            flushPendingApuCycles(pendingApuCycles);
+        }
     }
+    flushPendingApuCycles(pendingApuCycles);
 }
 
-void System::drainDeferredBusCycles(int& accumulatedBusCycles) {
+void System::flushPendingApuCycles(int& pendingApuCycles) {
+    if (pendingApuCycles <= 0) {
+        return;
+    }
+
+    Clock::time_point apuStart{};
+    if (collectStageTiming_) {
+        apuStart = Clock::now();
+    }
+    apu_.tick(pendingApuCycles, memory_);
+    if (collectStageTiming_) {
+        frameApuNs_ += elapsedNs(apuStart);
+    }
+    pendingApuCycles = 0;
+}
+
+void System::drainDeferredBusCycles(int& accumulatedBusCycles, int& pendingApuCycles) {
     for (int extra = memory_.consumeDeferredBusCycles(); extra > 0; extra = memory_.consumeDeferredBusCycles()) {
         accumulatedBusCycles += extra;
+        Clock::time_point memoryStart{};
+        if (collectStageTiming_) {
+            memoryStart = Clock::now();
+        }
         memory_.step(extra);
+        if (collectStageTiming_) {
+            frameMemoryNs_ += elapsedNs(memoryStart);
+        }
+        Clock::time_point ppuStart{};
+        if (collectStageTiming_) {
+            ppuStart = Clock::now();
+        }
         ppu_.step(extra);
+        if (collectStageTiming_) {
+            frameStepPpuNs_ += elapsedNs(ppuStart);
+        }
+        pendingApuCycles += extra;
     }
 }
 
@@ -673,24 +776,58 @@ void System::runUntilFrameBoundary(int targetBusCycles, int instructionLimit) {
         return;
     }
 
+    constexpr int kApuFlushThresholdCycles = 2048;
     int accumulatedBusCycles = 0;
+    int pendingApuCycles = 0;
     bool wrappedScanline = false;
     int instructions = 0;
     while (instructions < instructionLimit) {
         const std::uint16_t previousLine = ppu_.scanline();
+        Clock::time_point cpuStepStart{};
+        if (collectStageTiming_) {
+            cpuStepStart = Clock::now();
+        }
         int totalBusCycles = cpu_.step();
+        if (collectStageTiming_) {
+            frameCpuStepNs_ += elapsedNs(cpuStepStart);
+        }
         if (totalBusCycles <= 0) {
             break;
         }
         accumulatedBusCycles += totalBusCycles;
+        Clock::time_point memoryStart{};
+        if (collectStageTiming_) {
+            memoryStart = Clock::now();
+        }
         memory_.step(totalBusCycles);
+        if (collectStageTiming_) {
+            frameMemoryNs_ += elapsedNs(memoryStart);
+        }
         for (int extra = memory_.consumeDeferredBusCycles(); extra > 0; extra = memory_.consumeDeferredBusCycles()) {
             accumulatedBusCycles += extra;
             totalBusCycles += extra;
+            Clock::time_point extraMemoryStart{};
+            if (collectStageTiming_) {
+                extraMemoryStart = Clock::now();
+            }
             memory_.step(extra);
+            if (collectStageTiming_) {
+                frameMemoryNs_ += elapsedNs(extraMemoryStart);
+            }
+        }
+        Clock::time_point ppuStart{};
+        if (collectStageTiming_) {
+            ppuStart = Clock::now();
         }
         ppu_.step(totalBusCycles);
-        drainDeferredBusCycles(accumulatedBusCycles);
+        if (collectStageTiming_) {
+            frameStepPpuNs_ += elapsedNs(ppuStart);
+        }
+        pendingApuCycles += totalBusCycles;
+        drainDeferredBusCycles(accumulatedBusCycles, pendingApuCycles);
+        if (pendingApuCycles >= kApuFlushThresholdCycles) {
+            flushPendingApuCycles(pendingApuCycles);
+        }
         ++instructions;
 
         const std::uint16_t currentLine = ppu_.scanline();
@@ -698,6 +835,7 @@ void System::runUntilFrameBoundary(int targetBusCycles, int instructionLimit) {
             wrappedScanline = true;
         }
         if (wrappedScanline && accumulatedBusCycles >= targetBusCycles) {
+            flushPendingApuCycles(pendingApuCycles);
             return;
         }
     }
@@ -707,22 +845,55 @@ void System::runUntilFrameBoundary(int targetBusCycles, int instructionLimit) {
     constexpr int kRecoveryInstructionLimit = 20000;
     for (int i = 0; i < kRecoveryInstructionLimit; ++i) {
         const std::uint16_t previousLine = ppu_.scanline();
+        Clock::time_point cpuStepStart{};
+        if (collectStageTiming_) {
+            cpuStepStart = Clock::now();
+        }
         int totalBusCycles = cpu_.step();
+        if (collectStageTiming_) {
+            frameCpuStepNs_ += elapsedNs(cpuStepStart);
+        }
         if (totalBusCycles <= 0) {
             break;
         }
+        Clock::time_point memoryStart{};
+        if (collectStageTiming_) {
+            memoryStart = Clock::now();
+        }
         memory_.step(totalBusCycles);
+        if (collectStageTiming_) {
+            frameMemoryNs_ += elapsedNs(memoryStart);
+        }
         for (int extra = memory_.consumeDeferredBusCycles(); extra > 0; extra = memory_.consumeDeferredBusCycles()) {
             totalBusCycles += extra;
+            Clock::time_point extraMemoryStart{};
+            if (collectStageTiming_) {
+                extraMemoryStart = Clock::now();
+            }
             memory_.step(extra);
+            if (collectStageTiming_) {
+                frameMemoryNs_ += elapsedNs(extraMemoryStart);
+            }
+        }
+        Clock::time_point ppuStart{};
+        if (collectStageTiming_) {
+            ppuStart = Clock::now();
         }
         ppu_.step(totalBusCycles);
+        if (collectStageTiming_) {
+            frameStepPpuNs_ += elapsedNs(ppuStart);
+        }
+        pendingApuCycles += totalBusCycles;
         int ignoredAccumulatedCycles = 0;
-        drainDeferredBusCycles(ignoredAccumulatedCycles);
+        drainDeferredBusCycles(ignoredAccumulatedCycles, pendingApuCycles);
+        if (pendingApuCycles >= kApuFlushThresholdCycles) {
+            flushPendingApuCycles(pendingApuCycles);
+        }
         if (ppu_.scanline() < previousLine) {
             break;
         }
     }
+    flushPendingApuCycles(pendingApuCycles);
 }
 
 void System::setInputState(const InputState& input) {
