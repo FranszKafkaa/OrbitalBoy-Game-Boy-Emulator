@@ -228,6 +228,7 @@ private:
     ) const;
     [[nodiscard]] u8 windowMaskForPixel(int x, int y) const;
     [[nodiscard]] u8 windowMaskForPixel(int x, int y, const RasterLineSnapshot& line) const;
+    [[nodiscard]] u8 windowMaskForPixelUncached(int x, int y, const RasterLineSnapshot& line) const;
     [[nodiscard]] static bool pointInsideWindowRange(int value, int start, int end, int limit);
     [[nodiscard]] static bool pointInsideWindowRect(int x, int y, u16 winH, u16 winV);
     [[nodiscard]] static bool layerEnabledByWindowMask(u8 mask, u8 layerBit);
@@ -283,6 +284,9 @@ private:
     mutable DebugConfig activeDebugConfig_{};
     mutable RenderStats lastRenderStats_{};
     mutable const std::array<bool, FramebufferSize>* activeObjWindowMask_ = nullptr;
+    mutable bool windowMaskCacheEnabled_ = false;
+    mutable std::array<u8, FramebufferSize> windowMaskCache_{};
+    mutable std::array<bool, VisibleLines> windowMaskCacheLineReady_{};
     mutable std::array<LayerPixel, FramebufferSize> layerScratch_{};
     mutable std::array<bool, FramebufferSize> objWindowScratch_{};
 };

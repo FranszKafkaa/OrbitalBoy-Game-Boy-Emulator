@@ -23,8 +23,9 @@ constexpr int kPsgFrameSequencerPeriod = 8192;
 constexpr int kHalfVolumeScale = 1;
 constexpr int kFullVolumeScale = 2;
 constexpr int kBiasMask = 0x03FF;
-constexpr float kOutputScale = 56.0f;
-constexpr float kHighPassA = 0.998f;
+constexpr float kDefaultOutputScale = 56.0f;
+constexpr float kDefaultHighPassA = 0.998f;
+constexpr float kDefaultLowPassA = 0.12f;
 
 constexpr std::array<std::array<int, 8>, 4> kDutyPatterns = {{
     {{0, 0, 0, 0, 0, 0, 0, 1}},
@@ -65,12 +66,48 @@ int gbaAudioStateLogEvery() {
     return every;
 }
 
+float readFloatEnvironmentOrDefault(const char* name, float fallback) {
+    const auto value = gb::readEnvironmentVariable(name);
+    if (!value.has_value() || value->empty()) {
+        return fallback;
+    }
+    try {
+        return static_cast<float>(std::stod(*value));
+    } catch (...) {
+        return fallback;
+    }
+}
+
+float gbaAudioOutputScale() {
+    static const float scale = std::clamp(
+        readFloatEnvironmentOrDefault("GBEMU_GBA_AUDIO_OUTPUT_SCALE", kDefaultOutputScale),
+        1.0f,
+        256.0f);
+    return scale;
+}
+
+float gbaAudioHighPassCoeff() {
+    static const float coeff = std::clamp(
+        readFloatEnvironmentOrDefault("GBEMU_GBA_AUDIO_HIGHPASS_A", kDefaultHighPassA),
+        0.0f,
+        0.99995f);
+    return coeff;
+}
+
+float gbaAudioLowPassCoeff() {
+    static const float coeff = std::clamp(
+        readFloatEnvironmentOrDefault("GBEMU_GBA_AUDIO_LOWPASS_A", kDefaultLowPassA),
+        0.0f,
+        1.0f);
+    return coeff;
+}
+
 u8 envPeriodOr8(u8 period) {
     return period == 0 ? 8 : period;
 }
 
-int16_t clampOutputSample(float sample) {
-    return static_cast<int16_t>(std::clamp(sample * kOutputScale, -32768.0f, 32767.0f));
+int16_t clampOutputSample(float sample, float outputScale) {
+    return static_cast<int16_t>(std::clamp(sample * outputScale, -32768.0f, 32767.0f));
 }
 
 void appendRepeatedStereoSamples(std::vector<int16_t>& buffer, int16_t left, int16_t right, int count) {
@@ -87,12 +124,32 @@ void appendRepeatedStereoSamples(std::vector<int16_t>& buffer, int16_t left, int
     }
 }
 
-int16_t filterHardwareDacSample(int sample, float& prevIn, float& prevOut) {
+int16_t filterHardwareDacSample(
+    int sample,
+    float highPassA,
+    float lowPassA,
+    float outputScale,
+    float& prevIn,
+    float& prevOut,
+    float& lowPassPrevOut
+) {
     const float input = static_cast<float>(sample);
-    const float filtered = (input - prevIn) + (kHighPassA * prevOut);
+    float filtered = input;
+
+    if (highPassA > 0.0f) {
+        filtered = (input - prevIn) + (highPassA * prevOut);
+    }
     prevIn = input;
     prevOut = filtered;
-    return clampOutputSample(filtered);
+
+    if (lowPassA > 0.0f) {
+        lowPassPrevOut += lowPassA * (filtered - lowPassPrevOut);
+        filtered = lowPassPrevOut;
+    } else {
+        lowPassPrevOut = filtered;
+    }
+
+    return clampOutputSample(filtered, outputScale);
 }
 
 } // namespace
@@ -121,6 +178,8 @@ void Apu::reset() {
     hpPrevOutL_ = 0.0f;
     hpPrevInR_ = 0.0f;
     hpPrevOutR_ = 0.0f;
+    lpPrevOutL_ = 0.0f;
+    lpPrevOutR_ = 0.0f;
 }
 
 const Apu::TickStats& Apu::lastTickStats() const {
@@ -570,6 +629,9 @@ void Apu::tick(int cpuCycles, Memory& memory) {
     const int bias = static_cast<int>(soundBias & kBiasMask);
     const bool disablePsg = gbaAudioDisablePsg();
     const bool disableFifo = gbaAudioDisableFifo();
+    const float outputScale = gbaAudioOutputScale();
+    const float highPassA = gbaAudioHighPassCoeff();
+    const float lowPassA = gbaAudioLowPassCoeff();
 
     const auto applyBias = [bias](int sample) {
         int biased = sample + bias;
@@ -622,8 +684,8 @@ void Apu::tick(int cpuCycles, Memory& memory) {
 
             appendRepeatedStereoSamples(
                 sampleBuffer_,
-                filterHardwareDacSample(applyBias(left), hpPrevInL_, hpPrevOutL_),
-                filterHardwareDacSample(applyBias(right), hpPrevInR_, hpPrevOutR_),
+                filterHardwareDacSample(applyBias(left), highPassA, lowPassA, outputScale, hpPrevInL_, hpPrevOutL_, lpPrevOutL_),
+                filterHardwareDacSample(applyBias(right), highPassA, lowPassA, outputScale, hpPrevInR_, hpPrevOutR_, lpPrevOutR_),
                 sampleCount);
             return;
         }
@@ -659,8 +721,22 @@ void Apu::tick(int cpuCycles, Memory& memory) {
                 }
             }
 
-            sampleBuffer_.push_back(filterHardwareDacSample(applyBias(left), hpPrevInL_, hpPrevOutL_));
-            sampleBuffer_.push_back(filterHardwareDacSample(applyBias(right), hpPrevInR_, hpPrevOutR_));
+            sampleBuffer_.push_back(filterHardwareDacSample(
+                applyBias(left),
+                highPassA,
+                lowPassA,
+                outputScale,
+                hpPrevInL_,
+                hpPrevOutL_,
+                lpPrevOutL_));
+            sampleBuffer_.push_back(filterHardwareDacSample(
+                applyBias(right),
+                highPassA,
+                lowPassA,
+                outputScale,
+                hpPrevInR_,
+                hpPrevOutR_,
+                lpPrevOutR_));
         }
     };
 
@@ -669,6 +745,7 @@ void Apu::tick(int cpuCycles, Memory& memory) {
     std::uint32_t elapsedCycles = 0;
     const auto& fifoEvents = memory.audioFifoEvents();
     const auto& regEvents = memory.audioRegisterWriteEvents();
+    const std::size_t generatedStart = sampleBuffer_.size();
     lastTickStats_.fifoEventCount = static_cast<std::uint32_t>(fifoEvents.size());
     lastTickStats_.regEventCount = static_cast<std::uint32_t>(regEvents.size());
 
@@ -713,8 +790,9 @@ void Apu::tick(int cpuCycles, Memory& memory) {
         flushSegment(static_cast<std::uint32_t>(cpuCycles) - elapsedCycles);
     }
 
-    lastTickStats_.generatedFrames = static_cast<std::uint32_t>(sampleBuffer_.size() / 2U);
-    for (std::size_t sampleIndex = 0; sampleIndex + 1U < sampleBuffer_.size(); sampleIndex += 2U) {
+    const std::size_t generatedSamples = sampleBuffer_.size() - generatedStart;
+    lastTickStats_.generatedFrames = static_cast<std::uint32_t>(generatedSamples / 2U);
+    for (std::size_t sampleIndex = generatedStart; sampleIndex + 1U < sampleBuffer_.size(); sampleIndex += 2U) {
         const auto left = static_cast<std::int16_t>(std::abs(static_cast<int>(sampleBuffer_[sampleIndex])));
         const auto right = static_cast<std::int16_t>(std::abs(static_cast<int>(sampleBuffer_[sampleIndex + 1U])));
         if (left > lastTickStats_.peakLeft) {

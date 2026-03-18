@@ -133,6 +133,8 @@ private:
     float hpPrevOutL_ = 0.0f;
     float hpPrevInR_ = 0.0f;
     float hpPrevOutR_ = 0.0f;
+    float lpPrevOutL_ = 0.0f;
+    float lpPrevOutR_ = 0.0f;
 };
 
 } // namespace gb::gba

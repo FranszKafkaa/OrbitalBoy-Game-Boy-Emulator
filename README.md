@@ -114,6 +114,33 @@ Estado atual do GBA fase 3:
 - ainda nao tem pipeline grafico completo (affine/rotacao, janelas, blending/efeitos), audio e save de cartucho GBA
 - `--rom-suite` permanece focado em GB
 
+### Ajuste fino de audio/performance no GBA realtime
+
+O frontend realtime GBA usa fila de audio com watermarks e frame skip adaptativo orientado a audio.
+Voce pode ajustar sem recompilar via variaveis de ambiente:
+
+- `GBEMU_GBA_AUDIO_QUEUE_LOW_DIV`: limiar de fila baixa (padrao geral `12`)
+- `GBEMU_GBA_AUDIO_QUEUE_TARGET_DIV`: alvo de fila (padrao geral `8`)
+- `GBEMU_GBA_AUDIO_QUEUE_HIGH_DIV`: limiar de recuperacao (padrao geral `6`)
+- `GBEMU_GBA_AUDIO_QUEUE_MAX_DIV`: limite maximo de fila para enfileiramento (padrao `4`)
+- `GBEMU_GBA_AUDIO_QUEUE_AW_LOW_DIV`, `..._AW_TARGET_DIV`, `..._AW_HIGH_DIV`, `..._AW_MAX_DIV`:
+  overrides especificos para perfil Advance Wars
+- `GBEMU_GBA_AUDIO_SKIP_ENTRY_BUDGET_PERCENT`: percentual do budget de frame para armar skip adaptativo (padrao `105`)
+- `GBEMU_GBA_AUDIO_SKIP_MAX_CONSECUTIVE`: maximo de frames pulados em sequencia (padrao `2`)
+- `GBEMU_GBA_AUDIO_SKIP_COOLDOWN_FRAMES`: cooldown entre skips adaptativos (padrao `1`)
+- `GBEMU_GBA_AUDIO_OUTPUT_SCALE`: ganho final do APU antes de clamp (`56.0` por padrao)
+- `GBEMU_GBA_AUDIO_HIGHPASS_A`: coeficiente do high-pass de saida (`0.998` por padrao, `0` desliga)
+- `GBEMU_GBA_AUDIO_LOWPASS_A`: coeficiente do low-pass de saida (`0.12` por padrao, `0` desliga)
+
+Exemplo rapido (PowerShell):
+
+```powershell
+$env:GBEMU_GBA_AUDIO_QUEUE_AW_TARGET_DIV='6'
+$env:GBEMU_GBA_AUDIO_SKIP_MAX_CONSECUTIVE='1'
+$env:GBEMU_GBA_AUDIO_LOWPASS_A='0.10'
+.\build\gbemu.exe '.\roms\Advance Wars\Advance Wars (USA).gba'
+```
+
 ### Netplay (UDP) e atraso configuravel
 
 ```bash

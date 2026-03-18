@@ -63,6 +63,14 @@ int readIntEnvironmentOrDefault(const char* name, int fallback) {
     }
 }
 
+int readIntEnvironmentClamped(const char* name, int fallback, int minValue, int maxValue) {
+    return std::clamp(readIntEnvironmentOrDefault(name, fallback), minValue, maxValue);
+}
+
+int readQueueDivisor(const char* name, int fallback) {
+    return readIntEnvironmentClamped(name, fallback, 2, 64);
+}
+
 bool frameTimingLoggingEnabled() {
     return gb::environmentVariableEnabled("GBEMU_GBA_LOG_FRAME_TIMING");
 }
@@ -91,7 +99,70 @@ bool adaptiveAudioFrameSkipEnabled(const gba::System& system) {
     if (gb::hasEnvironmentVariable("GBEMU_GBA_AUDIO_PRIORITY_FRAME_SKIP")) {
         return gb::environmentVariableEnabled("GBEMU_GBA_AUDIO_PRIORITY_FRAME_SKIP");
     }
+    (void)system;
+    // mGBA-style default: keep audio continuous via buffering/resampling,
+    // not by dropping video frames unless explicitly requested.
+    return false;
+}
+
+bool isAdvanceWarsProfile(const gba::System& system) {
     return system.compatibilityProfile().name == "advance-wars";
+}
+
+int queueDivisorLow(bool isAdvanceWars) {
+    const int fallback = isAdvanceWars ? 10 : 12;
+    const char* profileVar = isAdvanceWars
+        ? "GBEMU_GBA_AUDIO_QUEUE_AW_LOW_DIV"
+        : "GBEMU_GBA_AUDIO_QUEUE_LOW_DIV";
+    if (gb::hasEnvironmentVariable(profileVar)) {
+        return readQueueDivisor(profileVar, fallback);
+    }
+    return readQueueDivisor("GBEMU_GBA_AUDIO_QUEUE_LOW_DIV", fallback);
+}
+
+int queueDivisorTarget(bool isAdvanceWars) {
+    const int fallback = isAdvanceWars ? 7 : 8;
+    const char* profileVar = isAdvanceWars
+        ? "GBEMU_GBA_AUDIO_QUEUE_AW_TARGET_DIV"
+        : "GBEMU_GBA_AUDIO_QUEUE_TARGET_DIV";
+    if (gb::hasEnvironmentVariable(profileVar)) {
+        return readQueueDivisor(profileVar, fallback);
+    }
+    return readQueueDivisor("GBEMU_GBA_AUDIO_QUEUE_TARGET_DIV", fallback);
+}
+
+int queueDivisorHigh(bool isAdvanceWars) {
+    const int fallback = isAdvanceWars ? 5 : 6;
+    const char* profileVar = isAdvanceWars
+        ? "GBEMU_GBA_AUDIO_QUEUE_AW_HIGH_DIV"
+        : "GBEMU_GBA_AUDIO_QUEUE_HIGH_DIV";
+    if (gb::hasEnvironmentVariable(profileVar)) {
+        return readQueueDivisor(profileVar, fallback);
+    }
+    return readQueueDivisor("GBEMU_GBA_AUDIO_QUEUE_HIGH_DIV", fallback);
+}
+
+int queueDivisorMax(bool isAdvanceWars) {
+    const int fallback = 4;
+    const char* profileVar = isAdvanceWars
+        ? "GBEMU_GBA_AUDIO_QUEUE_AW_MAX_DIV"
+        : "GBEMU_GBA_AUDIO_QUEUE_MAX_DIV";
+    if (gb::hasEnvironmentVariable(profileVar)) {
+        return readQueueDivisor(profileVar, fallback);
+    }
+    return readQueueDivisor("GBEMU_GBA_AUDIO_QUEUE_MAX_DIV", fallback);
+}
+
+int adaptiveSkipBudgetPercent() {
+    return readIntEnvironmentClamped("GBEMU_GBA_AUDIO_SKIP_ENTRY_BUDGET_PERCENT", 105, 100, 200);
+}
+
+int adaptiveSkipMaxConsecutive() {
+    return readIntEnvironmentClamped("GBEMU_GBA_AUDIO_SKIP_MAX_CONSECUTIVE", 2, 1, 8);
+}
+
+int adaptiveSkipCooldownFrames() {
+    return readIntEnvironmentClamped("GBEMU_GBA_AUDIO_SKIP_COOLDOWN_FRAMES", 1, 0, 8);
 }
 
 std::string buildWindowTitle(
@@ -147,6 +218,7 @@ int runGbaRealtime(gba::System& system, int scale) {
     const bool logFrameTiming = frameTimingLoggingEnabled();
     const int logFrameTimingEvery = frameTimingLogEvery();
     const bool adaptiveFrameSkip = adaptiveAudioFrameSkipEnabled(system);
+    const bool isAdvanceWars = isAdvanceWarsProfile(system);
     const Uint32 sdlInitFlags = SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER
         | (debugDisableAudio ? 0U : static_cast<Uint32>(SDL_INIT_AUDIO));
     if (SDL_Init(sdlInitFlags) != 0) {
@@ -262,17 +334,21 @@ int runGbaRealtime(gba::System& system, int scale) {
     const Uint32 bytesPerSecond = audioReady
         ? static_cast<Uint32>(have.freq * have.channels * static_cast<int>(sizeof(int16_t)))
         : 0U;
+    const Uint32 queueLowDivisor = static_cast<Uint32>(queueDivisorLow(isAdvanceWars));
+    const Uint32 queueTargetDivisor = static_cast<Uint32>(queueDivisorTarget(isAdvanceWars));
+    const Uint32 queueHighDivisor = static_cast<Uint32>(queueDivisorHigh(isAdvanceWars));
+    const Uint32 queueMaxDivisor = static_cast<Uint32>(queueDivisorMax(isAdvanceWars));
     const Uint32 minQueuedAudioBytes = audioReady
-        ? bytesPerSecond / 12U
+        ? bytesPerSecond / queueLowDivisor
         : 0U;
     const Uint32 targetQueuedAudioBytes = audioReady
-        ? bytesPerSecond / 8U
+        ? bytesPerSecond / queueTargetDivisor
         : 0U;
     const Uint32 highQueuedAudioBytes = audioReady
-        ? bytesPerSecond / 6U
+        ? bytesPerSecond / queueHighDivisor
         : 0U;
     const Uint32 maxQueuedAudioBytes = audioReady
-        ? bytesPerSecond / 4U
+        ? bytesPerSecond / queueMaxDivisor
         : 0U;
 
     // GBA frame period: 280896 CPU cycles / 16 777 216 Hz ≈ 16.7427 ms (~59.73 Hz).
@@ -280,6 +356,10 @@ int runGbaRealtime(gba::System& system, int scale) {
         std::chrono::steady_clock::duration>(
         std::chrono::duration<double>(280896.0 / 16777216.0));
     constexpr double kGbaFrameBudgetMs = 1000.0 * (280896.0 / 16777216.0);
+    const double adaptiveSkipBudgetThreshold = kGbaFrameBudgetMs
+        * (static_cast<double>(adaptiveSkipBudgetPercent()) / 100.0);
+    const int adaptiveSkipMaxConsecutiveFrames = adaptiveSkipMaxConsecutive();
+    const int adaptiveSkipCooldownValue = adaptiveSkipCooldownFrames();
 
 #ifdef _WIN32
     timeBeginPeriod(1);
@@ -311,6 +391,8 @@ int runGbaRealtime(gba::System& system, int scale) {
     double previousFrameWallMs = kGbaFrameBudgetMs;
     Uint32 previousQueuedAudioBytes = targetQueuedAudioBytes;
     int consecutiveAdaptiveRenderSkips = 0;
+    bool adaptiveSkipArmed = false;
+    int adaptiveSkipCooldown = 0;
 
     auto nextFrame = std::chrono::steady_clock::now();
 
@@ -446,12 +528,24 @@ int runGbaRealtime(gba::System& system, int scale) {
         const bool debugSkipRenderThisFrame = debugDisableVideo
             || (debugFrameSkip > 0 && (frameCounter % static_cast<std::uint32_t>(debugFrameSkip + 1)) != 0U);
         const bool audioStarving = audioReady && audioStarted && previousQueuedAudioBytes < minQueuedAudioBytes;
-        const bool frameOverBudget = previousFrameWallMs > (kGbaFrameBudgetMs * 1.05);
+        const bool audioRecovered = !audioReady || !audioStarted || previousQueuedAudioBytes >= highQueuedAudioBytes;
+        const bool frameOverBudget = previousFrameWallMs > adaptiveSkipBudgetThreshold;
+        if (adaptiveSkipArmed) {
+            if (audioRecovered) {
+                adaptiveSkipArmed = false;
+            }
+        } else if (audioStarving && frameOverBudget) {
+            adaptiveSkipArmed = true;
+        }
+        if (adaptiveSkipCooldown > 0) {
+            --adaptiveSkipCooldown;
+        }
         const bool adaptiveSkipRenderThisFrame = adaptiveFrameSkip
             && !debugSkipRenderThisFrame
-            && audioStarving
+            && adaptiveSkipArmed
             && frameOverBudget
-            && consecutiveAdaptiveRenderSkips < 2;
+            && adaptiveSkipCooldown == 0
+            && consecutiveAdaptiveRenderSkips < adaptiveSkipMaxConsecutiveFrames;
         const bool renderThisFrame = !(debugSkipRenderThisFrame || adaptiveSkipRenderThisFrame);
 
         // --- Run one emulation frame ---
@@ -477,16 +571,27 @@ int runGbaRealtime(gba::System& system, int scale) {
                 } else {
                     const int availableBytes = SDL_AudioStreamAvailable(audioStream);
                     if (availableBytes > 0) {
-                        std::vector<std::uint8_t> converted(static_cast<std::size_t>(availableBytes));
-                        const int gotBytes = SDL_AudioStreamGet(audioStream, converted.data(), availableBytes);
-                        if (gotBytes > 0) {
-                            const Uint32 currentlyQueued = SDL_GetQueuedAudioSize(audioDev);
-                            // Keep latency bounded and predictable under sustained load.
-                            if (currentlyQueued > maxQueuedAudioBytes) {
-                                SDL_ClearQueuedAudio(audioDev);
+                        const Uint32 currentlyQueued = SDL_GetQueuedAudioSize(audioDev);
+                        // mGBA-like high-water behavior: do not discard converted audio.
+                        // Pull only what can be queued now and keep the remainder in SDL_AudioStream.
+                        const Uint32 queueBudget = currentlyQueued >= maxQueuedAudioBytes
+                            ? 0U
+                            : (maxQueuedAudioBytes - currentlyQueued);
+                        const int bytesPerOutputFrame = static_cast<int>(have.channels)
+                            * static_cast<int>(sizeof(int16_t));
+                        int bytesToPull = std::min(
+                            availableBytes,
+                            static_cast<int>(queueBudget));
+                        if (bytesPerOutputFrame > 1) {
+                            bytesToPull -= bytesToPull % bytesPerOutputFrame;
+                        }
+                        if (bytesToPull > 0) {
+                            std::vector<std::uint8_t> converted(static_cast<std::size_t>(bytesToPull));
+                            const int gotBytes = SDL_AudioStreamGet(audioStream, converted.data(), bytesToPull);
+                            if (gotBytes > 0) {
+                                SDL_QueueAudio(audioDev, converted.data(), static_cast<Uint32>(gotBytes));
+                                bytesQueuedToAudio += static_cast<Uint32>(gotBytes);
                             }
-                            SDL_QueueAudio(audioDev, converted.data(), static_cast<Uint32>(gotBytes));
-                            bytesQueuedToAudio += static_cast<Uint32>(gotBytes);
                         }
                     }
                 }
@@ -559,26 +664,35 @@ int runGbaRealtime(gba::System& system, int scale) {
             presentMs = std::chrono::duration<double, std::milli>(presentEnd - presentStart).count();
         }
 
-        // --- Frame pacing: sleep_until next frame boundary ---
+        // --- Frame pacing: try to maintain 59.73 Hz but don't block on audio ---
+        // If the CPU can't keep up (frame took > 16.7ms), skip sleep.
+        // Audio buffer is managed separately via SDL_AudioStream buffering.
+        // When audio underruns severely, we'll reset the stream.
         nextFrame += kGbaFrameBudget;
         const auto now = std::chrono::steady_clock::now();
-        const bool audioNeedsCatchUp = audioReady && audioStarted && queuedAudioBytes < targetQueuedAudioBytes;
-        const bool audioTooFarAhead = audioReady && audioStarted && queuedAudioBytes > highQueuedAudioBytes;
+        const bool audioUnderrunning = audioReady && audioStarted && queuedAudioBytes < (minQueuedAudioBytes / 3U);
+        
         double sleepMs = 0.0;
         if (nextFrame < now - kGbaFrameBudget * 2) {
-            // Fell too far behind — resync.
-            nextFrame = now;
-        } else if (!audioNeedsCatchUp && nextFrame > now) {
-            const auto sleepStart = std::chrono::steady_clock::now();
-            std::this_thread::sleep_until(nextFrame);
-            const auto sleepEnd = std::chrono::steady_clock::now();
-            sleepMs = std::chrono::duration<double, std::milli>(sleepEnd - sleepStart).count();
-            if (audioTooFarAhead) {
-                const auto extraSleepStart = std::chrono::steady_clock::now();
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                const auto extraSleepEnd = std::chrono::steady_clock::now();
-                sleepMs += std::chrono::duration<double, std::milli>(extraSleepEnd - extraSleepStart).count();
+            // Fell catastrophically behind (more than 2 frames late). Resync immediately.
+            nextFrame = now + kGbaFrameBudget;
+        } else {
+            // Calculate how long to sleep. If positive, sleep. If negative, we're late—skip sleep.
+            auto sleepDuration = nextFrame - now;
+            if (sleepDuration.count() > 1000000) {  // More than 1ms to sleep (nanosecond precision)
+                const auto sleepStart = std::chrono::steady_clock::now();
+                std::this_thread::sleep_for(sleepDuration);
+                const auto sleepEnd = std::chrono::steady_clock::now();
+                sleepMs = std::chrono::duration<double, std::milli>(sleepEnd - sleepStart).count();
             }
+        }
+        
+        // Soft recovery: if audio has underrun too severely, clear and restart the queue.
+        // This prevents prolonged dropouts from CPU stalls without forcing CPU sync.
+        if (audioUnderrunning && audioStarted) {
+            SDL_ClearQueuedAudio(audioDev);
+            SDL_AudioStreamClear(audioStream);
+            audioStarted = false;
         }
 
         const double totalFrameMs = std::chrono::duration<double, std::milli>(
@@ -587,6 +701,7 @@ int runGbaRealtime(gba::System& system, int scale) {
         previousQueuedAudioBytes = queuedAudioBytes;
         if (adaptiveSkipRenderThisFrame) {
             ++consecutiveAdaptiveRenderSkips;
+            adaptiveSkipCooldown = adaptiveSkipCooldownValue;
         } else {
             consecutiveAdaptiveRenderSkips = 0;
         }

@@ -6,6 +6,7 @@
 #include <cassert>
 #include <chrono>
 #include <iostream>
+#include <limits>
 #include <string>
 
 namespace gb::gba {
@@ -745,6 +746,8 @@ bool Ppu::render(std::array<u16, FramebufferSize>& framebuffer) const {
 
     activeDebugConfig_ = readDebugConfig();
     lastRenderStats_ = RenderStats{};
+    windowMaskCacheEnabled_ = true;
+    std::fill(windowMaskCacheLineReady_.begin(), windowMaskCacheLineReady_.end(), false);
     const auto renderStart = Clock::now();
 
     const RasterLineSnapshot line0 = rasterSnapshotForLine(0);
@@ -792,6 +795,7 @@ bool Ppu::render(std::array<u16, FramebufferSize>& framebuffer) const {
         rendered = false;
         break;
     }
+    windowMaskCacheEnabled_ = false;
     lastRenderStats_.totalNs = elapsedNs(renderStart);
     return rendered;
 }
@@ -801,6 +805,8 @@ bool Ppu::debugPixel(int x, int y, PixelDebugInfo& out) const {
     if (memory_ == nullptr || x < 0 || x >= ScreenWidth || y < 0 || y >= ScreenHeight) {
         return false;
     }
+
+    windowMaskCacheEnabled_ = false;
 
     auto& layerPixels = layerScratch_;
     auto& objWindowMask = objWindowScratch_;
@@ -1495,6 +1501,13 @@ void Ppu::renderTextBackground(int bgIndex, std::array<LayerPixel, FramebufferSi
         const int mosaicYSpan = mosaicEnabled ? mosaicSpan(line.mosaic, 4U) : 1;
         const int sourceY = mosaicEnabled ? mosaicSampleCoord(y, mosaicYSpan) : y;
         const bool windowingEnabled = (line.dispcnt & kAnyWindowEnableMask) != 0U;
+        u32 cachedTileX = std::numeric_limits<u32>::max();
+        u32 cachedTileY = std::numeric_limits<u32>::max();
+        u16 cachedTileNumber = 0U;
+        bool cachedHflip = false;
+        bool cachedVflip = false;
+        u8 cachedPaletteBank = 0U;
+        bool cachedMapValid = false;
 
         for (int x = 0; x < ScreenWidth; ++x) {
             const auto pixelIndex = static_cast<std::size_t>(y) * static_cast<std::size_t>(ScreenWidth)
@@ -1511,27 +1524,38 @@ void Ppu::renderTextBackground(int bgIndex, std::array<LayerPixel, FramebufferSi
             const u32 tileY = sy / 8U;
             const u8 pixelX = static_cast<u8>(sx & 7U);
             const u8 pixelY = static_cast<u8>(sy & 7U);
-            const std::size_t mapBase = static_cast<std::size_t>(screenBase) + mode0ScreenBlockOffset(sizeIndex, tileX, tileY);
-            const std::size_t mapIndex = static_cast<std::size_t>((tileY % 32U) * 32U + (tileX % 32U));
-            const std::size_t mapAddress = mapBase + mapIndex * 2U;
-            if (mapAddress + 1U >= vram.size()) {
+            if (tileX != cachedTileX || tileY != cachedTileY) {
+                cachedTileX = tileX;
+                cachedTileY = tileY;
+                const std::size_t mapBase = static_cast<std::size_t>(screenBase)
+                    + mode0ScreenBlockOffset(sizeIndex, tileX, tileY);
+                const std::size_t mapIndex = static_cast<std::size_t>((tileY % 32U) * 32U + (tileX % 32U));
+                const std::size_t mapAddress = mapBase + mapIndex * 2U;
+                if (mapAddress + 1U >= vram.size()) {
+                    cachedMapValid = false;
+                    continue;
+                }
+                const u16 mapEntry = static_cast<u16>(
+                    static_cast<u16>(vram[mapAddress])
+                    | static_cast<u16>(static_cast<u16>(vram[mapAddress + 1U]) << 8U)
+                );
+                cachedTileNumber = static_cast<u16>(mapEntry & 0x03FFU);
+                cachedHflip = (mapEntry & 0x0400U) != 0U;
+                cachedVflip = (mapEntry & 0x0800U) != 0U;
+                cachedPaletteBank = static_cast<u8>((mapEntry >> 12U) & 0x0FU);
+                cachedMapValid = true;
+            }
+            if (!cachedMapValid) {
                 continue;
             }
-            const u16 mapEntry = static_cast<u16>(
-                static_cast<u16>(vram[mapAddress])
-                | static_cast<u16>(static_cast<u16>(vram[mapAddress + 1U]) << 8U)
-            );
-            const u16 tileNumber = static_cast<u16>(mapEntry & 0x03FFU);
-            const bool hflip = (mapEntry & 0x0400U) != 0U;
-            const bool vflip = (mapEntry & 0x0800U) != 0U;
-            const u8 paletteBank = static_cast<u8>((mapEntry >> 12U) & 0x0FU);
-            const u8 tilePx = hflip ? static_cast<u8>(7U - pixelX) : pixelX;
-            const u8 tilePy = vflip ? static_cast<u8>(7U - pixelY) : pixelY;
+
+            const u8 tilePx = cachedHflip ? static_cast<u8>(7U - pixelX) : pixelX;
+            const u8 tilePy = cachedVflip ? static_cast<u8>(7U - pixelY) : pixelY;
 
             u8 colorIndex = 0U;
             if (color256) {
                 const std::size_t tileAddress = static_cast<std::size_t>(charBase)
-                    + static_cast<std::size_t>(tileNumber) * 64U
+                    + static_cast<std::size_t>(cachedTileNumber) * 64U
                     + static_cast<std::size_t>(tilePy) * 8U
                     + static_cast<std::size_t>(tilePx);
                 if (tileAddress >= kTextBgCharDataLimit || tileAddress >= vram.size()) {
@@ -1543,7 +1567,7 @@ void Ppu::renderTextBackground(int bgIndex, std::array<LayerPixel, FramebufferSi
                 }
             } else {
                 const std::size_t tileAddress = static_cast<std::size_t>(charBase)
-                    + static_cast<std::size_t>(tileNumber) * 32U
+                    + static_cast<std::size_t>(cachedTileNumber) * 32U
                     + static_cast<std::size_t>(tilePy) * 4U
                     + static_cast<std::size_t>(tilePx / 2U);
                 if (tileAddress >= kTextBgCharDataLimit || tileAddress >= vram.size()) {
@@ -1556,7 +1580,7 @@ void Ppu::renderTextBackground(int bgIndex, std::array<LayerPixel, FramebufferSi
                 if (index4 == 0U) {
                     continue;
                 }
-                colorIndex = static_cast<u8>(paletteBank * 16U + index4);
+                colorIndex = static_cast<u8>(cachedPaletteBank * 16U + index4);
             }
 
             const std::size_t paletteByteIndex = static_cast<std::size_t>(colorIndex) * 2U;
@@ -2593,6 +2617,32 @@ u8 Ppu::windowMaskForPixel(int x, int y) const {
 }
 
 u8 Ppu::windowMaskForPixel(int x, int y, const RasterLineSnapshot& line) const {
+    if (!windowMaskCacheEnabled_) {
+        return windowMaskForPixelUncached(x, y, line);
+    }
+    if (y < 0 || y >= ScreenHeight || x < 0 || x >= ScreenWidth) {
+        return 0x3FU;
+    }
+    if ((line.dispcnt & kAnyWindowEnableMask) == 0U || activeDebugConfig_.disableWindow) {
+        return 0x3FU;
+    }
+
+    const std::size_t lineIndex = static_cast<std::size_t>(y);
+    if (!windowMaskCacheLineReady_[lineIndex]) {
+        const RasterLineSnapshot cachedLine = rasterSnapshotForLine(y);
+        const std::size_t rowBase = lineIndex * static_cast<std::size_t>(ScreenWidth);
+        for (int sx = 0; sx < ScreenWidth; ++sx) {
+            windowMaskCache_[rowBase + static_cast<std::size_t>(sx)] = windowMaskForPixelUncached(sx, y, cachedLine);
+        }
+        windowMaskCacheLineReady_[lineIndex] = true;
+    }
+
+    const std::size_t pixelIndex = lineIndex * static_cast<std::size_t>(ScreenWidth)
+        + static_cast<std::size_t>(x);
+    return windowMaskCache_[pixelIndex];
+}
+
+u8 Ppu::windowMaskForPixelUncached(int x, int y, const RasterLineSnapshot& line) const {
     if (activeDebugConfig_.disableWindow) {
         return 0x3FU;
     }
