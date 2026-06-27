@@ -29,6 +29,33 @@ enum class MemoryValueType {
     Hex16,
 };
 
+enum class RunLabEventType {
+    MemoryChanged = 0,
+    ValueIncreased,
+    ValueDecreased,
+    DamageCandidate,
+    DeathCandidate,
+    LevelChangeCandidate,
+    LevelClearCandidate,
+    SplitCandidate,
+    GoalReachedCandidate,
+    Custom,
+};
+
+enum class ConditionOperator {
+    Changed = 0,
+    ChangedFromInitial,
+    Equal,
+    NotEqual,
+    Greater,
+    GreaterEqual,
+    Less,
+    LessEqual,
+    Decreased,
+    Increased,
+    ChangedToNonzero,
+};
+
 struct SpriteBounds {
     int x = 0;
     int y = 0;
@@ -64,9 +91,47 @@ struct MemoryLabel {
 
 struct TimelineEvent {
     std::uint64_t frame = 0;
+    RunLabEventType type = RunLabEventType::MemoryChanged;
     std::string label;
     std::int32_t previous = 0;
     std::int32_t current = 0;
+    std::string entity;
+    std::string description;
+    double confidence = 1.0;
+    std::string semantic;
+    std::string reason;
+};
+
+struct GoalCondition {
+    std::string label;
+    ConditionOperator op = ConditionOperator::Changed;
+    std::int32_t value = 0;
+};
+
+struct GoalDefinition {
+    std::string name;
+    std::string description;
+    GoalCondition done{};
+    std::vector<GoalCondition> fail{};
+    std::string optimize = "min_frames";
+    bool active = false;
+    bool doneTriggered = false;
+    bool failTriggered = false;
+    std::uint64_t startFrame = 0;
+    std::uint64_t doneFrame = 0;
+    std::uint64_t failFrame = 0;
+    std::vector<MemoryLabel> baseline{};
+    std::string lastEvent;
+};
+
+struct SplitDefinition {
+    std::string name;
+    GoalCondition condition{};
+    bool triggered = false;
+    std::uint64_t triggeredFrame = 0;
+    std::string label;
+    std::string entity;
+    std::vector<MemoryLabel> baseline{};
 };
 
 struct RamDiffEntry {
@@ -110,6 +175,9 @@ struct State {
     std::vector<EntityCandidate> entities{};
     std::vector<MemoryLabel> memoryLabels{};
     std::vector<TimelineEvent> events{};
+    std::vector<GoalDefinition> goals{};
+    std::vector<SplitDefinition> splits{};
+    std::optional<std::size_t> activeGoal{};
     std::optional<std::size_t> selectedEntity{};
     bool hasRamSnapshot = false;
     std::vector<gb::u8> ramSnapshot{};
@@ -124,6 +192,8 @@ struct State {
 
 const char* entityTypeName(EntityType type);
 const char* memoryValueTypeName(MemoryValueType type);
+const char* eventTypeName(RunLabEventType type);
+const char* conditionOperatorName(ConditionOperator op);
 EntityType nextEntityType(EntityType type);
 
 int oamIndexFromAddress(gb::u16 address);
@@ -148,8 +218,22 @@ std::size_t promoteDiffAddress(State& state, std::size_t diffIndex);
 std::size_t promoteCorrelationCandidate(State& state, CorrelationTarget target, std::size_t candidateIndex = 0);
 
 void updateTimeline(State& state, const gb::Bus& bus, std::uint64_t frame, std::size_t maxEvents = 200);
+std::vector<TimelineEvent> detectEventsForChange(const MemoryLabel& label, std::int32_t previous, std::int32_t current, std::uint64_t frame);
+bool eventIsImportant(const TimelineEvent& event);
+void clearEvents(State& state);
 void captureRamSnapshot(State& state, const gb::Bus& bus);
 std::size_t buildRamDiff(State& state, const gb::Bus& bus, std::size_t maxEntries = 256);
+
+bool evaluateCondition(
+    const GoalCondition& condition,
+    const std::vector<MemoryLabel>& current,
+    const std::vector<MemoryLabel>& baseline
+);
+std::size_t createDefaultGoalFromLabels(State& state);
+bool startGoal(State& state, std::size_t goalIndex, const gb::Bus& bus, std::uint64_t frame);
+void resetActiveGoalBaseline(State& state, const gb::Bus& bus, std::uint64_t frame);
+void evaluateGoalsAndSplits(State& state, const gb::Bus& bus, std::uint64_t frame);
+std::size_t createDefaultSplitFromLabels(State& state);
 
 bool refreshSelectedEntityBounds(State& state, const gb::Bus& bus);
 bool captureCorrelationSample(State& state, const gb::Bus& bus, std::uint64_t frame);
@@ -158,5 +242,24 @@ bool runCorrelationScan(State& state, std::size_t maxPerGroup = 3);
 
 std::string exportProfileJson(const State& state, const std::string& gameName);
 bool exportProfileFile(State& state, const std::string& gameName, const std::string& profilesDir = "profiles");
+std::string exportCurrentStateJson(
+    const State& state,
+    const std::string& gameName,
+    std::uint64_t frame,
+    bool paused,
+    bool running,
+    const std::string& profilePath = {},
+    const std::string& screenshotPath = {}
+);
+bool exportCurrentStateFile(
+    const State& state,
+    const std::string& gameName,
+    std::uint64_t frame,
+    bool paused,
+    bool running,
+    const std::string& statePath = ".runlab/current-state.json",
+    const std::string& profilePath = {},
+    const std::string& screenshotPath = {}
+);
 
 } // namespace gb::frontend::runlab

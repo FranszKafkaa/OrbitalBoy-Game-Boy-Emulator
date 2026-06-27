@@ -73,6 +73,17 @@ Para ficar didatico, cada secao segue este formato:
 
 Assim voce consegue ligar cada linha do comportamento que ve na tela com um ponto do codigo.
 
+## RunLab MCP read-only
+
+O RunLab tambem tem um adaptador MCP C++ opcional em `tools/orbitalboy-mcp-cpp`.
+
+- Ele fala JSON-RPC por stdio.
+- Ele le `.runlab/current-state.json` e, opcionalmente, um profile exportado.
+- Ele expoe status, entidades, labels de memoria, eventos recentes, objetivo ativo e splits.
+- Ele e somente leitura: nao controla o jogo, nao escreve memoria, nao abre socket e nao tenta resolver rota.
+
+Guia especifico: `docs/runlab-mcp-cpp.md`.
+
 ## 1. Objetivo do emulador
 
 O GBEMU imita o hardware de um Game Boy classico no computador.
@@ -660,8 +671,25 @@ RunLab e a primeira camada semantica do OrbitalBoy para speedrun/TAS tooling. El
 - `F7`: diff da RAM atual contra o snapshot.
 - `F8`: promove o primeiro endereco alterado do diff para label.
 - `E` ou menu `DEBUG > RUNLAB EXPORT`: exporta `profiles/<titulo_da_rom>.runlab.json`.
-- `C`: roda Correlation Scan para a entidade selecionada.
+- `C`: roda Correlation Scan, troca a lista de leituras recentes pelos enderecos RAM candidatos e mostra os candidatos OAM em vermelho por cerca de 240 frames.
+- Clique em um candidato RunLab: fixa o `WATCH` naquele endereco, apaga os demais candidatos vermelhos e mantem somente a entidade selecionada em vermelho forte ate `Q`.
 - `1`/`2`/`3`/`4`: promove o melhor candidato atual como X, Y, camera_x ou state.
+- `G`: cria/inicia objetivo padrao e captura baseline.
+- `R`: recaptura baseline do objetivo ativo.
+- `Q`: limpa eventos da timeline RunLab e volta a lista de leituras recentes no lugar dos candidatos.
+
+Event Detection roda sobre os `MemoryLabel`s cadastrados. Toda mudanca gera `memory_changed`; aumentos e quedas geram `value_increased`/`value_decreased`; labels como `lives`, `hp`, `health` ou `player.hp` diminuindo geram `damage_candidate`; chegando a zero geram `death_candidate`; `level_id`, `stage`, `room` ou `map` mudando geram `level_change_candidate` e `split_candidate`; flags como `goal_flag`, `clear_flag` e `finish_flag` ativando geram `goal_reached_candidate`.
+
+Goals e splits usam condicoes estruturadas:
+
+- `changed`
+- `changed_from_initial`
+- `==`, `!=`, `>`, `>=`, `<`, `<=`
+- `decreased`
+- `increased`
+- `changed_to_nonzero`
+
+Quando um objetivo inicia, RunLab captura uma baseline dos labels usados. `changed_from_initial`, `decreased` e `increased` comparam o valor atual contra essa baseline. Splits usam a mesma baseline e disparam uma unica vez.
 
 Correlation Scan e uma heuristica deterministica. Ele observa as ultimas 120 amostras da entidade selecionada, compara deltas de posicao OAM contra deltas de WRAM `0xC000-0xDFFF`, avalia candidatos `u8` e `u16_le`, e mostra sugestoes para `player.x`, `player.y`, `camera_x` e estado/animacao. O score `0.0..1.0` indica apenas semelhanca observada.
 
@@ -673,9 +701,10 @@ Fluxo recomendado:
 4. Mova o personagem por alguns segundos.
 5. Pressione `C` e confira as sugestoes.
 6. Use `1` para promover X e `2` para promover Y quando os candidatos fizerem sentido.
-7. Exporte o perfil com `E`.
+7. Pressione `G` para iniciar um objetivo padrao quando labels como `level_id` e `lives` existirem.
+8. Exporte o perfil com `E`.
 
-O MVP e manual: o OrbitalBoy nao sabe sozinho qual sprite e o jogador, qual endereco e vida, nem qual mudanca representa morte. A timeline apenas registra mudancas dos labels semanticamente cadastrados. Limitacoes conhecidas: posicao OAM pode nao ser a posicao logica; scroll de camera pode parecer movimento do jogador; entidades multi-sprite podem alterar o bbox; alguns jogos guardam coordenadas em bytes separados, subpixels ou estruturas maiores; confianca alta nao e prova.
+O MVP e manual: o OrbitalBoy nao sabe sozinho qual sprite e o jogador, qual endereco e vida, nem qual mudanca representa morte. Labels precisam existir primeiro, e nomes como `level_id`, `lives`, `player.x` e `goal_flag` influenciam as regras padrao. Mudancas de alta frequencia como `player.x` sao resumidas no painel por padrao. Limitacoes conhecidas: posicao OAM pode nao ser a posicao logica; scroll de camera pode parecer movimento do jogador; entidades multi-sprite podem alterar o bbox; alguns jogos guardam coordenadas em bytes separados, subpixels ou estruturas maiores; confianca alta nao e prova. Isto ainda nao e TAS/autopilot.
 
 ### 14.6 Menu de controles (`F11`)
 

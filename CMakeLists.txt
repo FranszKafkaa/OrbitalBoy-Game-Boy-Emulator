@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(GBEMU_USE_SDL2 "Build with SDL2 real-time frontend when available" ON)
+option(GBEMU_BUILD_MCP "Build read-only OrbitalBoy RunLab MCP stdio adapter" OFF)
 
 add_library(gbcore
     src/core/gameboy.cpp
@@ -76,6 +77,10 @@ else()
 endif()
 
 include(CTest)
+if (GBEMU_BUILD_MCP)
+    add_subdirectory(tools/orbitalboy-mcp-cpp)
+endif()
+
 if (BUILD_TESTING)
     add_executable(gbemu_tests
         src/app/app_options.cpp

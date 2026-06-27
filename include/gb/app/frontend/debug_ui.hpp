@@ -123,6 +123,17 @@ void drawSelectedSpriteOverlay(
     int gameY
 );
 
+void drawRunLabCandidateOverlay(
+    SDL_Renderer* renderer,
+    const gb::Bus& bus,
+    const std::vector<SpriteDebugRow>& sprites,
+    const runlab::State& runlabState,
+    bool selectedEntityOnly,
+    int scale,
+    int gameX,
+    int gameY
+);
+
 void drawMemoryPanel(
     SDL_Renderer* renderer,
     int panelX,
@@ -142,6 +153,7 @@ void drawMemoryPanel(
     bool breakpointAddressEditing,
     std::optional<gb::u16> selectedSpriteAddr,
     const runlab::State& runlabState,
+    bool showRunLabCandidateList,
     const gb::Bus& bus,
     gb::u16 execPc,
     gb::u8 execOp,

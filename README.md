@@ -9,6 +9,7 @@ O projeto tem foco em legibilidade, arquitetura modular e ferramentas de debug e
 
 - Guia completo: `docs/guia.md`
 - Formato da suite de ROMs: `docs/rom-suite.md`
+- RunLab MCP read-only: `docs/runlab-mcp-cpp.md`
 
 ## Build
 
@@ -27,6 +28,13 @@ cmake --build build -j
 ```
 
 Sem SDL2, o executavel ainda funciona em modo headless.
+
+Para compilar o adaptador MCP read-only do RunLab:
+
+```bash
+cmake -S . -B build -DGBEMU_BUILD_MCP=ON
+cmake --build build --target orbitalboy-mcp
+```
 
 ## Como rodar
 
@@ -179,16 +187,24 @@ Com o painel de debug aberto:
 - `F7`: compara a RAM atual contra o snapshot.
 - `F8`: promove o primeiro endereco alterado do diff para `MemoryLabel`.
 - `E`: exporta `profiles/<titulo_da_rom>.runlab.json`.
-- `C`: roda o Correlation Scan usando as amostras recentes da entidade selecionada.
+- `C`: roda o Correlation Scan, substitui a lista de leituras recentes pelos enderecos RAM candidatos e mostra os candidatos OAM em vermelho por cerca de 240 frames.
+- Clique em um candidato RunLab: fixa o `WATCH` naquele endereco, apaga os demais candidatos vermelhos e mantem somente a entidade selecionada em vermelho forte ate `Q`.
 - `1` / `2` / `3` / `4`: promove o melhor candidato atual como `player.x`, `player.y`, `camera_x` ou `state`.
+- `G`: cria/inicia um objetivo padrao a partir dos labels existentes e captura baseline.
+- `R`: recaptura baseline do objetivo ativo.
+- `Q`: limpa a timeline de eventos RunLab e volta a lista de leituras recentes no lugar dos candidatos.
 
-O painel mostra a entidade selecionada, tipo, quantidade de labels vinculados, ultimo evento de mudanca de valor, primeiro diff recente e sugestoes de correlacao para X/Y/camera/state. Tambem ha uma acao `RUNLAB EXPORT` no menu superior `DEBUG`.
+O painel mostra a entidade selecionada, tipo, quantidade de labels vinculados, eventos importantes recentes, objetivo ativo, primeiro diff recente e sugestoes de correlacao para X/Y/camera/state. Tambem ha uma acao `RUNLAB EXPORT` no menu superior `DEBUG`.
+
+Event Detection transforma mudancas dos labels em eventos semanticamente nomeados. Exemplos: `lives`/`hp` diminuindo gera `damage_candidate`; chegando a zero gera `death_candidate`; `level_id`/`stage`/`room` mudando gera `level_change_candidate` e `split_candidate`; `goal_flag`/`clear_flag`/`finish_flag` indo de zero para nao-zero gera `goal_reached_candidate`. Mudancas de alta frequencia como `player.x` continuam registradas internamente, mas o painel prioriza eventos importantes.
+
+Objetivos e splits usam condicoes estruturadas, sem parser de expressoes. `G` cria um objetivo padrao: se `level_id` existe, o objetivo e terminar a fase quando ele mudar desde a baseline; se `lives` existe, dano vira falha. Splits disparam uma unica vez contra a baseline capturada no inicio do objetivo. `R` recaptura essa baseline manualmente.
 
 Correlation Scan observa a jogabilidade do usuario: com uma entidade selecionada, RunLab guarda as ultimas 120 amostras de posicao OAM e WRAM (`0xC000-0xDFFF`), depois ranqueia enderecos `u8` e `u16_le` cujos deltas parecem acompanhar a posicao de tela. O score `0.0..1.0` e somente uma heuristica, nao prova que o endereco e correto.
 
 Fluxo recomendado para achar `player.x`/`player.y`: selecione um sprite OAM, crie a entidade com `Y`, marque-a como `Player` com `T`, mova o personagem por alguns segundos, pressione `C`, confira as sugestoes e promova os melhores candidatos com `1`/`2`.
 
-Limitacoes do MVP: o OrbitalBoy nao sabe automaticamente qual sprite e o jogador. Posicao OAM nem sempre e a posicao logica do personagem; scroll de camera pode enganar a correlacao; entidades com multiplos sprites podem confundir o bbox; alguns jogos separam coordenadas em bytes ou usam sistemas maiores que `u16_le`. RunLab continua manual e observacional: nao ha IA, solver TAS, automacao de gameplay, cheats novos ou escrita de memoria especifica do RunLab.
+Limitacoes do MVP: labels precisam existir antes das regras ficarem uteis, e nomes como `lives`, `level_id`, `player.x` e `goal_flag` importam para as heuristicas padrao. O OrbitalBoy nao sabe automaticamente qual sprite e o jogador. Posicao OAM nem sempre e a posicao logica do personagem; scroll de camera pode enganar a correlacao; entidades com multiplos sprites podem confundir o bbox; alguns jogos separam coordenadas em bytes ou usam sistemas maiores que `u16_le`. RunLab continua manual e observacional: nao ha IA, solver TAS, automacao de gameplay, cheats novos ou escrita de memoria especifica do RunLab.
 
 ## Barra superior (SDL)
 

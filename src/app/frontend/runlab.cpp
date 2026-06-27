@@ -7,8 +7,10 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <sstream>
+#include <utility>
 
 namespace gb::frontend::runlab {
 
@@ -180,6 +182,62 @@ void addTopCandidate(std::vector<CorrelationCandidate>& out, const CorrelationCa
     }
 }
 
+std::string lowerText(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    for (unsigned char ch : text) {
+        out.push_back(static_cast<char>(std::tolower(ch)));
+    }
+    return out;
+}
+
+bool semanticNameMatches(const MemoryLabel& label, const char* expected) {
+    const std::string want = expected;
+    const std::string full = lowerText(label.label);
+    const std::string entity = lowerText(label.entity);
+    const std::string field = lowerText(label.field);
+    if (full == want || field == want) {
+        return true;
+    }
+    if (!entity.empty() && full == entity + "." + want) {
+        return true;
+    }
+    return full.size() > want.size()
+        && full.compare(full.size() - want.size() - 1, want.size() + 1, "." + want) == 0;
+}
+
+bool semanticNameMatchesAny(const MemoryLabel& label, const std::vector<const char*>& expected) {
+    for (const char* name : expected) {
+        if (semanticNameMatches(label, name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+TimelineEvent makeEvent(
+    std::uint64_t frame,
+    RunLabEventType type,
+    const MemoryLabel& label,
+    std::int32_t previous,
+    std::int32_t current,
+    const std::string& description,
+    double confidence
+) {
+    TimelineEvent event{};
+    event.frame = frame;
+    event.type = type;
+    event.label = label.label;
+    event.previous = previous;
+    event.current = current;
+    event.entity = label.entity;
+    event.description = description;
+    event.confidence = confidence;
+    event.semantic = eventTypeName(type);
+    event.reason = description;
+    return event;
+}
+
 } // namespace
 
 const char* entityTypeName(EntityType type) {
@@ -200,6 +258,37 @@ const char* memoryValueTypeName(MemoryValueType type) {
     case MemoryValueType::Hex8: return "hex8";
     case MemoryValueType::Hex16: return "hex16";
     default: return "u8";
+    }
+}
+
+const char* eventTypeName(RunLabEventType type) {
+    switch (type) {
+    case RunLabEventType::ValueIncreased: return "value_increased";
+    case RunLabEventType::ValueDecreased: return "value_decreased";
+    case RunLabEventType::DamageCandidate: return "damage_candidate";
+    case RunLabEventType::DeathCandidate: return "death_candidate";
+    case RunLabEventType::LevelChangeCandidate: return "level_change_candidate";
+    case RunLabEventType::LevelClearCandidate: return "level_clear_candidate";
+    case RunLabEventType::SplitCandidate: return "split_candidate";
+    case RunLabEventType::GoalReachedCandidate: return "goal_reached_candidate";
+    case RunLabEventType::Custom: return "custom";
+    default: return "memory_changed";
+    }
+}
+
+const char* conditionOperatorName(ConditionOperator op) {
+    switch (op) {
+    case ConditionOperator::ChangedFromInitial: return "changed_from_initial";
+    case ConditionOperator::Equal: return "==";
+    case ConditionOperator::NotEqual: return "!=";
+    case ConditionOperator::Greater: return ">";
+    case ConditionOperator::GreaterEqual: return ">=";
+    case ConditionOperator::Less: return "<";
+    case ConditionOperator::LessEqual: return "<=";
+    case ConditionOperator::Decreased: return "decreased";
+    case ConditionOperator::Increased: return "increased";
+    case ConditionOperator::ChangedToNonzero: return "changed_to_nonzero";
+    default: return "changed";
     }
 }
 
@@ -397,15 +486,82 @@ std::size_t promoteCorrelationCandidate(State& state, CorrelationTarget target, 
     return state.memoryLabels.size() - 1;
 }
 
+std::vector<TimelineEvent> detectEventsForChange(
+    const MemoryLabel& label,
+    std::int32_t previous,
+    std::int32_t current,
+    std::uint64_t frame
+) {
+    std::vector<TimelineEvent> out;
+    if (previous == current) {
+        return out;
+    }
+
+    out.push_back(makeEvent(frame, RunLabEventType::MemoryChanged, label, previous, current, "memory label changed", 1.0));
+    if (current > previous) {
+        out.push_back(makeEvent(frame, RunLabEventType::ValueIncreased, label, previous, current, "value increased", 0.9));
+    } else {
+        out.push_back(makeEvent(frame, RunLabEventType::ValueDecreased, label, previous, current, "value decreased", 0.9));
+    }
+
+    const bool healthLike = semanticNameMatchesAny(label, {"lives", "life", "hp", "health", "player.hp", "player.health"});
+    if (healthLike && current < previous) {
+        out.push_back(makeEvent(frame, RunLabEventType::DamageCandidate, label, previous, current, "health or lives decreased", 0.78));
+        if (current == 0) {
+            out.push_back(makeEvent(frame, RunLabEventType::DeathCandidate, label, previous, current, "health or lives reached zero", 0.88));
+        }
+    }
+
+    const bool levelLike = semanticNameMatchesAny(label, {"level_id", "stage", "stage_id", "room", "room_id", "map", "map_id"});
+    if (levelLike) {
+        out.push_back(makeEvent(frame, RunLabEventType::LevelChangeCandidate, label, previous, current, "level, stage, room, or map changed", 0.82));
+        out.push_back(makeEvent(frame, RunLabEventType::SplitCandidate, label, previous, current, "possible split point", 0.74));
+    }
+
+    const bool stateLike = semanticNameMatchesAny(label, {"game_state", "state", "mode"});
+    const bool clearValue = current == 2 || current == 3 || current == 4 || current == 0x10 || current == 0xFF;
+    if (stateLike && clearValue) {
+        out.push_back(makeEvent(frame, RunLabEventType::LevelClearCandidate, label, previous, current, "game_state entered a possible clear/victory value", 0.52));
+    }
+
+    const bool goalLike = semanticNameMatchesAny(label, {"goal_flag", "clear_flag", "finish_flag", "victory_flag"});
+    if (goalLike && previous == 0 && current != 0) {
+        out.push_back(makeEvent(frame, RunLabEventType::GoalReachedCandidate, label, previous, current, "goal or finish flag activated", 0.86));
+    }
+
+    return out;
+}
+
+bool eventIsImportant(const TimelineEvent& event) {
+    switch (event.type) {
+    case RunLabEventType::DamageCandidate:
+    case RunLabEventType::DeathCandidate:
+    case RunLabEventType::LevelChangeCandidate:
+    case RunLabEventType::LevelClearCandidate:
+    case RunLabEventType::SplitCandidate:
+    case RunLabEventType::GoalReachedCandidate:
+    case RunLabEventType::Custom:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void clearEvents(State& state) {
+    state.events.clear();
+}
+
 void updateTimeline(State& state, const gb::Bus& bus, std::uint64_t frame, std::size_t maxEvents) {
     for (auto& label : state.memoryLabels) {
         const std::int32_t now = readMemoryLabelValue(bus, label);
         if (label.hasLastValue && label.lastValue != now) {
-            state.events.push_back(TimelineEvent{frame, label.label, label.lastValue, now});
+            auto detected = detectEventsForChange(label, label.lastValue, now, frame);
+            state.events.insert(state.events.end(), std::make_move_iterator(detected.begin()), std::make_move_iterator(detected.end()));
         }
         label.lastValue = now;
         label.hasLastValue = true;
     }
+    evaluateGoalsAndSplits(state, bus, frame);
     if (state.events.size() > maxEvents) {
         state.events.erase(state.events.begin(), state.events.begin() + static_cast<std::ptrdiff_t>(state.events.size() - maxEvents));
     }
@@ -442,6 +598,194 @@ std::size_t buildRamDiff(State& state, const gb::Bus& bus, std::size_t maxEntrie
         }
     }
     return total;
+}
+
+const MemoryLabel* findLabelByName(const std::vector<MemoryLabel>& labels, const std::string& name) {
+    const std::string want = lowerText(name);
+    for (const auto& label : labels) {
+        if (lowerText(label.label) == want) {
+            return &label;
+        }
+        if (!label.entity.empty() && !label.field.empty() && lowerText(label.entity + "." + label.field) == want) {
+            return &label;
+        }
+    }
+    return nullptr;
+}
+
+std::vector<MemoryLabel> snapshotLabels(const std::vector<MemoryLabel>& labels, const gb::Bus& bus) {
+    std::vector<MemoryLabel> out = labels;
+    for (auto& label : out) {
+        label.lastValue = readMemoryLabelValue(bus, label);
+        label.hasLastValue = true;
+    }
+    return out;
+}
+
+bool evaluateCondition(
+    const GoalCondition& condition,
+    const std::vector<MemoryLabel>& current,
+    const std::vector<MemoryLabel>& baseline
+) {
+    const MemoryLabel* nowLabel = findLabelByName(current, condition.label);
+    if (!nowLabel || !nowLabel->hasLastValue) {
+        return false;
+    }
+    const MemoryLabel* baseLabel = findLabelByName(baseline, condition.label);
+    const std::int32_t now = nowLabel->lastValue;
+    const bool hasBase = baseLabel && baseLabel->hasLastValue;
+    const std::int32_t base = hasBase ? baseLabel->lastValue : now;
+
+    switch (condition.op) {
+    case ConditionOperator::Changed:
+    case ConditionOperator::ChangedFromInitial:
+        return hasBase && now != base;
+    case ConditionOperator::Equal:
+        return now == condition.value;
+    case ConditionOperator::NotEqual:
+        return now != condition.value;
+    case ConditionOperator::Greater:
+        return now > condition.value;
+    case ConditionOperator::GreaterEqual:
+        return now >= condition.value;
+    case ConditionOperator::Less:
+        return now < condition.value;
+    case ConditionOperator::LessEqual:
+        return now <= condition.value;
+    case ConditionOperator::Decreased:
+        return hasBase && now < base;
+    case ConditionOperator::Increased:
+        return hasBase && now > base;
+    case ConditionOperator::ChangedToNonzero:
+        return hasBase && base == 0 && now != 0;
+    }
+    return false;
+}
+
+std::size_t createDefaultGoalFromLabels(State& state) {
+    GoalDefinition goal{};
+    goal.name = "finish_current_level";
+    goal.description = "Finish current level from labeled memory";
+    goal.optimize = "min_frames";
+
+    if (findLabelByName(state.memoryLabels, "level_id")) {
+        goal.done = GoalCondition{"level_id", ConditionOperator::ChangedFromInitial, 0};
+    } else if (findLabelByName(state.memoryLabels, "player.x")) {
+        const auto* label = findLabelByName(state.memoryLabels, "player.x");
+        goal.name = "reach_x_position";
+        goal.description = "Reach a farther player.x position";
+        goal.done = GoalCondition{"player.x", ConditionOperator::GreaterEqual, label ? label->lastValue + 128 : 128};
+    } else {
+        goal.name = "runlab_goal";
+        goal.description = "Default generated RunLab goal";
+        goal.done = GoalCondition{"goal_flag", ConditionOperator::ChangedToNonzero, 0};
+    }
+
+    if (findLabelByName(state.memoryLabels, "lives")) {
+        goal.fail.push_back(GoalCondition{"lives", ConditionOperator::Decreased, 0});
+    } else if (findLabelByName(state.memoryLabels, "player.hp")) {
+        goal.fail.push_back(GoalCondition{"player.hp", ConditionOperator::Decreased, 0});
+    }
+
+    state.goals.push_back(goal);
+    return state.goals.size() - 1;
+}
+
+bool startGoal(State& state, std::size_t goalIndex, const gb::Bus& bus, std::uint64_t frame) {
+    if (goalIndex >= state.goals.size()) {
+        return false;
+    }
+    for (auto& goal : state.goals) {
+        goal.active = false;
+    }
+    auto& goal = state.goals[goalIndex];
+    goal.active = true;
+    goal.doneTriggered = false;
+    goal.failTriggered = false;
+    goal.startFrame = frame;
+    goal.doneFrame = 0;
+    goal.failFrame = 0;
+    goal.baseline = snapshotLabels(state.memoryLabels, bus);
+    goal.lastEvent.clear();
+    for (auto& split : state.splits) {
+        split.baseline = goal.baseline;
+        split.triggered = false;
+        split.triggeredFrame = 0;
+    }
+    state.activeGoal = goalIndex;
+    return true;
+}
+
+void resetActiveGoalBaseline(State& state, const gb::Bus& bus, std::uint64_t frame) {
+    if (!state.activeGoal.has_value() || state.activeGoal.value() >= state.goals.size()) {
+        return;
+    }
+    (void)startGoal(state, state.activeGoal.value(), bus, frame);
+}
+
+std::size_t createDefaultSplitFromLabels(State& state) {
+    SplitDefinition split{};
+    if (findLabelByName(state.memoryLabels, "level_id")) {
+        split.name = "Level Clear";
+        split.condition = GoalCondition{"level_id", ConditionOperator::ChangedFromInitial, 0};
+        split.label = "level_id";
+    } else if (findLabelByName(state.memoryLabels, "room_id")) {
+        split.name = "Room Transition";
+        split.condition = GoalCondition{"room_id", ConditionOperator::ChangedFromInitial, 0};
+        split.label = "room_id";
+    } else {
+        split.name = "Goal Flag";
+        split.condition = GoalCondition{"goal_flag", ConditionOperator::ChangedToNonzero, 0};
+        split.label = "goal_flag";
+    }
+    state.splits.push_back(split);
+    return state.splits.size() - 1;
+}
+
+void evaluateGoalsAndSplits(State& state, const gb::Bus& bus, std::uint64_t frame) {
+    for (auto& label : state.memoryLabels) {
+        label.lastValue = readMemoryLabelValue(bus, label);
+        label.hasLastValue = true;
+    }
+
+    if (state.activeGoal.has_value() && state.activeGoal.value() < state.goals.size()) {
+        auto& goal = state.goals[state.activeGoal.value()];
+        if (goal.active && !goal.doneTriggered && !goal.failTriggered) {
+            for (const auto& fail : goal.fail) {
+                if (evaluateCondition(fail, state.memoryLabels, goal.baseline)) {
+                    goal.failTriggered = true;
+                    goal.failFrame = frame;
+                    goal.active = false;
+                    goal.lastEvent = "fail";
+                    break;
+                }
+            }
+            if (!goal.failTriggered && evaluateCondition(goal.done, state.memoryLabels, goal.baseline)) {
+                goal.doneTriggered = true;
+                goal.doneFrame = frame;
+                goal.active = false;
+                goal.lastEvent = "done";
+                if (const auto* label = findLabelByName(state.memoryLabels, goal.done.label)) {
+                    state.events.push_back(makeEvent(frame, RunLabEventType::GoalReachedCandidate, *label, 0, label->lastValue, "goal condition reached", 0.92));
+                }
+            }
+        }
+    }
+
+    for (auto& split : state.splits) {
+        if (split.triggered) {
+            continue;
+        }
+        if (evaluateCondition(split.condition, state.memoryLabels, split.baseline)) {
+            split.triggered = true;
+            split.triggeredFrame = frame;
+            if (const auto* label = findLabelByName(state.memoryLabels, split.condition.label)) {
+                split.label = label->label;
+                split.entity = label->entity;
+                state.events.push_back(makeEvent(frame, RunLabEventType::SplitCandidate, *label, 0, label->lastValue, "split condition triggered", 0.9));
+            }
+        }
+    }
 }
 
 bool refreshSelectedEntityBounds(State& state, const gb::Bus& bus) {
@@ -610,6 +954,27 @@ bool runCorrelationScan(State& state, std::size_t maxPerGroup) {
 
 std::string exportProfileJson(const State& state, const std::string& gameName) {
     std::ostringstream out;
+    const auto writeCondition = [&](const GoalCondition& condition, int indent) {
+        const std::string pad(static_cast<std::size_t>(indent), ' ');
+        out << pad << "{\n";
+        out << pad << "  \"label\": \"" << jsonEscape(condition.label) << "\",\n";
+        out << pad << "  \"operator\": \"" << conditionOperatorName(condition.op) << "\"";
+        switch (condition.op) {
+        case ConditionOperator::Equal:
+        case ConditionOperator::NotEqual:
+        case ConditionOperator::Greater:
+        case ConditionOperator::GreaterEqual:
+        case ConditionOperator::Less:
+        case ConditionOperator::LessEqual:
+            out << ",\n" << pad << "  \"value\": " << condition.value << "\n";
+            break;
+        default:
+            out << "\n";
+            break;
+        }
+        out << pad << "}";
+    };
+
     out << "{\n";
     out << "  \"game\": {\n";
     out << "    \"name\": \"" << jsonEscape(gameName) << "\",\n";
@@ -654,10 +1019,49 @@ std::string exportProfileJson(const State& state, const std::string& gameName) {
         out << "\n    }" << (i + 1 == state.memoryLabels.size() ? "" : ",") << "\n";
     }
     out << "  ],\n";
-    out << "  \"events\": {\n";
-    out << "    \"death_candidate\": \"lives < previous.lives\",\n";
-    out << "    \"level_change_candidate\": \"level_id != previous.level_id\"\n";
-    out << "  }\n";
+    out << "  \"event_detection_rules\": {\n";
+    out << "    \"damage_candidate\": \"lives/hp/health decreased\",\n";
+    out << "    \"death_candidate\": \"lives/hp/health reached zero\",\n";
+    out << "    \"level_change_candidate\": \"level_id/stage/room/map changed\",\n";
+    out << "    \"split_candidate\": \"level_id/stage/room/map changed\",\n";
+    out << "    \"level_clear_candidate\": \"game_state entered possible clear/victory value\",\n";
+    out << "    \"goal_reached_candidate\": \"goal_flag/clear_flag/finish_flag changed from zero to nonzero\"\n";
+    out << "  },\n";
+    out << "  \"goals\": [\n";
+    for (std::size_t i = 0; i < state.goals.size(); ++i) {
+        const auto& goal = state.goals[i];
+        out << "    {\n";
+        out << "      \"name\": \"" << jsonEscape(goal.name) << "\",\n";
+        out << "      \"description\": \"" << jsonEscape(goal.description) << "\",\n";
+        out << "      \"done\": ";
+        writeCondition(goal.done, 6);
+        out << ",\n";
+        out << "      \"fail\": [\n";
+        for (std::size_t j = 0; j < goal.fail.size(); ++j) {
+            writeCondition(goal.fail[j], 8);
+            out << (j + 1 == goal.fail.size() ? "\n" : ",\n");
+        }
+        out << "      ],\n";
+        out << "      \"optimize\": \"" << jsonEscape(goal.optimize) << "\"\n";
+        out << "    }" << (i + 1 == state.goals.size() ? "" : ",") << "\n";
+    }
+    out << "  ],\n";
+    out << "  \"splits\": [\n";
+    for (std::size_t i = 0; i < state.splits.size(); ++i) {
+        const auto& split = state.splits[i];
+        out << "    {\n";
+        out << "      \"name\": \"" << jsonEscape(split.name) << "\",\n";
+        out << "      \"condition\": ";
+        writeCondition(split.condition, 6);
+        if (!split.label.empty()) {
+            out << ",\n      \"label\": \"" << jsonEscape(split.label) << "\"";
+        }
+        if (!split.entity.empty()) {
+            out << ",\n      \"entity\": \"" << jsonEscape(split.entity) << "\"";
+        }
+        out << "\n    }" << (i + 1 == state.splits.size() ? "" : ",") << "\n";
+    }
+    out << "  ]\n";
     out << "}\n";
     return out.str();
 }
@@ -675,6 +1079,140 @@ bool exportProfileFile(State& state, const std::string& gameName, const std::str
     }
     state.lastExportPath = path.string();
     return true;
+}
+
+std::string exportCurrentStateJson(
+    const State& state,
+    const std::string& gameName,
+    std::uint64_t frame,
+    bool paused,
+    bool running,
+    const std::string& profilePath,
+    const std::string& screenshotPath
+) {
+    std::ostringstream out;
+    out << "{\n";
+    out << "  \"status\": {\n";
+    out << "    \"rom_name\": \"" << jsonEscape(gameName) << "\",\n";
+    out << "    \"frame\": " << frame << ",\n";
+    out << "    \"running\": " << (running ? "true" : "false") << ",\n";
+    out << "    \"paused\": " << (paused ? "true" : "false");
+    if (!profilePath.empty()) {
+        out << ",\n    \"profile_path\": \"" << jsonEscape(profilePath) << "\"";
+    }
+    if (!screenshotPath.empty()) {
+        out << ",\n    \"screenshot_path\": \"" << jsonEscape(screenshotPath) << "\"";
+    }
+    out << "\n  },\n";
+
+    out << "  \"entities\": [\n";
+    for (std::size_t i = 0; i < state.entities.size(); ++i) {
+        const auto& e = state.entities[i];
+        out << "    {\n";
+        out << "      \"label\": \"" << jsonEscape(e.label) << "\",\n";
+        out << "      \"type\": \"" << entityTypeName(e.type) << "\",\n";
+        out << "      \"oam_indices\": [";
+        for (std::size_t j = 0; j < e.oamIndices.size(); ++j) {
+            if (j != 0) out << ", ";
+            out << e.oamIndices[j];
+        }
+        out << "],\n";
+        out << "      \"selected\": " << (state.selectedEntity.has_value() && state.selectedEntity.value() == i ? "true" : "false") << ",\n";
+        out << "      \"last_bbox\": { \"x\": " << e.lastBounds.x
+            << ", \"y\": " << e.lastBounds.y
+            << ", \"w\": " << e.lastBounds.w
+            << ", \"h\": " << e.lastBounds.h << " }\n";
+        out << "    }" << (i + 1 == state.entities.size() ? "" : ",") << "\n";
+    }
+    out << "  ],\n";
+
+    out << "  \"memory_labels\": [\n";
+    for (std::size_t i = 0; i < state.memoryLabels.size(); ++i) {
+        const auto& m = state.memoryLabels[i];
+        out << "    {\n";
+        out << "      \"label\": \"" << jsonEscape(m.label) << "\",\n";
+        out << "      \"address\": \"" << formatAddress(m.address) << "\",\n";
+        out << "      \"type\": \"" << memoryValueTypeName(m.type) << "\"";
+        if (!m.entity.empty()) out << ",\n      \"entity\": \"" << jsonEscape(m.entity) << "\"";
+        if (!m.field.empty()) out << ",\n      \"field\": \"" << jsonEscape(m.field) << "\"";
+        if (!m.notes.empty()) out << ",\n      \"notes\": \"" << jsonEscape(m.notes) << "\"";
+        if (m.hasLastValue) out << ",\n      \"current_value\": " << m.lastValue;
+        out << "\n    }" << (i + 1 == state.memoryLabels.size() ? "" : ",") << "\n";
+    }
+    out << "  ],\n";
+
+    out << "  \"events\": [\n";
+    for (std::size_t i = 0; i < state.events.size(); ++i) {
+        const auto& e = state.events[i];
+        out << "    {\n";
+        out << "      \"frame\": " << e.frame << ",\n";
+        out << "      \"type\": \"" << eventTypeName(e.type) << "\",\n";
+        out << "      \"label\": \"" << jsonEscape(e.label) << "\",\n";
+        out << "      \"previous\": " << e.previous << ",\n";
+        out << "      \"current\": " << e.current << ",\n";
+        out << "      \"entity\": \"" << jsonEscape(e.entity) << "\",\n";
+        out << "      \"description\": \"" << jsonEscape(e.description) << "\",\n";
+        out << "      \"confidence\": " << e.confidence << ",\n";
+        out << "      \"reason\": \"" << jsonEscape(e.reason) << "\"\n";
+        out << "    }" << (i + 1 == state.events.size() ? "" : ",") << "\n";
+    }
+    out << "  ],\n";
+
+    out << "  \"goal\": ";
+    if (state.activeGoal.has_value() && state.activeGoal.value() < state.goals.size()) {
+        const auto& goal = state.goals[state.activeGoal.value()];
+        out << "{\n";
+        out << "    \"active\": true,\n";
+        out << "    \"name\": \"" << jsonEscape(goal.name) << "\",\n";
+        out << "    \"description\": \"" << jsonEscape(goal.description) << "\",\n";
+        out << "    \"done_triggered\": " << (goal.doneTriggered ? "true" : "false") << ",\n";
+        out << "    \"fail_triggered\": " << (goal.failTriggered ? "true" : "false") << ",\n";
+        out << "    \"start_frame\": " << goal.startFrame << ",\n";
+        out << "    \"done_frame\": " << goal.doneFrame << ",\n";
+        out << "    \"fail_frame\": " << goal.failFrame << ",\n";
+        out << "    \"last_event\": \"" << jsonEscape(goal.lastEvent) << "\"\n";
+        out << "  },\n";
+    } else {
+        out << "{ \"active\": false },\n";
+    }
+
+    out << "  \"splits\": [\n";
+    for (std::size_t i = 0; i < state.splits.size(); ++i) {
+        const auto& split = state.splits[i];
+        out << "    {\n";
+        out << "      \"name\": \"" << jsonEscape(split.name) << "\",\n";
+        out << "      \"label\": \"" << jsonEscape(split.label) << "\",\n";
+        out << "      \"entity\": \"" << jsonEscape(split.entity) << "\",\n";
+        out << "      \"triggered\": " << (split.triggered ? "true" : "false") << ",\n";
+        out << "      \"triggered_frame\": " << split.triggeredFrame << "\n";
+        out << "    }" << (i + 1 == state.splits.size() ? "" : ",") << "\n";
+    }
+    out << "  ],\n";
+    out << "  \"profile\": " << exportProfileJson(state, gameName);
+    out << "}\n";
+    return out.str();
+}
+
+bool exportCurrentStateFile(
+    const State& state,
+    const std::string& gameName,
+    std::uint64_t frame,
+    bool paused,
+    bool running,
+    const std::string& statePath,
+    const std::string& profilePath,
+    const std::string& screenshotPath
+) {
+    const std::filesystem::path path(statePath);
+    if (path.has_parent_path()) {
+        std::filesystem::create_directories(path.parent_path());
+    }
+    std::ofstream file(path, std::ios::trunc);
+    if (!file) {
+        return false;
+    }
+    file << exportCurrentStateJson(state, gameName, frame, paused, running, profilePath, screenshotPath);
+    return static_cast<bool>(file);
 }
 
 } // namespace gb::frontend::runlab

@@ -269,11 +269,12 @@ TEST_CASE("frontend", "runlab_event_timeline_detects_labeled_change") {
 
     gb.bus().write(0xC000, 2);
     gb::frontend::runlab::updateTimeline(state, gb.bus(), 11);
-    T_EQ(state.events.size(), static_cast<std::size_t>(1));
+    T_REQUIRE(state.events.size() >= static_cast<std::size_t>(3));
     T_EQ(state.events[0].frame, static_cast<std::uint64_t>(11));
     T_EQ(state.events[0].label, std::string("lives"));
     T_EQ(state.events[0].previous, 3);
     T_EQ(state.events[0].current, 2);
+    T_EQ(static_cast<int>(state.events[0].type), static_cast<int>(gb::frontend::runlab::RunLabEventType::MemoryChanged));
 }
 
 TEST_CASE("frontend", "runlab_entity_candidate_serializes_to_profile") {
@@ -383,6 +384,103 @@ TEST_CASE("frontend", "runlab_correlation_supports_u16_and_promotion") {
     const std::string json = gb::frontend::runlab::exportProfileJson(state, "TEST GAME");
     T_REQUIRE(json.find("\"label\": \"player.x\"") != std::string::npos);
     T_REQUIRE(json.find("\"entity\": \"player\"") != std::string::npos);
+}
+
+TEST_CASE("frontend", "runlab_event_detection_generates_damage_death_and_level_change") {
+    const auto livesDrop = gb::frontend::runlab::detectEventsForChange(
+        gb::frontend::runlab::makeMemoryLabel("lives", 0xC000, gb::frontend::runlab::MemoryValueType::U8),
+        3,
+        2,
+        100
+    );
+    bool hasDamage = false;
+    for (const auto& event : livesDrop) {
+        hasDamage = hasDamage || event.type == gb::frontend::runlab::RunLabEventType::DamageCandidate;
+    }
+    T_REQUIRE(hasDamage);
+
+    const auto death = gb::frontend::runlab::detectEventsForChange(
+        gb::frontend::runlab::makeMemoryLabel("player.hp", 0xC001, gb::frontend::runlab::MemoryValueType::U8, "player", "hp"),
+        1,
+        0,
+        101
+    );
+    bool hasDeath = false;
+    for (const auto& event : death) {
+        hasDeath = hasDeath || event.type == gb::frontend::runlab::RunLabEventType::DeathCandidate;
+    }
+    T_REQUIRE(hasDeath);
+
+    const auto level = gb::frontend::runlab::detectEventsForChange(
+        gb::frontend::runlab::makeMemoryLabel("level_id", 0xC002, gb::frontend::runlab::MemoryValueType::U8),
+        1,
+        2,
+        102
+    );
+    bool hasLevel = false;
+    bool hasSplit = false;
+    for (const auto& event : level) {
+        hasLevel = hasLevel || event.type == gb::frontend::runlab::RunLabEventType::LevelChangeCandidate;
+        hasSplit = hasSplit || event.type == gb::frontend::runlab::RunLabEventType::SplitCandidate;
+    }
+    T_REQUIRE(hasLevel);
+    T_REQUIRE(hasSplit);
+}
+
+TEST_CASE("frontend", "runlab_goal_conditions_compare_against_baseline_and_values") {
+    std::vector<gb::frontend::runlab::MemoryLabel> baseline;
+    baseline.push_back(gb::frontend::runlab::makeMemoryLabel("level_id", 0xC000, gb::frontend::runlab::MemoryValueType::U8));
+    baseline.back().lastValue = 1;
+    baseline.back().hasLastValue = true;
+
+    std::vector<gb::frontend::runlab::MemoryLabel> current = baseline;
+    current[0].lastValue = 2;
+
+    T_REQUIRE(gb::frontend::runlab::evaluateCondition(
+        gb::frontend::runlab::GoalCondition{"level_id", gb::frontend::runlab::ConditionOperator::ChangedFromInitial, 0},
+        current,
+        baseline
+    ));
+    T_REQUIRE(gb::frontend::runlab::evaluateCondition(
+        gb::frontend::runlab::GoalCondition{"level_id", gb::frontend::runlab::ConditionOperator::GreaterEqual, 2},
+        current,
+        baseline
+    ));
+}
+
+TEST_CASE("frontend", "runlab_split_triggers_once_only") {
+    gb::GameBoy gb;
+    tests::ScopedPath cleanup;
+    loadBlankRom(gb, cleanup);
+
+    gb::frontend::runlab::State state{};
+    state.memoryLabels.push_back(gb::frontend::runlab::makeMemoryLabel("level_id", 0xC000, gb::frontend::runlab::MemoryValueType::U8));
+    gb.bus().write(0xC000, 1);
+    (void)gb::frontend::runlab::createDefaultGoalFromLabels(state);
+    (void)gb::frontend::runlab::createDefaultSplitFromLabels(state);
+    T_REQUIRE(gb::frontend::runlab::startGoal(state, 0, gb.bus(), 10));
+
+    gb.bus().write(0xC000, 2);
+    gb::frontend::runlab::evaluateGoalsAndSplits(state, gb.bus(), 20);
+    T_REQUIRE(state.splits[0].triggered);
+    T_EQ(state.splits[0].triggeredFrame, static_cast<std::uint64_t>(20));
+    const auto eventCount = state.events.size();
+
+    gb::frontend::runlab::evaluateGoalsAndSplits(state, gb.bus(), 21);
+    T_EQ(state.events.size(), eventCount);
+}
+
+TEST_CASE("frontend", "runlab_profile_export_includes_goals_and_splits") {
+    gb::frontend::runlab::State state{};
+    state.memoryLabels.push_back(gb::frontend::runlab::makeMemoryLabel("level_id", 0xC000, gb::frontend::runlab::MemoryValueType::U8));
+    (void)gb::frontend::runlab::createDefaultGoalFromLabels(state);
+    (void)gb::frontend::runlab::createDefaultSplitFromLabels(state);
+
+    const std::string json = gb::frontend::runlab::exportProfileJson(state, "TEST GAME");
+    T_REQUIRE(json.find("\"goals\"") != std::string::npos);
+    T_REQUIRE(json.find("\"splits\"") != std::string::npos);
+    T_REQUIRE(json.find("\"operator\": \"changed_from_initial\"") != std::string::npos);
+    T_REQUIRE(json.find("\"event_detection_rules\"") != std::string::npos);
 }
 
 TEST_CASE("frontend", "fast_forward_timing_policy_is_paced") {

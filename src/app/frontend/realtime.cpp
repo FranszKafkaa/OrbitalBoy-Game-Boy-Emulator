@@ -273,6 +273,9 @@ int runRealtime(
     MemoryEditState memoryEdit{};
     MemoryWriteUiState memoryWriteUi{};
     runlab::State runLabState{};
+    bool showRunLabCandidateList = false;
+    bool showRunLabClickedCandidateOverlay = false;
+    int runLabCandidateOverlayFrames = 0;
     QueuedMemoryWrite queuedWrite{};
     std::atomic<std::uint64_t> emulatedFrameCounter{0};
     std::string uiMessage;
@@ -574,6 +577,9 @@ int runRealtime(
             uiMessage = "RUNLAB NEED SAMPLES";
         } else {
             uiMessage = "RUNLAB SCAN " + std::to_string(samples);
+            showRunLabCandidateList = true;
+            showRunLabClickedCandidateOverlay = false;
+            runLabCandidateOverlayFrames = 240;
         }
         uiMessageFrames = 150;
     };
@@ -587,6 +593,48 @@ int runRealtime(
             uiMessage = "RUNLAB NO CAND";
         }
         uiMessageFrames = 120;
+    };
+
+    const auto createAndStartRunLabGoal = [&]() {
+        std::size_t goalIdx = 0;
+        {
+            std::lock_guard<std::mutex> gbLock(gbMutex);
+            if (runLabState.goals.empty()) {
+                goalIdx = runlab::createDefaultGoalFromLabels(runLabState);
+            } else {
+                goalIdx = 0;
+            }
+            if (runLabState.splits.empty()) {
+                (void)runlab::createDefaultSplitFromLabels(runLabState);
+            }
+            (void)runlab::startGoal(runLabState, goalIdx, gb.bus(), emulatedFrameCounter.load(std::memory_order_relaxed));
+        }
+        uiMessage = "RUNLAB GOAL START";
+        uiMessageFrames = 150;
+    };
+
+    const auto resetRunLabBaseline = [&]() {
+        {
+            std::lock_guard<std::mutex> gbLock(gbMutex);
+            runlab::resetActiveGoalBaseline(runLabState, gb.bus(), emulatedFrameCounter.load(std::memory_order_relaxed));
+        }
+        uiMessage = "RUNLAB BASELINE";
+        uiMessageFrames = 120;
+    };
+
+    const auto runLabCandidateAddresses = [&]() {
+        std::vector<gb::u16> out;
+        out.reserve(
+            runLabState.correlationResult.entityX.size()
+            + runLabState.correlationResult.entityY.size()
+            + runLabState.correlationResult.cameraX.size()
+            + runLabState.correlationResult.state.size()
+        );
+        for (const auto& c : runLabState.correlationResult.entityX) out.push_back(c.address);
+        for (const auto& c : runLabState.correlationResult.entityY) out.push_back(c.address);
+        for (const auto& c : runLabState.correlationResult.cameraX) out.push_back(c.address);
+        for (const auto& c : runLabState.correlationResult.state) out.push_back(c.address);
+        return out;
     };
 
     const auto runMemorySearch = [&]() {
@@ -2082,6 +2130,23 @@ int runRealtime(
                     promoteRunLabCorrelation(runlab::CorrelationTarget::State);
                     continue;
                 }
+                if (showPanel && ev.key.keysym.sym == SDLK_g) {
+                    createAndStartRunLabGoal();
+                    continue;
+                }
+                if (showPanel && ev.key.keysym.sym == SDLK_r) {
+                    resetRunLabBaseline();
+                    continue;
+                }
+                if (showPanel && ev.key.keysym.sym == SDLK_q) {
+                    runlab::clearEvents(runLabState);
+                    showRunLabCandidateList = false;
+                    showRunLabClickedCandidateOverlay = false;
+                    runLabCandidateOverlayFrames = 0;
+                    uiMessage = "RUNLAB EVENTS CLEAR";
+                    uiMessageFrames = 120;
+                    continue;
+                }
                 if (showPanel && ev.key.keysym.sym == SDLK_F6) {
                     {
                         std::lock_guard<std::mutex> gbLock(gbMutex);
@@ -2596,20 +2661,39 @@ int runRealtime(
                     }
 
                     const int readStartY = readStartYFromLayout(outputH, showBreakpointMenu);
-                    std::vector<gb::Bus::MemoryReadEvent> readsNow;
-                    {
-                        std::lock_guard<std::mutex> gbLock(gbMutex);
-                        readsNow = gb.bus().snapshotRecentReads(128);
-                    }
                     const int readMaxLines = readVisibleLinesForPanel(outputH, showBreakpointMenu);
-                    const int readCount = static_cast<int>(std::min<std::size_t>(readsNow.size(), static_cast<std::size_t>(readMaxLines)));
-                    if (my >= readStartY && my < readStartY + readCount * kReadLineHeight) {
-                        const int readIdx = (my - readStartY) / kReadLineHeight;
-                        if (readIdx >= 0 && readIdx < static_cast<int>(readsNow.size())) {
-                            memoryWatch.address = readsNow[static_cast<std::size_t>(readIdx)].address;
-                            {
-                                std::lock_guard<std::mutex> gbLock(gbMutex);
-                                resetMemoryWatch(memoryWatch, gb.bus());
+                    if (showRunLabCandidateList) {
+                        const auto candidates = runLabCandidateAddresses();
+                        const int candidateCount = static_cast<int>(std::min<std::size_t>(candidates.size(), static_cast<std::size_t>(readMaxLines)));
+                        if (my >= readStartY && my < readStartY + candidateCount * kReadLineHeight) {
+                            const int candidateIdx = (my - readStartY) / kReadLineHeight;
+                            if (candidateIdx >= 0 && candidateIdx < static_cast<int>(candidates.size())) {
+                                memoryWatch.address = candidates[static_cast<std::size_t>(candidateIdx)];
+                                {
+                                    std::lock_guard<std::mutex> gbLock(gbMutex);
+                                    resetMemoryWatch(memoryWatch, gb.bus());
+                                }
+                                showRunLabClickedCandidateOverlay = true;
+                                runLabCandidateOverlayFrames = 0;
+                                uiMessage = "WATCH RUNLAB CAND";
+                                uiMessageFrames = 90;
+                            }
+                        }
+                    } else {
+                        std::vector<gb::Bus::MemoryReadEvent> readsNow;
+                        {
+                            std::lock_guard<std::mutex> gbLock(gbMutex);
+                            readsNow = gb.bus().snapshotRecentReads(128);
+                        }
+                        const int readCount = static_cast<int>(std::min<std::size_t>(readsNow.size(), static_cast<std::size_t>(readMaxLines)));
+                        if (my >= readStartY && my < readStartY + readCount * kReadLineHeight) {
+                            const int readIdx = (my - readStartY) / kReadLineHeight;
+                            if (readIdx >= 0 && readIdx < static_cast<int>(readsNow.size())) {
+                                memoryWatch.address = readsNow[static_cast<std::size_t>(readIdx)].address;
+                                {
+                                    std::lock_guard<std::mutex> gbLock(gbMutex);
+                                    resetMemoryWatch(memoryWatch, gb.bus());
+                                }
                             }
                         }
                     }
@@ -2759,6 +2843,11 @@ int runRealtime(
                 const auto selectedSprite = findSelectedSprite(sprites, selectedSpriteAddr);
                 const int overlayScale = std::max(1, blit.gameDst.w / width);
                 drawSelectedSpriteOverlay(renderer, gb.bus(), selectedSprite, overlayScale, blit.gameDst.x, blit.gameDst.y);
+                if (showRunLabClickedCandidateOverlay) {
+                    drawRunLabCandidateOverlay(renderer, gb.bus(), sprites, runLabState, true, overlayScale, blit.gameDst.x, blit.gameDst.y);
+                } else if (runLabCandidateOverlayFrames > 0) {
+                    drawRunLabCandidateOverlay(renderer, gb.bus(), sprites, runLabState, false, overlayScale, blit.gameDst.x, blit.gameDst.y);
+                }
                 const auto& regs = gb.cpu().regs();
                 const gb::u16 execPc = gb.cpu().lastExecutedPc();
                 const gb::u8 execOp = gb.cpu().lastExecutedOpcode();
@@ -2784,6 +2873,7 @@ int runRealtime(
                     breakpointEdit.active,
                     selectedSpriteAddr,
                     runLabState,
+                    showRunLabCandidateList,
                     gb.bus(),
                     execPc,
                     execOp,
@@ -2798,6 +2888,9 @@ int runRealtime(
         }
         if (showScaleMenu && fullscreen) {
             drawFullscreenScaleMenu(renderer, outputW, outputH, scaleMenuIndex);
+        }
+        if (runLabCandidateOverlayFrames > 0) {
+            --runLabCandidateOverlayFrames;
         }
         if (showPaletteMenu) {
             drawPaletteModeMenu(renderer, outputW, outputH, paletteMenuIndex, cgbPaletteAvailable);
