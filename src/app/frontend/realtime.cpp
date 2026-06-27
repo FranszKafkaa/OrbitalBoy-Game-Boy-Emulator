@@ -272,6 +272,7 @@ int runRealtime(
     MemoryWatch memoryWatch{};
     MemoryEditState memoryEdit{};
     MemoryWriteUiState memoryWriteUi{};
+    runlab::State runLabState{};
     QueuedMemoryWrite queuedWrite{};
     std::atomic<std::uint64_t> emulatedFrameCounter{0};
     std::string uiMessage;
@@ -502,6 +503,90 @@ int runRealtime(
         memorySearch.ui.matches.clear();
         memorySearch.ui.totalMatches = 0;
         memorySearch.ui.scroll = 0;
+    };
+
+    const auto toRunLabSprite = [](const SpriteDebugRow& sprite) {
+        return runlab::OamSpriteRef{sprite.addr, sprite.y, sprite.x, sprite.tile, sprite.attr};
+    };
+
+    const auto exportRunLabProfile = [&]() {
+        if (runlab::exportProfileFile(runLabState, gb.cartridge().title())) {
+            uiMessage = "RUNLAB EXPORTED";
+            std::cout << "runlab profile salvo: " << runLabState.lastExportPath << "\n";
+        } else {
+            uiMessage = "RUNLAB EXPORT FAIL";
+        }
+        uiMessageFrames = 150;
+    };
+
+    const auto createRunLabEntityFromSelection = [&]() {
+        if (!selectedSpriteAddr.has_value()) {
+            uiMessage = "RUNLAB NO SPRITE";
+            uiMessageFrames = 120;
+            return;
+        }
+        std::lock_guard<std::mutex> gbLock(gbMutex);
+        const auto sprites = snapshotSprites(gb.bus());
+        const auto selected = findSelectedSprite(sprites, selectedSpriteAddr);
+        if (!selected.has_value()) {
+            uiMessage = "RUNLAB SPRITE LOST";
+            uiMessageFrames = 120;
+            return;
+        }
+        const std::size_t idx = runlab::createOrSelectEntityFromSprite(runLabState, toRunLabSprite(selected.value()), gb.bus());
+        uiMessage = "RUNLAB ENT " + std::to_string(idx + 1);
+        uiMessageFrames = 120;
+    };
+
+    const auto cycleRunLabEntityType = [&]() {
+        if (runlab::cycleSelectedEntityType(runLabState)) {
+            const auto& entity = runLabState.entities[runLabState.selectedEntity.value()];
+            uiMessage = std::string("RUNLAB ") + runlab::entityTypeName(entity.type);
+        } else {
+            uiMessage = "RUNLAB NO ENTITY";
+        }
+        uiMessageFrames = 120;
+    };
+
+    const auto addRunLabMemoryLabel = [&]() {
+        const std::size_t idx = runlab::addMemoryLabelForWatch(runLabState, memoryWatch.address);
+        {
+            std::lock_guard<std::mutex> gbLock(gbMutex);
+            runLabState.memoryLabels[idx].lastValue = runlab::readMemoryLabelValue(gb.bus(), runLabState.memoryLabels[idx]);
+            runLabState.memoryLabels[idx].hasLastValue = true;
+        }
+        uiMessage = "RUNLAB LABEL " + runlab::formatAddress(memoryWatch.address);
+        uiMessageFrames = 120;
+    };
+
+    const auto runRunLabCorrelationScan = [&]() {
+        bool ok = false;
+        std::size_t samples = 0;
+        {
+            std::lock_guard<std::mutex> gbLock(gbMutex);
+            (void)runlab::captureCorrelationSample(runLabState, gb.bus(), emulatedFrameCounter.load(std::memory_order_relaxed));
+            ok = runlab::runCorrelationScan(runLabState);
+            samples = runLabState.correlationResult.sampleCount;
+        }
+        if (!runLabState.selectedEntity.has_value()) {
+            uiMessage = "RUNLAB NO ENTITY";
+        } else if (!ok) {
+            uiMessage = "RUNLAB NEED SAMPLES";
+        } else {
+            uiMessage = "RUNLAB SCAN " + std::to_string(samples);
+        }
+        uiMessageFrames = 150;
+    };
+
+    const auto promoteRunLabCorrelation = [&](runlab::CorrelationTarget target) {
+        const std::size_t before = runLabState.memoryLabels.size();
+        const std::size_t idx = runlab::promoteCorrelationCandidate(runLabState, target, 0);
+        if (idx >= before && idx < runLabState.memoryLabels.size()) {
+            uiMessage = "RUNLAB PROMOTE " + runlab::formatAddress(runLabState.memoryLabels[idx].address);
+        } else {
+            uiMessage = "RUNLAB NO CAND";
+        }
+        uiMessageFrames = 120;
     };
 
     const auto runMemorySearch = [&]() {
@@ -1349,6 +1434,9 @@ int runRealtime(
             uiMessage = memorySearch.ui.visible ? "SEARCH ON" : "SEARCH OFF";
             uiMessageFrames = 90;
             break;
+        case TopMenuAction::RunLabExportProfile:
+            exportRunLabProfile();
+            break;
         case TopMenuAction::OpenControlsMenu:
             openControlsMenuState();
             break;
@@ -1428,6 +1516,7 @@ int runRealtime(
             if (showPanel) {
                 out.push_back({TopMenuAction::ToggleBreakpointMenu, showBreakpointMenu ? "OCULTAR BP WP" : "MOSTRAR BP WP"});
                 out.push_back({TopMenuAction::ToggleSearchPanel, memorySearch.ui.visible ? "OCULTAR BUSCA" : "MOSTRAR BUSCA"});
+                out.push_back({TopMenuAction::RunLabExportProfile, "RUNLAB EXPORT"});
             }
             break;
         case TopMenuSection::Controls:
@@ -1957,6 +2046,72 @@ int runRealtime(
                     uiMessageFrames = 90;
                     continue;
                 }
+                if (showPanel && ev.key.keysym.sym == SDLK_y) {
+                    createRunLabEntityFromSelection();
+                    continue;
+                }
+                if (showPanel && ev.key.keysym.sym == SDLK_t) {
+                    cycleRunLabEntityType();
+                    continue;
+                }
+                if (showPanel && ev.key.keysym.sym == SDLK_u) {
+                    addRunLabMemoryLabel();
+                    continue;
+                }
+                if (showPanel && ev.key.keysym.sym == SDLK_e) {
+                    exportRunLabProfile();
+                    continue;
+                }
+                if (showPanel && ev.key.keysym.sym == SDLK_c) {
+                    runRunLabCorrelationScan();
+                    continue;
+                }
+                if (showPanel && ev.key.keysym.sym == SDLK_1) {
+                    promoteRunLabCorrelation(runlab::CorrelationTarget::EntityX);
+                    continue;
+                }
+                if (showPanel && ev.key.keysym.sym == SDLK_2) {
+                    promoteRunLabCorrelation(runlab::CorrelationTarget::EntityY);
+                    continue;
+                }
+                if (showPanel && ev.key.keysym.sym == SDLK_3) {
+                    promoteRunLabCorrelation(runlab::CorrelationTarget::CameraX);
+                    continue;
+                }
+                if (showPanel && ev.key.keysym.sym == SDLK_4) {
+                    promoteRunLabCorrelation(runlab::CorrelationTarget::State);
+                    continue;
+                }
+                if (showPanel && ev.key.keysym.sym == SDLK_F6) {
+                    {
+                        std::lock_guard<std::mutex> gbLock(gbMutex);
+                        runlab::captureRamSnapshot(runLabState, gb.bus());
+                    }
+                    uiMessage = "RUNLAB SNAP BEFORE";
+                    uiMessageFrames = 120;
+                    continue;
+                }
+                if (showPanel && ev.key.keysym.sym == SDLK_F7) {
+                    std::size_t total = 0;
+                    {
+                        std::lock_guard<std::mutex> gbLock(gbMutex);
+                        total = runlab::buildRamDiff(runLabState, gb.bus());
+                    }
+                    uiMessage = "RUNLAB DIFF " + std::to_string(total);
+                    uiMessageFrames = 120;
+                    continue;
+                }
+                if (showPanel && ev.key.keysym.sym == SDLK_F8) {
+                    if (runLabState.lastDiff.empty()) {
+                        uiMessage = "RUNLAB NO DIFF";
+                    } else {
+                        const gb::u16 addr = runLabState.lastDiff.front().address;
+                        (void)runlab::promoteDiffAddress(runLabState, 0);
+                        uiMessage = "RUNLAB PROMOTE " + runlab::formatAddress(addr);
+                    }
+                    uiMessageFrames = 120;
+                    continue;
+                }
                 if (ev.key.keysym.sym == SDLK_v) {
                     showPaletteMenu = !showPaletteMenu;
                     showScaleMenu = false;
@@ -2474,6 +2629,7 @@ int runRealtime(
                         const int idx = spriteScrollRows + (my - spriteY) / kSpriteLineHeight;
                         if (idx >= 0 && idx < static_cast<int>(sprites.size())) {
                             selectedSpriteAddr = sprites[static_cast<std::size_t>(idx)].addr;
+                            (void)runlab::updateSelectedEntitySprite(runLabState, toRunLabSprite(sprites[static_cast<std::size_t>(idx)]), gb.bus());
                         }
                     }
                 }
@@ -2500,6 +2656,8 @@ int runRealtime(
         {
             std::lock_guard<std::mutex> gbLock(gbMutex);
             sampleMemoryWatch(memoryWatch, gb.bus());
+            runlab::updateTimeline(runLabState, gb.bus(), emulatedFrameCounter.load(std::memory_order_relaxed));
+            (void)runlab::captureCorrelationSample(runLabState, gb.bus(), emulatedFrameCounter.load(std::memory_order_relaxed));
         }
 
         RgbFramePacket latestFrame{};
@@ -2625,6 +2783,7 @@ int runRealtime(
                     breakpointEdit.addressHex,
                     breakpointEdit.active,
                     selectedSpriteAddr,
+                    runLabState,
                     gb.bus(),
                     execPc,
                     execOp,

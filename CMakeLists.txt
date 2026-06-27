@@ -40,6 +40,7 @@ add_executable(gbemu
     src/app/runtime_paths.cpp
     src/app/sdl_frontend.cpp
     src/app/frontend/debug_ui.cpp
+    src/app/frontend/runlab.cpp
     src/app/frontend/realtime_support.cpp
     src/app/frontend/realtime/frame_timeline.cpp
     src/app/frontend/realtime/audio_ring_buffer.cpp
@@ -80,6 +81,7 @@ if (BUILD_TESTING)
         src/app/app_options.cpp
         src/app/rom_suite_runner.cpp
         src/app/frontend/realtime/save_slots.cpp
+        src/app/frontend/runlab.cpp
         src/app/frontend/realtime/cheat_engine.cpp
         src/app/frontend/realtime/replay_io.cpp
         src/app/frontend/realtime/control_bindings.cpp

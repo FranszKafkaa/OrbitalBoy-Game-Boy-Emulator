@@ -649,7 +649,35 @@ Atalhos (somente pausado):
 - `=`/`-`/`0`: ++/--/zero no endereco WATCH
 - `Left/Right` pausado: rewind/forward de frame
 
-### 14.5 Menu de controles (`F11`)
+### 14.5 RunLab Semantic Inspector
+
+RunLab e a primeira camada semantica do OrbitalBoy para speedrun/TAS tooling. Ele fica dentro do painel de debug existente e reaproveita selecao OAM, watch de memoria, busca/diff de RAM e leituras do `Bus`; nao cria um debugger paralelo.
+
+- `Y`: cria/seleciona entidade a partir do sprite OAM selecionado.
+- `T`: alterna tipo da entidade (`Unknown`, `Player`, `Enemy`, `Item`, `Boss`).
+- `U`: cria um label semantico para o endereco WATCH atual.
+- `F6`: snapshot RAM before.
+- `F7`: diff da RAM atual contra o snapshot.
+- `F8`: promove o primeiro endereco alterado do diff para label.
+- `E` ou menu `DEBUG > RUNLAB EXPORT`: exporta `profiles/<titulo_da_rom>.runlab.json`.
+- `C`: roda Correlation Scan para a entidade selecionada.
+- `1`/`2`/`3`/`4`: promove o melhor candidato atual como X, Y, camera_x ou state.
+
+Correlation Scan e uma heuristica deterministica. Ele observa as ultimas 120 amostras da entidade selecionada, compara deltas de posicao OAM contra deltas de WRAM `0xC000-0xDFFF`, avalia candidatos `u8` e `u16_le`, e mostra sugestoes para `player.x`, `player.y`, `camera_x` e estado/animacao. O score `0.0..1.0` indica apenas semelhanca observada.
+
+Fluxo recomendado:
+
+1. Selecione o sprite OAM no painel.
+2. Pressione `Y` para criar/selecionar entidade.
+3. Use `T` ate o tipo ficar `Player`.
+4. Mova o personagem por alguns segundos.
+5. Pressione `C` e confira as sugestoes.
+6. Use `1` para promover X e `2` para promover Y quando os candidatos fizerem sentido.
+7. Exporte o perfil com `E`.
+
+O MVP e manual: o OrbitalBoy nao sabe sozinho qual sprite e o jogador, qual endereco e vida, nem qual mudanca representa morte. A timeline apenas registra mudancas dos labels semanticamente cadastrados. Limitacoes conhecidas: posicao OAM pode nao ser a posicao logica; scroll de camera pode parecer movimento do jogador; entidades multi-sprite podem alterar o bbox; alguns jogos guardam coordenadas em bytes separados, subpixels ou estruturas maiores; confianca alta nao e prova.
+
+### 14.6 Menu de controles (`F11`)
 
 Quando abre o menu:
 

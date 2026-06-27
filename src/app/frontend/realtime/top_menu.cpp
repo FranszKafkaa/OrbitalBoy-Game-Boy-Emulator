@@ -48,6 +48,7 @@ const std::vector<TopMenuItem> kDebugItems{
     {TopMenuAction::ToggleDebugPanel, "MOSTRAR DEBUG"},
     {TopMenuAction::ToggleBreakpointMenu, "MENU BP WP"},
     {TopMenuAction::ToggleSearchPanel, "BUSCA MEMORIA"},
+    {TopMenuAction::RunLabExportProfile, "RUNLAB EXPORT"},
 };
 
 const std::vector<TopMenuItem> kControlsItems{

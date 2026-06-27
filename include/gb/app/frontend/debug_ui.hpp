@@ -9,6 +9,7 @@
 
 #include "gb/core/bus.hpp"
 #include "gb/core/gameboy.hpp"
+#include "gb/app/frontend/runlab.hpp"
 
 #ifdef GBEMU_USE_SDL2
 #include <SDL2/SDL.h>
@@ -140,6 +141,7 @@ void drawMemoryPanel(
     const std::string& breakpointAddressHex,
     bool breakpointAddressEditing,
     std::optional<gb::u16> selectedSpriteAddr,
+    const runlab::State& runlabState,
     const gb::Bus& bus,
     gb::u16 execPc,
     gb::u8 execOp,

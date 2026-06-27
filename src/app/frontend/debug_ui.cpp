@@ -207,7 +207,7 @@ std::vector<SpriteDebugRow> snapshotSprites(const gb::Bus& bus) {
 }
 
 int spriteVisibleLinesForPanel(int panelHeight, bool showBreakpointMenu) {
-    return std::max(1, (panelHeight - spriteListYFromLayout(panelHeight, showBreakpointMenu) - 8) / kSpriteLineHeight);
+    return std::max(1, (panelHeight - spriteListYFromLayout(panelHeight, showBreakpointMenu) - 136) / kSpriteLineHeight);
 }
 
 int searchVisibleLinesForPanel(int panelHeight) {
@@ -383,6 +383,13 @@ void drawHexTextFit(SDL_Renderer* renderer, int x, int y, int maxPixels, const s
     drawHexText(renderer, x, y, clippedText(text, maxPixels, scale), color, scale);
 }
 
+std::string uiUpper(std::string text) {
+    for (char& ch : text) {
+        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    }
+    return text;
+}
+
 SDL_Color memoryRegionColor(gb::u16 address) {
     if (address <= 0x3FFF) return SDL_Color{96, 155, 255, 255};
     if (address <= 0x7FFF) return SDL_Color{60, 120, 220, 255};
@@ -414,6 +421,7 @@ void drawMemoryPanel(
     const std::string& breakpointAddressHex,
     bool breakpointAddressEditing,
     std::optional<gb::u16> selectedSpriteAddr,
+    const runlab::State& runlabState,
     const gb::Bus& bus,
     gb::u16 execPc,
     gb::u8 execOp,
@@ -689,11 +697,104 @@ void drawMemoryPanel(
         SDL_RenderFillRect(renderer, &thumb);
     }
 
+    const int runlabY = std::max(spriteY + spriteCount * spriteLineHeight + 8, panelHeight - 128);
+    SDL_SetRenderDrawColor(renderer, 24, 30, 44, 255);
+    SDL_Rect runlabBg{panelX + 8, runlabY, panelWidth - 16, 112};
+    SDL_RenderFillRect(renderer, &runlabBg);
+    SDL_SetRenderDrawColor(renderer, 70, 86, 118, 255);
+    SDL_RenderDrawRect(renderer, &runlabBg);
+    drawHexTextFit(renderer, panelX + 12, runlabY + 4, panelWidth - 24, "RUNLAB", SDL_Color{176, 208, 246, 255}, 1);
+
+    if (runlabState.selectedEntity.has_value() && runlabState.selectedEntity.value() < runlabState.entities.size()) {
+        const auto& entity = runlabState.entities[runlabState.selectedEntity.value()];
+        const int selectedIndex = selectedSpriteAddr.has_value() ? runlab::oamIndexFromAddress(selectedSpriteAddr.value()) : -1;
+        char line[96];
+        std::snprintf(
+            line,
+            sizeof(line),
+            "SEL SPR:%02d ENT:%s",
+            std::max(0, selectedIndex),
+            uiUpper(entity.label).c_str()
+        );
+        drawHexTextFit(renderer, panelX + 12, runlabY + 16, panelWidth - 24, line, active, 1);
+        std::snprintf(
+            line,
+            sizeof(line),
+            "TYPE:%s WATCH:%zu",
+            uiUpper(runlab::entityTypeName(entity.type)).c_str(),
+            runlabState.memoryLabels.size()
+        );
+        drawHexTextFit(renderer, panelX + 12, runlabY + 28, panelWidth - 24, line, active, 1);
+    } else {
+        const int selectedIndex = selectedSpriteAddr.has_value() ? runlab::oamIndexFromAddress(selectedSpriteAddr.value()) : -1;
+        char line[64];
+        if (selectedIndex >= 0) {
+            std::snprintf(line, sizeof(line), "SEL SPR:%02d ENT:NONE", selectedIndex);
+        } else {
+            std::snprintf(line, sizeof(line), "SEL SPR:NONE ENT:NONE");
+        }
+        drawHexTextFit(renderer, panelX + 12, runlabY + 16, panelWidth - 24, line, dim, 1);
+        char counts[64];
+        std::snprintf(counts, sizeof(counts), "ENTS:%zu WATCH:%zu", runlabState.entities.size(), runlabState.memoryLabels.size());
+        drawHexTextFit(renderer, panelX + 12, runlabY + 28, panelWidth - 24, counts, dim, 1);
+    }
+
+    const auto drawCandidateLine = [&](int yPos, const char* prefix, const std::vector<runlab::CorrelationCandidate>& candidates) {
+        if (candidates.empty()) {
+            char none[48];
+            std::snprintf(none, sizeof(none), "%s NONE", prefix);
+            drawHexTextFit(renderer, panelX + 12, yPos, panelWidth - 24, none, dim, 1);
+            return;
+        }
+        const auto& c = candidates.front();
+        char line[96];
+        std::snprintf(
+            line,
+            sizeof(line),
+            "%s %04X %s S%02d V%d",
+            prefix,
+            c.address,
+            uiUpper(runlab::memoryValueTypeName(c.type)).c_str(),
+            static_cast<int>(std::clamp(c.score, 0.0, 1.0) * 99.0),
+            c.currentValue
+        );
+        drawHexTextFit(renderer, panelX + 12, yPos, panelWidth - 24, line, SDL_Color{180, 220, 190, 255}, 1);
+    };
+
+    drawHexTextFit(renderer, panelX + 12, runlabY + 40, panelWidth - 24, "CORRELATION SUGGESTIONS", SDL_Color{176, 208, 246, 255}, 1);
+    drawCandidateLine(runlabY + 52, "X", runlabState.correlationResult.entityX);
+    drawCandidateLine(runlabY + 64, "Y", runlabState.correlationResult.entityY);
+    drawCandidateLine(runlabY + 76, "CAM", runlabState.correlationResult.cameraX);
+    drawCandidateLine(runlabY + 88, "STATE", runlabState.correlationResult.state);
+
+    if (!runlabState.events.empty()) {
+        const auto& evt = runlabState.events.back();
+        char line[96];
+        std::snprintf(
+            line,
+            sizeof(line),
+            "F%llu %s %d>%d",
+            static_cast<unsigned long long>(evt.frame),
+            uiUpper(evt.label).c_str(),
+            evt.previous,
+            evt.current
+        );
+        drawHexTextFit(renderer, panelX + 12, runlabY + 100, panelWidth - 24, line, SDL_Color{255, 230, 120, 255}, 1);
+    } else if (!runlabState.lastDiff.empty()) {
+        const auto& diff = runlabState.lastDiff.front();
+        char line[64];
+        std::snprintf(line, sizeof(line), "DIFF %04X %02X>%02X", diff.address, diff.before, diff.after);
+        drawHexTextFit(renderer, panelX + 12, runlabY + 100, panelWidth - 24, line, SDL_Color{255, 230, 120, 255}, 1);
+    } else {
+        drawHexTextFit(renderer, panelX + 12, runlabY + 100, panelWidth - 24, "EVENTS NONE", dim, 1);
+    }
+    drawHexTextFit(renderer, panelX + 12, panelHeight - 12, panelWidth - 24, "C SCAN 1 X 2 Y 3 CAM 4 STATE", dim, 1);
+
     char footer[40];
     const int firstSprite = totalSprites > 0 ? (scroll + 1) : 0;
     const int lastSprite = totalSprites > 0 ? (scroll + spriteCount) : 0;
     std::snprintf(footer, sizeof(footer), "SPR %d-%d/%d", firstSprite, lastSprite, totalSprites);
-    drawHexText(renderer, panelX + 12, panelHeight - 12, footer, dim, 1);
+    drawHexText(renderer, panelX + 12, std::max(spriteY, runlabY - 10), footer, dim, 1);
 
     if (search.visible) {
         const int overlayX = panelX + 10;

@@ -1,4 +1,5 @@
 #include <filesystem>
+#include <deque>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -12,6 +13,7 @@
 #include "gb/app/frontend/realtime/save_slots.hpp"
 #include "gb/app/frontend/realtime/timing_policy.hpp"
 #include "gb/app/frontend/realtime/top_menu.hpp"
+#include "gb/app/frontend/runlab.hpp"
 #include "gb/core/gameboy.hpp"
 
 #include "test_framework.hpp"
@@ -235,6 +237,152 @@ TEST_CASE("frontend", "network_config_roundtrip") {
     T_REQUIRE(loaded.has_value());
     T_EQ(loaded->netplayDelayFrames, 7);
     T_EQ(loaded->linkMode, 3);
+}
+
+TEST_CASE("frontend", "runlab_memory_label_formatting") {
+    const auto label = gb::frontend::runlab::makeMemoryLabel(
+        "player.x",
+        0xC202,
+        gb::frontend::runlab::MemoryValueType::U16Le,
+        "player",
+        "x"
+    );
+
+    T_EQ(label.label, std::string("player.x"));
+    T_EQ(gb::frontend::runlab::formatAddress(label.address), std::string("0xC202"));
+    T_EQ(std::string(gb::frontend::runlab::memoryValueTypeName(label.type)), std::string("u16_le"));
+    T_EQ(label.entity, std::string("player"));
+    T_EQ(label.field, std::string("x"));
+}
+
+TEST_CASE("frontend", "runlab_event_timeline_detects_labeled_change") {
+    gb::GameBoy gb;
+    tests::ScopedPath cleanup;
+    loadBlankRom(gb, cleanup);
+
+    gb::frontend::runlab::State state{};
+    state.memoryLabels.push_back(gb::frontend::runlab::makeMemoryLabel("lives", 0xC000, gb::frontend::runlab::MemoryValueType::U8));
+
+    gb.bus().write(0xC000, 3);
+    gb::frontend::runlab::updateTimeline(state, gb.bus(), 10);
+    T_REQUIRE(state.events.empty());
+
+    gb.bus().write(0xC000, 2);
+    gb::frontend::runlab::updateTimeline(state, gb.bus(), 11);
+    T_EQ(state.events.size(), static_cast<std::size_t>(1));
+    T_EQ(state.events[0].frame, static_cast<std::uint64_t>(11));
+    T_EQ(state.events[0].label, std::string("lives"));
+    T_EQ(state.events[0].previous, 3);
+    T_EQ(state.events[0].current, 2);
+}
+
+TEST_CASE("frontend", "runlab_entity_candidate_serializes_to_profile") {
+    gb::GameBoy gb;
+    tests::ScopedPath cleanup;
+    loadBlankRom(gb, cleanup);
+    gb.bus().write(0xFF40, 0x00);
+
+    gb::frontend::runlab::State state{};
+    const gb::frontend::runlab::OamSpriteRef sprite{0xFE0C, 112, 80, 4, 0};
+    const auto idx = gb::frontend::runlab::createOrSelectEntityFromSprite(state, sprite, gb.bus());
+    T_EQ(idx, static_cast<std::size_t>(0));
+    state.memoryLabels.push_back(gb::frontend::runlab::makeMemoryLabel(
+        "player.x",
+        0xC202,
+        gb::frontend::runlab::MemoryValueType::U16Le,
+        "player",
+        "x"
+    ));
+
+    const std::string json = gb::frontend::runlab::exportProfileJson(state, "TEST GAME");
+    T_REQUIRE(json.find("\"label\": \"player\"") != std::string::npos);
+    T_REQUIRE(json.find("\"type\": \"Player\"") != std::string::npos);
+    T_REQUIRE(json.find("\"oam_indices\": [3]") != std::string::npos);
+    T_REQUIRE(json.find("\"address\": \"0xC202\"") != std::string::npos);
+}
+
+TEST_CASE("frontend", "runlab_ram_diff_promotes_address") {
+    gb::GameBoy gb;
+    tests::ScopedPath cleanup;
+    loadBlankRom(gb, cleanup);
+
+    gb::frontend::runlab::State state{};
+    gb.bus().write(0xC123, 0x10);
+    gb::frontend::runlab::captureRamSnapshot(state, gb.bus());
+    gb.bus().write(0xC123, 0x11);
+
+    const std::size_t total = gb::frontend::runlab::buildRamDiff(state, gb.bus());
+    T_REQUIRE(total >= 1);
+    T_REQUIRE(!state.lastDiff.empty());
+    T_EQ(state.lastDiff.front().address, static_cast<gb::u16>(0xC123));
+
+    const std::size_t labelIdx = gb::frontend::runlab::promoteDiffAddress(state, 0);
+    T_EQ(labelIdx, static_cast<std::size_t>(0));
+    T_EQ(state.memoryLabels[0].address, static_cast<gb::u16>(0xC123));
+}
+
+TEST_CASE("frontend", "runlab_correlation_ranks_unchanged_low_and_matching_high") {
+    std::deque<gb::frontend::runlab::CorrelationSample> samples;
+    for (int i = 0; i < 12; ++i) {
+        gb::frontend::runlab::CorrelationSample sample{};
+        sample.frame = static_cast<std::uint64_t>(i);
+        sample.entityX = 24 + i;
+        sample.entityY = 80;
+        sample.wram.assign(0x2000, 0);
+        sample.wram[0x0123] = static_cast<gb::u8>(sample.entityX);
+        sample.wram[0x0124] = 0x44; // unchanged address should not rank.
+        sample.wram[0x0200] = static_cast<gb::u8>((1000 + sample.entityX) & 0xFF);
+        sample.wram[0x0201] = static_cast<gb::u8>(((1000 + sample.entityX) >> 8) & 0xFF);
+        samples.push_back(std::move(sample));
+    }
+
+    const auto result = gb::frontend::runlab::analyzeCorrelationSamples(samples, 4);
+    T_REQUIRE(!result.entityX.empty());
+    T_EQ(result.entityX.front().address, static_cast<gb::u16>(0xC123));
+    T_REQUIRE(result.entityX.front().score > 0.80);
+
+    bool unchangedRanked = false;
+    for (const auto& candidate : result.entityX) {
+        unchangedRanked = unchangedRanked || candidate.address == 0xC124;
+    }
+    T_REQUIRE(!unchangedRanked);
+}
+
+TEST_CASE("frontend", "runlab_correlation_supports_u16_and_promotion") {
+    gb::frontend::runlab::State state{};
+    state.entities.push_back(gb::frontend::runlab::EntityCandidate{"player", gb::frontend::runlab::EntityType::Player, {0}, {}});
+    state.selectedEntity = 0;
+
+    for (int i = 0; i < 12; ++i) {
+        gb::frontend::runlab::CorrelationSample sample{};
+        sample.frame = static_cast<std::uint64_t>(i);
+        sample.entityX = 16 + i;
+        sample.entityY = 40 + (i / 2);
+        sample.wram.assign(0x2000, 0);
+        const int logicalX = 300 + sample.entityX;
+        sample.wram[0x0300] = static_cast<gb::u8>(logicalX & 0xFF);
+        sample.wram[0x0301] = static_cast<gb::u8>((logicalX >> 8) & 0xFF);
+        state.correlationSamples.push_back(std::move(sample));
+    }
+
+    T_REQUIRE(gb::frontend::runlab::runCorrelationScan(state, 5));
+    bool sawU16 = false;
+    for (const auto& candidate : state.correlationResult.entityX) {
+        if (candidate.address == 0xC300 && candidate.type == gb::frontend::runlab::MemoryValueType::U16Le) {
+            sawU16 = true;
+        }
+    }
+    T_REQUIRE(sawU16);
+
+    const auto labelIdx = gb::frontend::runlab::promoteCorrelationCandidate(state, gb::frontend::runlab::CorrelationTarget::EntityX, 0);
+    T_REQUIRE(labelIdx < state.memoryLabels.size());
+    T_EQ(state.memoryLabels[labelIdx].label, std::string("player.x"));
+    T_EQ(state.memoryLabels[labelIdx].entity, std::string("player"));
+    T_EQ(state.memoryLabels[labelIdx].field, std::string("x"));
+
+    const std::string json = gb::frontend::runlab::exportProfileJson(state, "TEST GAME");
+    T_REQUIRE(json.find("\"label\": \"player.x\"") != std::string::npos);
+    T_REQUIRE(json.find("\"entity\": \"player\"") != std::string::npos);
 }
 
 TEST_CASE("frontend", "fast_forward_timing_policy_is_paced") {

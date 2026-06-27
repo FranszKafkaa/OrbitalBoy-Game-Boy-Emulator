@@ -166,6 +166,30 @@ rom/
 - Clique em leitura de memoria: fixa watch
 - Clique em sprite da lista OAM: seleciona sprite + preview/overlay
 
+### RunLab Semantic Inspector
+
+RunLab e uma camada semantica em cima do debugger existente para speedrun/TAS tooling. Ele nao substitui o visualizador de memoria, busca, watchpoints, breakpoints ou lista OAM: ele usa a selecao de sprites, o endereco observado e leituras de memoria ja expostos pelo painel de debug.
+
+Com o painel de debug aberto:
+
+- `Y`: cria/seleciona uma entidade RunLab a partir do sprite OAM selecionado. A primeira entidade recebe `player`; as proximas usam `entity_N`.
+- `T`: alterna o tipo da entidade selecionada entre `Unknown`, `Player`, `Enemy`, `Item` e `Boss`.
+- `U`: promove o endereco observado no watch atual para um `MemoryLabel`; se houver entidade selecionada, o label fica vinculado a ela.
+- `F6`: captura snapshot RAM "before" para diff semantico.
+- `F7`: compara a RAM atual contra o snapshot.
+- `F8`: promove o primeiro endereco alterado do diff para `MemoryLabel`.
+- `E`: exporta `profiles/<titulo_da_rom>.runlab.json`.
+- `C`: roda o Correlation Scan usando as amostras recentes da entidade selecionada.
+- `1` / `2` / `3` / `4`: promove o melhor candidato atual como `player.x`, `player.y`, `camera_x` ou `state`.
+
+O painel mostra a entidade selecionada, tipo, quantidade de labels vinculados, ultimo evento de mudanca de valor, primeiro diff recente e sugestoes de correlacao para X/Y/camera/state. Tambem ha uma acao `RUNLAB EXPORT` no menu superior `DEBUG`.
+
+Correlation Scan observa a jogabilidade do usuario: com uma entidade selecionada, RunLab guarda as ultimas 120 amostras de posicao OAM e WRAM (`0xC000-0xDFFF`), depois ranqueia enderecos `u8` e `u16_le` cujos deltas parecem acompanhar a posicao de tela. O score `0.0..1.0` e somente uma heuristica, nao prova que o endereco e correto.
+
+Fluxo recomendado para achar `player.x`/`player.y`: selecione um sprite OAM, crie a entidade com `Y`, marque-a como `Player` com `T`, mova o personagem por alguns segundos, pressione `C`, confira as sugestoes e promova os melhores candidatos com `1`/`2`.
+
+Limitacoes do MVP: o OrbitalBoy nao sabe automaticamente qual sprite e o jogador. Posicao OAM nem sempre e a posicao logica do personagem; scroll de camera pode enganar a correlacao; entidades com multiplos sprites podem confundir o bbox; alguns jogos separam coordenadas em bytes ou usam sistemas maiores que `u16_le`. RunLab continua manual e observacional: nao ha IA, solver TAS, automacao de gameplay, cheats novos ou escrita de memoria especifica do RunLab.
+
 ## Barra superior (SDL)
 
 Durante o jogo, uma barra no topo mostra **secoes clicaveis**:
