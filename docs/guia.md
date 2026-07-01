@@ -80,7 +80,10 @@ O RunLab tambem tem um adaptador MCP C++ opcional em `tools/orbitalboy-mcp-cpp`.
 - Ele fala JSON-RPC por stdio.
 - Ele le `.runlab/current-state.json` e, opcionalmente, um profile exportado.
 - Ele expoe status, entidades, labels de memoria, eventos recentes, objetivo ativo e splits.
-- Ele e somente leitura: nao controla o jogo, nao escreve memoria, nao abre socket e nao tenta resolver rota.
+- Ele nao escreve memoria, nao abre socket e nao tenta resolver rota.
+- Controle de input existe somente quando o emulador e iniciado com `--runlab-control`; nesse modo o MCP apenas adiciona comandos de joypad em `.runlab/commands.jsonl`.
+- O emulador tambem grava `.runlab/current-screen.ppm`; uma IA com visao pode usar `runlab_get_visual_context` e `runlab_visual_annotate` para marcar player, inimigos e cenario como caixas temporarias na tela.
+- Com o painel de debug aberto, `Ctrl+T` abre uma caixa de prompt; `Enter` grava em `.runlab/prompts.jsonl` para o cliente MCP ler com `runlab_get_pending_prompt` ou o prompt `handle_prompt_box`.
 
 Guia especifico: `docs/runlab-mcp-cpp.md`.
 
@@ -673,10 +676,14 @@ RunLab e a primeira camada semantica do OrbitalBoy para speedrun/TAS tooling. El
 - `E` ou menu `DEBUG > RUNLAB EXPORT`: exporta `profiles/<titulo_da_rom>.runlab.json`.
 - `C`: roda Correlation Scan, troca a lista de leituras recentes pelos enderecos RAM candidatos e mostra os candidatos OAM em vermelho por cerca de 240 frames.
 - Clique em um candidato RunLab: fixa o `WATCH` naquele endereco, apaga os demais candidatos vermelhos e mantem somente a entidade selecionada em vermelho forte ate `Q`.
+- `M`: abre o reconhecimento RunLab no lugar da lista de memoria, com player/itens/inimigos/cenario e enderecos relevantes.
+- Clique em uma linha do reconhecimento: fixa o `WATCH` no endereco principal daquela linha e seleciona o sprite quando existir OAM associado.
+- `Ctrl+M`: abre o editor manual de memoria antigo.
+- `Ctrl+T`: abre a caixa de prompt RunLab MCP; `Enter` envia para `.runlab/prompts.jsonl` e `Esc` cancela.
 - `1`/`2`/`3`/`4`: promove o melhor candidato atual como X, Y, camera_x ou state.
 - `G`: cria/inicia objetivo padrao e captura baseline.
 - `R`: recaptura baseline do objetivo ativo.
-- `Q`: limpa eventos da timeline RunLab e volta a lista de leituras recentes no lugar dos candidatos.
+- `Q`: limpa eventos da timeline RunLab e volta a lista de leituras recentes no lugar dos candidatos/reconhecimento.
 
 Event Detection roda sobre os `MemoryLabel`s cadastrados. Toda mudanca gera `memory_changed`; aumentos e quedas geram `value_increased`/`value_decreased`; labels como `lives`, `hp`, `health` ou `player.hp` diminuindo geram `damage_candidate`; chegando a zero geram `death_candidate`; `level_id`, `stage`, `room` ou `map` mudando geram `level_change_candidate` e `split_candidate`; flags como `goal_flag`, `clear_flag` e `finish_flag` ativando geram `goal_reached_candidate`.
 

@@ -16,9 +16,12 @@ struct AppOptions {
     std::string bootRomPath;
     std::string linkConnect;
     std::string netplayConnect;
+    std::string runLabStatePath = ".runlab/current-state.json";
+    std::string runLabCommandQueuePath = ".runlab/commands.jsonl";
     bool headless = false;
     bool chooseRom = false;
     bool preciseTiming = false;
+    bool runLabControl = false;
     HardwareModePreference hardwareMode = HardwareModePreference::Auto;
     int linkHostPort = 0;
     int netplayHostPort = 0;

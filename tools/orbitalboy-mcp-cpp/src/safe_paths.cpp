@@ -63,10 +63,42 @@ std::string readTextFile(const std::filesystem::path& path, std::string* error) 
     return ss.str();
 }
 
+bool appendTextFile(const std::filesystem::path& path, const std::string& text, std::string* error) {
+    const auto parent = path.parent_path();
+    if (!parent.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            setError(error, "unable to create directory: " + parent.string());
+            return false;
+        }
+    }
+    std::ofstream out(path, std::ios::app);
+    if (!out) {
+        setError(error, "unable to append file: " + path.string());
+        return false;
+    }
+    out << text;
+    if (!out) {
+        setError(error, "unable to write file: " + path.string());
+        return false;
+    }
+    return true;
+}
+
 ServerConfig parseConfig(int argc, char** argv) {
     ServerConfig cfg;
     if (const char* env = std::getenv("ORBITALBOY_RUNLAB_STATE_PATH")) {
         cfg.statePath = env;
+    }
+    if (const char* env = std::getenv("ORBITALBOY_RUNLAB_CONTROL_QUEUE_PATH")) {
+        cfg.controlQueuePath = env;
+    }
+    if (const char* env = std::getenv("ORBITALBOY_RUNLAB_PROMPT_QUEUE_PATH")) {
+        cfg.promptQueuePath = env;
+    }
+    if (const char* env = std::getenv("ORBITALBOY_RUNLAB_FEEDBACK_QUEUE_PATH")) {
+        cfg.feedbackQueuePath = env;
     }
     if (const char* env = std::getenv("ORBITALBOY_RUNLAB_PROFILE_PATH")) {
         cfg.profilePath = std::filesystem::path(env);
@@ -75,6 +107,14 @@ ServerConfig parseConfig(int argc, char** argv) {
         const std::string arg = argv[i];
         if (arg == "--state" && i + 1 < argc) {
             cfg.statePath = argv[++i];
+        } else if (arg == "--control-queue" && i + 1 < argc) {
+            cfg.controlQueuePath = argv[++i];
+        } else if (arg == "--prompt-queue" && i + 1 < argc) {
+            cfg.promptQueuePath = argv[++i];
+        } else if (arg == "--feedback-queue" && i + 1 < argc) {
+            cfg.feedbackQueuePath = argv[++i];
+        } else if (arg == "--no-auto-prompt-runner") {
+            cfg.autoRunPrompts = false;
         } else if (arg == "--profile" && i + 1 < argc) {
             cfg.profilePath = std::filesystem::path(argv[++i]);
         }

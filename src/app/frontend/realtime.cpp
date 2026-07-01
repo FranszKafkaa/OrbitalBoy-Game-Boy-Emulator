@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <mutex>
@@ -27,6 +28,7 @@
 #include "gb/app/frontend/realtime/link_transport.hpp"
 #include "gb/app/frontend/realtime/network_config.hpp"
 #include "gb/app/frontend/realtime/replay_io.hpp"
+#include "gb/app/frontend/realtime/runlab_control_queue.hpp"
 #include "gb/app/frontend/realtime/session_models.hpp"
 #include "gb/app/frontend/realtime/save_slots.hpp"
 #include "gb/app/frontend/realtime/timing_policy.hpp"
@@ -59,7 +61,10 @@ int runRealtime(
     int linkHostPort,
     const std::string& netplayConnect,
     int netplayHostPort,
-    int netplayDelayFrames
+    int netplayDelayFrames,
+    bool runLabControl,
+    const std::string& runLabStatePath,
+    const std::string& runLabCommandQueuePath
 ) {
     (void)replayPath;
     SDL_SetHint(SDL_HINT_RENDER_VSYNC, "1");
@@ -189,6 +194,17 @@ int runRealtime(
     ControlBindings controls = defaultControlBindings();
     const std::string globalControlsPath = (std::filesystem::path("states") / "global.controls").string();
     (void)loadControlBindingsWithFallback(controlsPath, globalControlsPath, controls);
+    RunLabControlQueue runLabControlQueue{};
+    runLabControlQueue.configure(runLabCommandQueuePath, runLabControl);
+    bool runLabControlStartupMessage = false;
+    if (runLabControlQueue.enabled()) {
+        const auto queueParent = std::filesystem::path(runLabCommandQueuePath).parent_path();
+        if (!queueParent.empty()) {
+            std::filesystem::create_directories(queueParent);
+        }
+        runLabControlStartupMessage = true;
+        std::cerr << "RunLab MCP control queue enabled: " << runLabCommandQueuePath << "\n";
+    }
     auto cheatsLoad = loadCheatsFromFile(cheatsPath);
     std::vector<CheatCode> cheats = std::move(cheatsLoad.cheats);
     if (!cheatsLoad.errors.empty()) {
@@ -273,19 +289,47 @@ int runRealtime(
     MemoryEditState memoryEdit{};
     MemoryWriteUiState memoryWriteUi{};
     runlab::State runLabState{};
+    const std::filesystem::path runLabStateFilePath(runLabStatePath.empty() ? ".runlab/current-state.json" : runLabStatePath);
+    const std::filesystem::path runLabDirectory = runLabStateFilePath.has_parent_path()
+        ? runLabStateFilePath.parent_path()
+        : std::filesystem::path(".runlab");
+    const std::string runLabScreenshotPath = (runLabDirectory / "current-screen.ppm").string();
+    const std::string runLabPromptQueuePath = (runLabDirectory / "prompts.jsonl").string();
+    const std::string runLabFeedbackQueuePath = (runLabDirectory / "feedback.jsonl").string();
+    std::uint64_t lastRunLabStateExportFrame = std::numeric_limits<std::uint64_t>::max();
+    auto lastRunLabStateExportTime = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    std::string lastRunLabStateExportError{};
     bool showRunLabCandidateList = false;
+    bool showRunLabRecognitionList = false;
     bool showRunLabClickedCandidateOverlay = false;
     int runLabCandidateOverlayFrames = 0;
+    struct RunLabPromptInputState {
+        bool active = false;
+        std::string text{};
+        std::uint64_t nextId = 1;
+    } runLabPromptInput{};
+    runLabPromptInput.nextId = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count() % 1000000000
+    );
+    std::uintmax_t runLabFeedbackOffset = 0;
+    bool runLabFeedbackInitialized = false;
     QueuedMemoryWrite queuedWrite{};
     std::atomic<std::uint64_t> emulatedFrameCounter{0};
     std::string uiMessage;
     int uiMessageFrames = 0;
+    if (runLabControlStartupMessage) {
+        uiMessage = "RUNLAB MCP CONTROL ON";
+        uiMessageFrames = 180;
+    }
     std::array<unsigned char, gb::PPU::ScreenWidth * gb::PPU::ScreenHeight * 3> pixels{};
     std::array<unsigned char, gb::PPU::ScreenWidth * gb::PPU::ScreenHeight * 3> sharpPixels{};
     std::mutex gbMutex{};
     std::mutex breakpointsMutex{};
     std::mutex queuedWriteMutex{};
     std::mutex replayMutex{};
+    std::mutex runLabControlMutex{};
     std::atomic<bool> mtRunning{true};
     std::atomic<bool> pausedAtomic{paused};
     std::atomic<bool> fastForwardAtomic{fastForward};
@@ -299,6 +343,8 @@ int runRealtime(
     std::atomic<int> filterModeAtomic{static_cast<int>(filterMode)};
     std::atomic<bool> audioGateAtomic{false};
     std::atomic<int> pendingPauseReason{0};
+    std::atomic<int> pendingMcpPauseAction{0};
+    std::atomic<int> pendingMcpStepFrames{0};
     std::atomic<gb::u16> pendingPauseAddr{0};
     std::atomic<std::uint64_t> frameSequence{0};
     std::atomic<bool> forceTitleRefresh{false};
@@ -463,8 +509,112 @@ int runRealtime(
     };
 
     const auto stopTextInputIfUnused = [&]() {
-        if (!memoryEdit.active && !breakpointEdit.active && !memorySearch.ui.editingValue) {
+        if (!memoryEdit.active && !breakpointEdit.active && !memorySearch.ui.editingValue && !runLabPromptInput.active) {
             SDL_StopTextInput();
+        }
+    };
+
+    const auto escapeRunLabPromptJson = [](const std::string& text) {
+        std::string out;
+        out.reserve(text.size() + 8);
+        for (const char ch : text) {
+            if (ch == '\\') out += "\\\\";
+            else if (ch == '"') out += "\\\"";
+            else if (ch == '\n') out += "\\n";
+            else if (ch == '\r') out += "\\r";
+            else out.push_back(ch);
+        }
+        return out;
+    };
+
+    const auto submitRunLabPrompt = [&]() {
+        if (runLabPromptInput.text.empty()) {
+            uiMessage = "RUNLAB PROMPT EMPTY";
+            uiMessageFrames = 90;
+            return;
+        }
+        std::error_code ec;
+        std::filesystem::create_directories(runLabDirectory, ec);
+        std::ofstream out(runLabPromptQueuePath, std::ios::app);
+        if (!out) {
+            uiMessage = "RUNLAB PROMPT FAIL";
+            uiMessageFrames = 120;
+            return;
+        }
+        const std::uint64_t id = runLabPromptInput.nextId++;
+        const std::uint64_t frame = emulatedFrameCounter.load(std::memory_order_relaxed);
+        out << "{\"id\":" << id
+            << ",\"frame\":" << frame
+            << ",\"status\":\"pending\""
+            << ",\"prompt\":\"" << escapeRunLabPromptJson(runLabPromptInput.text) << "\"}\n";
+        if (!out) {
+            uiMessage = "RUNLAB PROMPT FAIL";
+            uiMessageFrames = 120;
+            return;
+        }
+        runLabPromptInput.active = false;
+        runLabPromptInput.text.clear();
+        stopTextInputIfUnused();
+        uiMessage = "RUNLAB PROMPT SENT";
+        uiMessageFrames = 150;
+    };
+
+    const auto promptJsonString = [](const std::string& line, const std::string& key) -> std::optional<std::string> {
+        const std::string needle = "\"" + key + "\"";
+        std::size_t pos = line.find(needle);
+        if (pos == std::string::npos) return std::nullopt;
+        pos = line.find(':', pos + needle.size());
+        if (pos == std::string::npos) return std::nullopt;
+        pos = line.find('"', pos + 1);
+        if (pos == std::string::npos) return std::nullopt;
+        std::string out;
+        bool escaped = false;
+        for (++pos; pos < line.size(); ++pos) {
+            const char ch = line[pos];
+            if (escaped) {
+                out.push_back(ch);
+                escaped = false;
+                continue;
+            }
+            if (ch == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (ch == '"') return out;
+            out.push_back(ch);
+        }
+        return std::nullopt;
+    };
+
+    const auto pollRunLabFeedback = [&]() {
+        std::error_code ec;
+        const std::filesystem::path path(runLabFeedbackQueuePath);
+        const auto size = std::filesystem::exists(path, ec) ? std::filesystem::file_size(path, ec) : 0;
+        if (ec) return;
+        if (!runLabFeedbackInitialized) {
+            runLabFeedbackInitialized = true;
+            runLabFeedbackOffset = size;
+            return;
+        }
+        if (size < runLabFeedbackOffset) {
+            runLabFeedbackOffset = 0;
+        }
+        if (size == runLabFeedbackOffset) {
+            return;
+        }
+        std::ifstream in(path, std::ios::binary);
+        if (!in) return;
+        in.seekg(static_cast<std::streamoff>(runLabFeedbackOffset));
+        std::string line;
+        std::string latest;
+        while (std::getline(in, line)) {
+            if (line.empty()) continue;
+            latest = promptJsonString(line, "message").value_or("");
+        }
+        runLabFeedbackOffset = static_cast<std::uintmax_t>(in.tellg() >= 0 ? in.tellg() : static_cast<std::streampos>(size));
+        if (!latest.empty()) {
+            uiMessage = latest;
+            uiMessageFrames = 180;
         }
     };
 
@@ -510,6 +660,80 @@ int runRealtime(
 
     const auto toRunLabSprite = [](const SpriteDebugRow& sprite) {
         return runlab::OamSpriteRef{sprite.addr, sprite.y, sprite.x, sprite.tile, sprite.attr};
+    };
+
+    const auto drawRunLabVisualAnnotations = [&](const std::vector<RunLabVisualAnnotation>& annotations, const BlitLayout& blitLayout) {
+        for (const auto& annotation : annotations) {
+            const std::string type = [&]() {
+                std::string out = annotation.type;
+                std::transform(out.begin(), out.end(), out.begin(), [](unsigned char ch) {
+                    return static_cast<char>(std::tolower(ch));
+                });
+                return out;
+            }();
+            SDL_Color color{255, 80, 72, 255};
+            if (type.find("player") != std::string::npos) {
+                color = SDL_Color{70, 255, 120, 255};
+            } else if (type.find("enemy") != std::string::npos) {
+                color = SDL_Color{255, 48, 48, 255};
+            } else if (type.find("scenario") != std::string::npos
+                       || type.find("cenario") != std::string::npos
+                       || type.find("stage") != std::string::npos
+                       || type.find("background") != std::string::npos) {
+                color = SDL_Color{80, 190, 255, 255};
+            }
+
+            const int x = std::clamp(annotation.x, 0, width - 1);
+            const int y = std::clamp(annotation.y, 0, height - 1);
+            const int w = std::clamp(annotation.w, 1, width - x);
+            const int h = std::clamp(annotation.h, 1, height - y);
+            SDL_Rect rect{
+                blitLayout.gameDst.x + x * blitLayout.gameDst.w / width,
+                blitLayout.gameDst.y + y * blitLayout.gameDst.h / height,
+                std::max(1, w * blitLayout.gameDst.w / width),
+                std::max(1, h * blitLayout.gameDst.h / height)
+            };
+            SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
+            for (int inset = 0; inset < 3; ++inset) {
+                SDL_Rect thick{rect.x - inset, rect.y - inset, rect.w + inset * 2, rect.h + inset * 2};
+                SDL_RenderDrawRect(renderer, &thick);
+            }
+            if (!annotation.label.empty()) {
+                const int labelY = std::max(blitLayout.gameDst.y + 2, rect.y - 10);
+                drawHexText(renderer, rect.x, labelY, annotation.label.substr(0, 16), color, 1);
+            }
+        }
+    };
+
+    const auto drawRunLabRecognitionOverlay = [&](const std::vector<RunLabRecognitionRow>& rows, const BlitLayout& blitLayout) {
+        for (const auto& row : rows) {
+            if (!row.hasBounds || row.bounds.w <= 0 || row.bounds.h <= 0) {
+                continue;
+            }
+            std::string role = row.role;
+            std::transform(role.begin(), role.end(), role.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::tolower(ch));
+            });
+            SDL_Color color{255, 220, 110, 255};
+            if (role.find("player") != std::string::npos) {
+                color = SDL_Color{70, 255, 120, 255};
+            } else if (role.find("enemy") != std::string::npos || role.find("boss") != std::string::npos) {
+                color = SDL_Color{255, 48, 48, 255};
+            } else if (role.find("scenario") != std::string::npos) {
+                color = SDL_Color{80, 190, 255, 255};
+            }
+            SDL_Rect rect{
+                blitLayout.gameDst.x + row.bounds.x * blitLayout.gameDst.w / width,
+                blitLayout.gameDst.y + row.bounds.y * blitLayout.gameDst.h / height,
+                std::max(1, row.bounds.w * blitLayout.gameDst.w / width),
+                std::max(1, row.bounds.h * blitLayout.gameDst.h / height)
+            };
+            SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
+            SDL_RenderDrawRect(renderer, &rect);
+            SDL_Rect thick{rect.x - 1, rect.y - 1, rect.w + 2, rect.h + 2};
+            SDL_RenderDrawRect(renderer, &thick);
+            drawHexText(renderer, rect.x, std::max(blitLayout.gameDst.y + 2, rect.y - 9), row.role.substr(0, 10), color, 1);
+        }
     };
 
     const auto exportRunLabProfile = [&]() {
@@ -581,6 +805,25 @@ int runRealtime(
             showRunLabClickedCandidateOverlay = false;
             runLabCandidateOverlayFrames = 240;
         }
+        uiMessageFrames = 150;
+    };
+
+    const auto runRunLabRecognition = [&]() {
+        std::size_t rows = 0;
+        {
+            std::lock_guard<std::mutex> gbLock(gbMutex);
+            (void)runlab::refreshSelectedEntityBounds(runLabState, gb.bus());
+            for (auto& label : runLabState.memoryLabels) {
+                label.lastValue = runlab::readMemoryLabelValue(gb.bus(), label);
+                label.hasLastValue = true;
+            }
+            rows = buildRunLabRecognitionRows(runLabState, snapshotSprites(gb.bus()), gb.bus()).size();
+        }
+        showRunLabRecognitionList = true;
+        showRunLabCandidateList = false;
+        showRunLabClickedCandidateOverlay = false;
+        runLabCandidateOverlayFrames = 0;
+        uiMessage = "RUNLAB RECOG " + std::to_string(rows);
         uiMessageFrames = 150;
     };
 
@@ -944,12 +1187,45 @@ int runRealtime(
         bool lastFastForward = fastForwardAtomic.load(std::memory_order_relaxed);
         std::uint64_t logFrames = 0;
         std::size_t audioDropLogs = 0;
+        const auto consumeRunLabControlTick = [&]() {
+            std::lock_guard<std::mutex> controlLock(runLabControlMutex);
+            runLabControlQueue.poll();
+            return runLabControlQueue.tick();
+        };
+        const auto applyRunLabControlTick = [&](const RunLabControlTick& tick) {
+            if (tick.requestPause) {
+                pausedAtomic.store(true, std::memory_order_relaxed);
+                fastForwardAtomic.store(false, std::memory_order_relaxed);
+                pendingMcpPauseAction.store(1, std::memory_order_relaxed);
+                forceTitleRefresh.store(true, std::memory_order_relaxed);
+            }
+            if (tick.requestResume) {
+                pausedAtomic.store(false, std::memory_order_relaxed);
+                pendingMcpPauseAction.store(2, std::memory_order_relaxed);
+                forceTitleRefresh.store(true, std::memory_order_relaxed);
+            }
+            if (tick.stepFrames > 0) {
+                pendingMcpStepFrames.fetch_add(tick.stepFrames, std::memory_order_relaxed);
+            }
+            if (tick.consumedCommand && !tick.message.empty()) {
+                uiMessage = tick.message;
+                uiMessageFrames = 45;
+            }
+        };
 
         while (mtRunning.load(std::memory_order_relaxed)) {
-            if (pausedAtomic.load(std::memory_order_relaxed)) {
+            RunLabControlTick controlTick = consumeRunLabControlTick();
+            applyRunLabControlTick(controlTick);
+            const bool pausedNow = pausedAtomic.load(std::memory_order_relaxed);
+            if (pausedNow) {
+                const int stepBudget = pendingMcpStepFrames.load(std::memory_order_relaxed);
+                if (stepBudget <= 0) {
+                    nextFrame = std::chrono::steady_clock::now();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    continue;
+                }
+                pendingMcpStepFrames.fetch_sub(1, std::memory_order_relaxed);
                 nextFrame = std::chrono::steady_clock::now();
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
             }
 
             const bool ff = fastForwardAtomic.load(std::memory_order_relaxed);
@@ -1021,6 +1297,10 @@ int runRealtime(
                     const std::uint64_t frameId = emulatedFrameCounter.load(std::memory_order_relaxed);
                     std::uint8_t localInputMask = joypadMaskFromState(gb.joypad().state());
                     std::uint8_t localAppliedMask = localInputMask;
+                    if (controlTick.active || controlTick.consumedCommand) {
+                        localInputMask = static_cast<std::uint8_t>(localInputMask | controlTick.buttonMask);
+                        localAppliedMask = localInputMask;
+                    }
                     bool replayPlayingNow = false;
                     std::optional<NetplayFrameRecord> netplayFrameRecord;
                     {
@@ -1401,6 +1681,23 @@ int runRealtime(
         uiMessageFrames = 120;
         (void)persistNetworkConfig();
     };
+    const auto toggleRunLabMcpBridge = [&]() {
+        std::lock_guard<std::mutex> controlLock(runLabControlMutex);
+        const bool next = !runLabControlQueue.enabled();
+        runLabControlQueue.configure(runLabCommandQueuePath, next);
+        if (next) {
+            const auto queueParent = std::filesystem::path(runLabCommandQueuePath).parent_path();
+            if (!queueParent.empty()) {
+                std::filesystem::create_directories(queueParent);
+            }
+        }
+        uiMessage = next ? "RUNLAB MCP BRIDGE ON" : "RUNLAB MCP BRIDGE OFF";
+        uiMessageFrames = 150;
+    };
+    const auto runLabMcpBridgeEnabled = [&]() {
+        std::lock_guard<std::mutex> controlLock(runLabControlMutex);
+        return runLabControlQueue.enabled();
+    };
     const auto dispatchTopMenuAction = [&](TopMenuAction action) {
         switch (action) {
         case TopMenuAction::TogglePause:
@@ -1482,6 +1779,9 @@ int runRealtime(
             uiMessage = memorySearch.ui.visible ? "SEARCH ON" : "SEARCH OFF";
             uiMessageFrames = 90;
             break;
+        case TopMenuAction::ToggleRunLabMcpBridge:
+            toggleRunLabMcpBridge();
+            break;
         case TopMenuAction::RunLabExportProfile:
             exportRunLabProfile();
             break;
@@ -1561,6 +1861,7 @@ int runRealtime(
             break;
         case TopMenuSection::Debug:
             out.push_back({TopMenuAction::ToggleDebugPanel, showPanel ? "OCULTAR DEBUG" : "MOSTRAR DEBUG"});
+            out.push_back({TopMenuAction::ToggleRunLabMcpBridge, runLabMcpBridgeEnabled() ? "RUNLAB MCP OFF" : "RUNLAB MCP ON"});
             if (showPanel) {
                 out.push_back({TopMenuAction::ToggleBreakpointMenu, showBreakpointMenu ? "OCULTAR BP WP" : "MOSTRAR BP WP"});
                 out.push_back({TopMenuAction::ToggleSearchPanel, memorySearch.ui.visible ? "OCULTAR BUSCA" : "MOSTRAR BUSCA"});
@@ -1787,6 +2088,45 @@ int runRealtime(
         }
     };
 
+    const auto drawRunLabPromptOverlay = [&]() {
+        if (!runLabPromptInput.active) {
+            return;
+        }
+        int outputW = 0;
+        int outputH = 0;
+        SDL_GetRendererOutputSize(renderer, &outputW, &outputH);
+        const int boxW = std::min(560, std::max(280, outputW - 80));
+        const int boxH = 104;
+        const int x = (outputW - boxW) / 2;
+        const int y = std::max(48, (outputH - boxH) / 2);
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(renderer, 8, 10, 16, 230);
+        SDL_Rect shade{0, 0, outputW, outputH};
+        SDL_RenderFillRect(renderer, &shade);
+        SDL_SetRenderDrawColor(renderer, 24, 30, 44, 245);
+        SDL_Rect box{x, y, boxW, boxH};
+        SDL_RenderFillRect(renderer, &box);
+        SDL_SetRenderDrawColor(renderer, 100, 140, 210, 255);
+        SDL_RenderDrawRect(renderer, &box);
+        drawHexText(renderer, x + 12, y + 10, "RUNLAB MCP PROMPT", SDL_Color{176, 208, 246, 255}, 1);
+        drawHexText(renderer, x + 12, y + 24, "ENTER SEND  ESC CANCEL", SDL_Color{150, 160, 184, 255}, 1);
+        SDL_SetRenderDrawColor(renderer, 14, 18, 28, 255);
+        SDL_Rect input{x + 12, y + 42, boxW - 24, 28};
+        SDL_RenderFillRect(renderer, &input);
+        SDL_SetRenderDrawColor(renderer, 64, 78, 110, 255);
+        SDL_RenderDrawRect(renderer, &input);
+        std::string text = runLabPromptInput.text.empty() ? "_" : runLabPromptInput.text + "_";
+        if (text.size() > 72) {
+            text = text.substr(text.size() - 72);
+        }
+        std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::toupper(ch));
+        });
+        drawHexText(renderer, x + 18, y + 52, text, SDL_Color{238, 242, 255, 255}, 1);
+        drawHexText(renderer, x + 12, y + 78, "MCP CLIENT READS RUNLAB PROMPT QUEUE", SDL_Color{255, 214, 120, 255}, 1);
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+    };
+
     while (running) {
         if (paused != pausedAtomic.load(std::memory_order_relaxed)) {
             paused = pausedAtomic.load(std::memory_order_relaxed);
@@ -1857,7 +2197,7 @@ int runRealtime(
                     }
                     continue;
                 }
-                if (showScaleMenu || showPaletteMenu || memoryEdit.active || breakpointEdit.active || memorySearch.ui.editingValue) {
+                if (showScaleMenu || showPaletteMenu || memoryEdit.active || breakpointEdit.active || memorySearch.ui.editingValue || runLabPromptInput.active) {
                     continue;
                 }
                 std::lock_guard<std::mutex> gbLock(gbMutex);
@@ -1882,6 +2222,33 @@ int runRealtime(
                 }
                 if (openTopMenuSection.has_value()) {
                     openTopMenuSection.reset();
+                }
+                if (showPanel && ev.key.keysym.sym == SDLK_t && (ev.key.keysym.mod & KMOD_CTRL)) {
+                    runLabPromptInput.active = true;
+                    runLabPromptInput.text.clear();
+                    memoryEdit.active = false;
+                    breakpointEdit.active = false;
+                    memorySearch.ui.editingValue = false;
+                    SDL_StartTextInput();
+                    uiMessage = "RUNLAB PROMPT";
+                    uiMessageFrames = 90;
+                    continue;
+                }
+                if (runLabPromptInput.active) {
+                    if (ev.key.keysym.sym == SDLK_ESCAPE) {
+                        runLabPromptInput.active = false;
+                        runLabPromptInput.text.clear();
+                        stopTextInputIfUnused();
+                        uiMessage = "RUNLAB PROMPT CANCEL";
+                        uiMessageFrames = 90;
+                    } else if (ev.key.keysym.sym == SDLK_BACKSPACE) {
+                        if (!runLabPromptInput.text.empty()) {
+                            runLabPromptInput.text.pop_back();
+                        }
+                    } else if (ev.key.keysym.sym == SDLK_RETURN || ev.key.keysym.sym == SDLK_KP_ENTER) {
+                        submitRunLabPrompt();
+                    }
+                    continue;
                 }
                 if (showControlsMenu) {
                     controlsMenuIndex = std::clamp(controlsMenuIndex, 0, kBindActionCount - 1);
@@ -2098,7 +2465,7 @@ int runRealtime(
                     createRunLabEntityFromSelection();
                     continue;
                 }
-                if (showPanel && ev.key.keysym.sym == SDLK_t) {
+                if (showPanel && ev.key.keysym.sym == SDLK_t && (ev.key.keysym.mod & KMOD_CTRL) == 0) {
                     cycleRunLabEntityType();
                     continue;
                 }
@@ -2112,6 +2479,10 @@ int runRealtime(
                 }
                 if (showPanel && ev.key.keysym.sym == SDLK_c) {
                     runRunLabCorrelationScan();
+                    continue;
+                }
+                if (showPanel && ev.key.keysym.sym == SDLK_m && (ev.key.keysym.mod & KMOD_CTRL) == 0) {
+                    runRunLabRecognition();
                     continue;
                 }
                 if (showPanel && ev.key.keysym.sym == SDLK_1) {
@@ -2140,7 +2511,12 @@ int runRealtime(
                 }
                 if (showPanel && ev.key.keysym.sym == SDLK_q) {
                     runlab::clearEvents(runLabState);
+                    {
+                        std::lock_guard<std::mutex> controlLock(runLabControlMutex);
+                        runLabControlQueue.clear();
+                    }
                     showRunLabCandidateList = false;
+                    showRunLabRecognitionList = false;
                     showRunLabClickedCandidateOverlay = false;
                     runLabCandidateOverlayFrames = 0;
                     uiMessage = "RUNLAB EVENTS CLEAR";
@@ -2234,7 +2610,7 @@ int runRealtime(
                     uiMessageFrames = 120;
                 } else if (ev.key.keysym.sym == SDLK_F9) {
                     requestCapture = true;
-                } else if (showPanel && ev.key.keysym.sym == SDLK_m) {
+                } else if (showPanel && ev.key.keysym.sym == SDLK_m && (ev.key.keysym.mod & KMOD_CTRL)) {
                     breakpointEdit.active = false;
                     memoryEdit.active = true;
                     memoryEdit.editAddress = true;
@@ -2372,7 +2748,7 @@ int runRealtime(
                 }
             }
             if (ev.type == SDL_KEYUP) {
-                if (showControlsMenu || showScaleMenu || showPaletteMenu || memoryEdit.active || breakpointEdit.active || memorySearch.ui.editingValue) {
+                if (showControlsMenu || showScaleMenu || showPaletteMenu || memoryEdit.active || breakpointEdit.active || memorySearch.ui.editingValue || runLabPromptInput.active) {
                     continue;
                 }
                 if (ev.key.keysym.sym == SDLK_TAB) {
@@ -2389,6 +2765,18 @@ int runRealtime(
                 applyKeyboardBinding(gb, controls, ev.key.keysym.sym, false);
             }
             if (ev.type == SDL_TEXTINPUT) {
+                if (runLabPromptInput.active) {
+                    for (const char* p = ev.text.text; *p != '\0'; ++p) {
+                        const unsigned char raw = static_cast<unsigned char>(*p);
+                        if (raw < 32 || raw == 127) {
+                            continue;
+                        }
+                        if (runLabPromptInput.text.size() < 240) {
+                            runLabPromptInput.text.push_back(static_cast<char>(*p));
+                        }
+                    }
+                    continue;
+                }
                 if (memoryEdit.active) {
                     for (const char* p = ev.text.text; *p != '\0'; ++p) {
                         char ch = static_cast<char>(std::toupper(static_cast<unsigned char>(*p)));
@@ -2662,7 +3050,32 @@ int runRealtime(
 
                     const int readStartY = readStartYFromLayout(outputH, showBreakpointMenu);
                     const int readMaxLines = readVisibleLinesForPanel(outputH, showBreakpointMenu);
-                    if (showRunLabCandidateList) {
+                    if (showRunLabRecognitionList) {
+                        std::vector<RunLabRecognitionRow> rows;
+                        {
+                            std::lock_guard<std::mutex> gbLock(gbMutex);
+                            rows = buildRunLabRecognitionRows(runLabState, snapshotSprites(gb.bus()), gb.bus());
+                        }
+                        const int rowCount = static_cast<int>(std::min<std::size_t>(rows.size(), static_cast<std::size_t>(readMaxLines)));
+                        if (my >= readStartY && my < readStartY + rowCount * kReadLineHeight) {
+                            const int rowIdx = (my - readStartY) / kReadLineHeight;
+                            if (rowIdx >= 0 && rowIdx < static_cast<int>(rows.size())) {
+                                const auto& row = rows[static_cast<std::size_t>(rowIdx)];
+                                if (row.primaryAddress.has_value()) {
+                                    memoryWatch.address = row.primaryAddress.value();
+                                    {
+                                        std::lock_guard<std::mutex> gbLock(gbMutex);
+                                        resetMemoryWatch(memoryWatch, gb.bus());
+                                    }
+                                }
+                                if (row.spriteAddress.has_value()) {
+                                    selectedSpriteAddr = row.spriteAddress.value();
+                                }
+                                uiMessage = "WATCH " + row.role;
+                                uiMessageFrames = 90;
+                            }
+                        }
+                    } else if (showRunLabCandidateList) {
                         const auto candidates = runLabCandidateAddresses();
                         const int candidateCount = static_cast<int>(std::min<std::size_t>(candidates.size(), static_cast<std::size_t>(readMaxLines)));
                         if (my >= readStartY && my < readStartY + candidateCount * kReadLineHeight) {
@@ -2721,6 +3134,7 @@ int runRealtime(
         }
 
         syncThreadState();
+        pollRunLabFeedback();
 
         QueuedMemoryWrite writeToApply{};
         {
@@ -2742,6 +3156,63 @@ int runRealtime(
             sampleMemoryWatch(memoryWatch, gb.bus());
             runlab::updateTimeline(runLabState, gb.bus(), emulatedFrameCounter.load(std::memory_order_relaxed));
             (void)runlab::captureCorrelationSample(runLabState, gb.bus(), emulatedFrameCounter.load(std::memory_order_relaxed));
+        }
+        const std::uint64_t runLabExportFrame = emulatedFrameCounter.load(std::memory_order_relaxed);
+        const auto runLabExportNow = std::chrono::steady_clock::now();
+        const bool runLabFrameExportDue = runLabExportFrame != lastRunLabStateExportFrame && (runLabExportFrame % 15u) == 0u;
+        const bool runLabTimeExportDue = runLabExportNow - lastRunLabStateExportTime >= std::chrono::milliseconds(250);
+        if (runLabFrameExportDue || runLabTimeExportDue) {
+            std::error_code runLabDirEc;
+            std::filesystem::create_directories(runLabDirectory, runLabDirEc);
+            const bool screenSaved = saveRgb24Ppm(runLabScreenshotPath, pixels);
+            const auto escapeStateJson = [](const std::string& text) {
+                std::string out;
+                out.reserve(text.size() + 8);
+                for (const char ch : text) {
+                    if (ch == '\\') out += "\\\\";
+                    else if (ch == '"') out += "\\\"";
+                    else if (ch == '\n') out += "\\n";
+                    else out.push_back(ch);
+                }
+                return out;
+            };
+            std::string controlStatusJson;
+            {
+                std::lock_guard<std::mutex> controlLock(runLabControlMutex);
+                std::ostringstream control;
+                control << "{\n";
+                control << "    \"enabled\": " << (runLabControlQueue.enabled() ? "true" : "false") << ",\n";
+                control << "    \"queue_path\": \"" << escapeStateJson(runLabControlQueue.path().string()) << "\",\n";
+                control << "    \"prompt_queue_path\": \"" << escapeStateJson(runLabPromptQueuePath) << "\",\n";
+                control << "    \"feedback_queue_path\": \"" << escapeStateJson(runLabFeedbackQueuePath) << "\",\n";
+                control << "    \"pending_count\": " << runLabControlQueue.pendingCount() << ",\n";
+                control << "    \"client_recently_seen\": " << (runLabControlQueue.clientRecentlySeen() ? "true" : "false") << ",\n";
+                control << "    \"frames_since_client_heartbeat\": " << runLabControlQueue.framesSinceClientHeartbeat() << ",\n";
+                control << "    \"current_command\": \"" << escapeStateJson(runLabControlQueue.currentCommandName()) << "\",\n";
+                control << "    \"remaining_frames\": " << runLabControlQueue.remainingFrames() << ",\n";
+                control << "    \"step_frames_pending\": " << pendingMcpStepFrames.load(std::memory_order_relaxed) << ",\n";
+                control << "    \"last_message\": \"" << escapeStateJson(runLabControlQueue.lastMessage()) << "\"\n";
+                control << "  }";
+                controlStatusJson = control.str();
+            }
+            if (runlab::exportCurrentStateFile(
+                    runLabState,
+                    gb.cartridge().title(),
+                    runLabExportFrame,
+                    paused,
+                    running,
+                    runLabStatePath,
+                    runLabState.lastExportPath,
+                    screenSaved ? runLabScreenshotPath : std::string{},
+                    controlStatusJson
+                )) {
+                lastRunLabStateExportFrame = runLabExportFrame;
+                lastRunLabStateExportTime = runLabExportNow;
+                lastRunLabStateExportError.clear();
+            } else if (lastRunLabStateExportError != runLabStatePath) {
+                lastRunLabStateExportError = runLabStatePath;
+                std::cerr << "falha ao exportar RunLab state: " << runLabStatePath << "\n";
+            }
         }
 
         RgbFramePacket latestFrame{};
@@ -2784,6 +3255,12 @@ int runRealtime(
         }
         SDL_RenderCopy(renderer, renderTexture, nullptr, &blit.gameDst);
         drawTopTaskbar(outputW);
+        std::vector<RunLabVisualAnnotation> visualAnnotations;
+        {
+            std::lock_guard<std::mutex> controlLock(runLabControlMutex);
+            visualAnnotations = runLabControlQueue.annotations();
+        }
+        drawRunLabVisualAnnotations(visualAnnotations, blit);
         if (uiMessageFrames > 0) {
             const int minMsgY = showTopMenuBar ? (topMenuBarHeight() + 4) : 8;
             const int msgY = std::max(blit.gameDst.y + 8, minMsgY);
@@ -2792,6 +3269,33 @@ int runRealtime(
             SDL_RenderFillRect(renderer, &msgBg);
             drawHexText(renderer, blit.gameDst.x + 12, msgY + 4, uiMessage, SDL_Color{255, 230, 120, 255}, 1);
             --uiMessageFrames;
+        }
+        if (runLabControlQueue.enabled()) {
+            std::string commandName;
+            std::size_t pending = 0;
+            int remaining = 0;
+            {
+                std::lock_guard<std::mutex> controlLock(runLabControlMutex);
+                commandName = runLabControlQueue.currentCommandName();
+                pending = runLabControlQueue.pendingCount();
+                remaining = runLabControlQueue.remainingFrames();
+            }
+            if (!commandName.empty() || pending > 0 || pendingMcpStepFrames.load(std::memory_order_relaxed) > 0) {
+                const int minControlY = showTopMenuBar ? (topMenuBarHeight() + 28) : 32;
+                const int controlY = std::max(blit.gameDst.y + 32, minControlY);
+                const int stepPending = pendingMcpStepFrames.load(std::memory_order_relaxed);
+                std::string line = "MCP ";
+                line += commandName.empty() ? "IDLE" : commandName;
+                line += " F" + std::to_string(remaining);
+                line += " Q" + std::to_string(pending);
+                if (stepPending > 0) {
+                    line += " STEP" + std::to_string(stepPending);
+                }
+                SDL_SetRenderDrawColor(renderer, 16, 36, 32, 190);
+                SDL_Rect controlBg{blit.gameDst.x + 8, controlY, 220, 16};
+                SDL_RenderFillRect(renderer, &controlBg);
+                drawHexText(renderer, blit.gameDst.x + 12, controlY + 3, line, SDL_Color{120, 255, 196, 255}, 1);
+            }
         }
         char statusLine[84];
         if (netplayEnabled) {
@@ -2843,6 +3347,9 @@ int runRealtime(
                 const auto selectedSprite = findSelectedSprite(sprites, selectedSpriteAddr);
                 const int overlayScale = std::max(1, blit.gameDst.w / width);
                 drawSelectedSpriteOverlay(renderer, gb.bus(), selectedSprite, overlayScale, blit.gameDst.x, blit.gameDst.y);
+                if (showRunLabRecognitionList) {
+                    drawRunLabRecognitionOverlay(buildRunLabRecognitionRows(runLabState, sprites, gb.bus()), blit);
+                }
                 if (showRunLabClickedCandidateOverlay) {
                     drawRunLabCandidateOverlay(renderer, gb.bus(), sprites, runLabState, true, overlayScale, blit.gameDst.x, blit.gameDst.y);
                 } else if (runLabCandidateOverlayFrames > 0) {
@@ -2854,6 +3361,18 @@ int runRealtime(
                 const gb::u16 nextPc = regs.pc;
                 const gb::u8 nextOp = gb.bus().peek(nextPc);
                 const auto disasmLines = buildDisasmWindow(gb.bus(), nextPc, 3);
+                RunLabMcpStatus mcpStatus{};
+                {
+                    std::lock_guard<std::mutex> controlLock(runLabControlMutex);
+                    mcpStatus.enabled = runLabControlQueue.enabled();
+                    mcpStatus.clientRecentlySeen = runLabControlQueue.clientRecentlySeen();
+                    mcpStatus.pendingCount = runLabControlQueue.pendingCount();
+                    mcpStatus.currentCommand = runLabControlQueue.currentCommandName();
+                    mcpStatus.remainingFrames = runLabControlQueue.remainingFrames();
+                    mcpStatus.stepFramesPending = pendingMcpStepFrames.load(std::memory_order_relaxed);
+                    mcpStatus.framesSinceClientHeartbeat = runLabControlQueue.framesSinceClientHeartbeat();
+                    mcpStatus.lastMessage = runLabControlQueue.lastMessage();
+                }
                 drawMemoryPanel(
                     renderer,
                     outputW - panelWidth,
@@ -2874,6 +3393,8 @@ int runRealtime(
                     selectedSpriteAddr,
                     runLabState,
                     showRunLabCandidateList,
+                    showRunLabRecognitionList,
+                    mcpStatus,
                     gb.bus(),
                     execPc,
                     execOp,
@@ -2898,6 +3419,7 @@ int runRealtime(
         if (showControlsMenu) {
             drawControlsMenuOverlay(outputW, outputH);
         }
+        drawRunLabPromptOverlay();
         SDL_RenderPresent(renderer);
 
     }

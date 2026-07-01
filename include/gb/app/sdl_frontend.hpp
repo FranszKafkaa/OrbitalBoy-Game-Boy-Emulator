@@ -27,7 +27,10 @@ int runRealtime(
     int linkHostPort,
     const std::string& netplayConnect,
     int netplayHostPort,
-    int netplayDelayFrames
+    int netplayDelayFrames,
+    bool runLabControl,
+    const std::string& runLabStatePath,
+    const std::string& runLabCommandQueuePath
 );
 #endif
 

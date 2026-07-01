@@ -71,6 +71,28 @@ struct MemorySearchUiState {
     std::vector<gb::u16> matches{};
 };
 
+struct RunLabMcpStatus {
+    bool enabled = false;
+    bool clientRecentlySeen = false;
+    std::size_t pendingCount = 0;
+    std::string currentCommand{};
+    int remainingFrames = 0;
+    int stepFramesPending = 0;
+    int framesSinceClientHeartbeat = 0;
+    std::string lastMessage{};
+};
+
+struct RunLabRecognitionRow {
+    std::string role{};
+    std::string label{};
+    std::string memorySummary{};
+    std::string detail{};
+    std::optional<gb::u16> primaryAddress{};
+    std::optional<gb::u16> spriteAddress{};
+    runlab::SpriteBounds bounds{};
+    bool hasBounds = false;
+};
+
 inline constexpr int kReadLineHeight = 14;
 inline constexpr int kReadLines = 8;
 inline constexpr int kBreakpointMenuTopY = 104;
@@ -134,6 +156,13 @@ void drawRunLabCandidateOverlay(
     int gameY
 );
 
+std::vector<RunLabRecognitionRow> buildRunLabRecognitionRows(
+    const runlab::State& runlabState,
+    const std::vector<SpriteDebugRow>& sprites,
+    const gb::Bus& bus,
+    std::size_t maxRows = 64
+);
+
 void drawMemoryPanel(
     SDL_Renderer* renderer,
     int panelX,
@@ -154,6 +183,8 @@ void drawMemoryPanel(
     std::optional<gb::u16> selectedSpriteAddr,
     const runlab::State& runlabState,
     bool showRunLabCandidateList,
+    bool showRunLabRecognitionList,
+    const RunLabMcpStatus& mcpStatus,
     const gb::Bus& bus,
     gb::u16 execPc,
     gb::u8 execOp,

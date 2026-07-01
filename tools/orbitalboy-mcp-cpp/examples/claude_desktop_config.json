@@ -6,7 +6,13 @@
         "--state",
         "/absolute/path/to/OrbitalBoy-Game-Boy-Emulator/.runlab/current-state.json",
         "--profile",
-        "/absolute/path/to/OrbitalBoy-Game-Boy-Emulator/profiles/game.runlab.json"
+        "/absolute/path/to/OrbitalBoy-Game-Boy-Emulator/profiles/game.runlab.json",
+        "--control-queue",
+        "/absolute/path/to/OrbitalBoy-Game-Boy-Emulator/.runlab/commands.jsonl",
+        "--prompt-queue",
+        "/absolute/path/to/OrbitalBoy-Game-Boy-Emulator/.runlab/prompts.jsonl",
+        "--feedback-queue",
+        "/absolute/path/to/OrbitalBoy-Game-Boy-Emulator/.runlab/feedback.jsonl"
       ]
     }
   }

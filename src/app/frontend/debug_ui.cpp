@@ -474,6 +474,177 @@ std::vector<RunLabCandidateRow> runLabCandidateRows(const runlab::State& state) 
     return rows;
 }
 
+bool spriteVisibleOnScreen(const SpriteDebugRow& sp, const gb::Bus& bus) {
+    const gb::u8 lcdc = bus.peek(0xFF40);
+    const bool tallSprites = (lcdc & 0x04) != 0;
+    const int spriteHeight = tallSprites ? 16 : 8;
+    const int sx = static_cast<int>(sp.x) - 8;
+    const int sy = static_cast<int>(sp.y) - 16;
+    return sx > -8 && sx < gb::PPU::ScreenWidth && sy > -spriteHeight && sy < gb::PPU::ScreenHeight;
+}
+
+runlab::SpriteBounds boundsForSpriteDebugRow(const SpriteDebugRow& sp, const gb::Bus& bus) {
+    return runlab::spriteBounds(runlab::OamSpriteRef{sp.addr, sp.y, sp.x, sp.tile, sp.attr}, bus);
+}
+
+std::string fieldPrefixForMemoryLabel(const runlab::MemoryLabel& label) {
+    const std::string field = uiUpper(label.field.empty() ? label.label : label.field);
+    if (field.find(".X") != std::string::npos || field == "X") return "X";
+    if (field.find(".Y") != std::string::npos || field == "Y") return "Y";
+    if (field.find("STATE") != std::string::npos) return "ST";
+    if (field.find("LIVES") != std::string::npos || field.find("HP") != std::string::npos) return "HP";
+    if (field.find("LEVEL") != std::string::npos || field.find("ROOM") != std::string::npos) return "LV";
+    return field.empty() ? "MEM" : field.substr(0, std::min<std::size_t>(field.size(), 4));
+}
+
+std::string memorySummaryForEntity(
+    const runlab::State& runlabState,
+    const runlab::EntityCandidate& entity,
+    const gb::Bus& bus,
+    std::optional<gb::u16>* primaryAddress
+) {
+    std::string out;
+    int added = 0;
+    for (const auto& label : runlabState.memoryLabels) {
+        if (label.entity != entity.label) {
+            continue;
+        }
+        if (added > 0) out += " ";
+        const std::int32_t value = runlab::readMemoryLabelValue(bus, label);
+        out += fieldPrefixForMemoryLabel(label);
+        out += " ";
+        out += runlab::formatAddress(label.address);
+        out += "=";
+        out += std::to_string(value);
+        if (primaryAddress && !primaryAddress->has_value()) {
+            *primaryAddress = label.address;
+        }
+        if (++added >= 3) {
+            break;
+        }
+    }
+    return out;
+}
+
+bool entityUsesOamIndex(const runlab::State& runlabState, int oamIndex) {
+    for (const auto& entity : runlabState.entities) {
+        if (std::find(entity.oamIndices.begin(), entity.oamIndices.end(), oamIndex) != entity.oamIndices.end()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<RunLabRecognitionRow> buildRunLabRecognitionRows(
+    const runlab::State& runlabState,
+    const std::vector<SpriteDebugRow>& sprites,
+    const gb::Bus& bus,
+    std::size_t maxRows
+) {
+    std::vector<RunLabRecognitionRow> rows;
+    rows.reserve(std::min<std::size_t>(maxRows, 16));
+    bool hasPlayer = false;
+
+    for (const auto& entity : runlabState.entities) {
+        if (rows.size() >= maxRows) break;
+        RunLabRecognitionRow row;
+        row.role = uiUpper(runlab::entityTypeName(entity.type));
+        row.label = entity.label;
+        row.hasBounds = entity.lastBounds.w > 0 && entity.lastBounds.h > 0;
+        row.bounds = entity.lastBounds;
+        row.memorySummary = memorySummaryForEntity(runlabState, entity, bus, &row.primaryAddress);
+        if (!entity.oamIndices.empty()) {
+            const int oamIndex = entity.oamIndices.front();
+            if (oamIndex >= 0 && oamIndex < 40) {
+                row.spriteAddress = static_cast<gb::u16>(0xFE00 + oamIndex * 4);
+                if (!row.primaryAddress.has_value()) {
+                    row.primaryAddress = row.spriteAddress;
+                }
+                if (row.memorySummary.empty()) {
+                    row.memorySummary = "OAM " + runlab::formatAddress(row.spriteAddress.value())
+                        + " X " + runlab::formatAddress(static_cast<gb::u16>(row.spriteAddress.value() + 1))
+                        + " Y " + runlab::formatAddress(row.spriteAddress.value());
+                }
+            }
+        }
+        if (row.memorySummary.empty()) {
+            row.memorySummary = "MEM ?";
+        }
+        char detail[48];
+        std::snprintf(detail, sizeof(detail), "BOX %d,%d %dx%d", row.bounds.x, row.bounds.y, row.bounds.w, row.bounds.h);
+        row.detail = detail;
+        if (entity.type == runlab::EntityType::Player) {
+            hasPlayer = true;
+        }
+        rows.push_back(std::move(row));
+    }
+
+    if (!hasPlayer) {
+        auto chosen = sprites.end();
+        chosen = std::find_if(sprites.begin(), sprites.end(), [&](const SpriteDebugRow& sp) {
+            return spriteVisibleOnScreen(sp, bus);
+        });
+        if (chosen != sprites.end() && rows.size() < maxRows) {
+            RunLabRecognitionRow row;
+            row.role = "PLAYER?";
+            row.label = "visible_sprite";
+            row.primaryAddress = chosen->addr;
+            row.spriteAddress = chosen->addr;
+            row.bounds = boundsForSpriteDebugRow(*chosen, bus);
+            row.hasBounds = true;
+            row.memorySummary = "OAM " + runlab::formatAddress(chosen->addr)
+                + " X " + runlab::formatAddress(static_cast<gb::u16>(chosen->addr + 1))
+                + " Y " + runlab::formatAddress(chosen->addr);
+            row.detail = "NO PLAYER LABEL";
+            rows.push_back(std::move(row));
+        }
+    }
+
+    for (const auto& sp : sprites) {
+        if (rows.size() >= maxRows) break;
+        const int oamIndex = runlab::oamIndexFromAddress(sp.addr);
+        if (!spriteVisibleOnScreen(sp, bus) || entityUsesOamIndex(runlabState, oamIndex)) {
+            continue;
+        }
+        RunLabRecognitionRow row;
+        row.role = "ITEM?";
+        row.label = "sprite" + std::to_string(oamIndex);
+        row.primaryAddress = sp.addr;
+        row.spriteAddress = sp.addr;
+        row.bounds = boundsForSpriteDebugRow(sp, bus);
+        row.hasBounds = true;
+        row.memorySummary = "OAM " + runlab::formatAddress(sp.addr)
+            + " X " + runlab::formatAddress(static_cast<gb::u16>(sp.addr + 1))
+            + " Y " + runlab::formatAddress(sp.addr);
+        char detail[48];
+        std::snprintf(detail, sizeof(detail), "TILE %02X ATTR %02X", sp.tile, sp.attr);
+        row.detail = detail;
+        rows.push_back(std::move(row));
+    }
+
+    if (rows.size() < maxRows) {
+        RunLabRecognitionRow row;
+        row.role = "SCENARIO";
+        row.label = "camera_bg";
+        row.primaryAddress = 0xFF43;
+        char memory[96];
+        std::snprintf(
+            memory,
+            sizeof(memory),
+            "SCX FF43=%d SCY FF42=%d WX FF4B=%d WY FF4A=%d",
+            bus.peek(0xFF43),
+            bus.peek(0xFF42),
+            bus.peek(0xFF4B),
+            bus.peek(0xFF4A)
+        );
+        row.memorySummary = memory;
+        row.detail = "BG/CAMERA REGS";
+        rows.push_back(std::move(row));
+    }
+
+    return rows;
+}
+
 void drawMemoryPanel(
     SDL_Renderer* renderer,
     int panelX,
@@ -494,6 +665,8 @@ void drawMemoryPanel(
     std::optional<gb::u16> selectedSpriteAddr,
     const runlab::State& runlabState,
     bool showRunLabCandidateList,
+    bool showRunLabRecognitionList,
+    const RunLabMcpStatus& mcpStatus,
     const gb::Bus& bus,
     gb::u16 execPc,
     gb::u8 execOp,
@@ -657,7 +830,36 @@ void drawMemoryPanel(
     int y = readStartY;
     const int lineHeight = kReadLineHeight;
     const int readLines = readVisibleLinesForPanel(panelHeight, showBreakpointMenu);
-    if (showRunLabCandidateList) {
+    if (showRunLabRecognitionList) {
+        const auto rows = buildRunLabRecognitionRows(runlabState, sprites, bus);
+        const int count = static_cast<int>(std::min<std::size_t>(rows.size(), static_cast<std::size_t>(readLines)));
+        if (count == 0) {
+            drawHexTextFit(renderer, panelX + 20, y, panelWidth - 28, "RECOG NONE", dim, 1);
+        }
+        for (int i = 0; i < count; ++i) {
+            const auto& row = rows[static_cast<std::size_t>(i)];
+            if (row.primaryAddress.has_value() && row.primaryAddress.value() == watch.address) {
+                SDL_SetRenderDrawColor(renderer, 42, 58, 70, 255);
+                SDL_Rect hl{panelX + 8, y + i * lineHeight - 1, panelWidth - 16, lineHeight};
+                SDL_RenderFillRect(renderer, &hl);
+            }
+            SDL_Color roleColor{120, 190, 255, 255};
+            const std::string role = uiUpper(row.role);
+            if (role.find("PLAYER") != std::string::npos) {
+                roleColor = SDL_Color{80, 255, 130, 255};
+            } else if (role.find("ENEMY") != std::string::npos || role.find("BOSS") != std::string::npos) {
+                roleColor = SDL_Color{255, 80, 72, 255};
+            } else if (role.find("ITEM") != std::string::npos || role.find("OBJECT") != std::string::npos) {
+                roleColor = SDL_Color{255, 220, 110, 255};
+            }
+            SDL_SetRenderDrawColor(renderer, roleColor.r, roleColor.g, roleColor.b, roleColor.a);
+            SDL_Rect marker{panelX + 10, y + i * lineHeight + 2, 4, 8};
+            SDL_RenderFillRect(renderer, &marker);
+
+            std::string line = row.role + " " + row.label + " " + row.memorySummary;
+            drawHexTextFit(renderer, panelX + 20, y + i * lineHeight, panelWidth - 28, uiUpper(line), roleColor, 1);
+        }
+    } else if (showRunLabCandidateList) {
         const auto rows = runLabCandidateRows(runlabState);
         const int count = static_cast<int>(std::min<std::size_t>(rows.size(), static_cast<std::size_t>(readLines)));
         if (count == 0) {
@@ -801,13 +1003,44 @@ void drawMemoryPanel(
         SDL_RenderFillRect(renderer, &thumb);
     }
 
-    const int runlabY = std::max(spriteY + spriteCount * spriteLineHeight + 8, panelHeight - 140);
+    const int runlabY = std::max(spriteY + spriteCount * spriteLineHeight + 8, panelHeight - 152);
     SDL_SetRenderDrawColor(renderer, 24, 30, 44, 255);
-    SDL_Rect runlabBg{panelX + 8, runlabY, panelWidth - 16, 124};
+    SDL_Rect runlabBg{panelX + 8, runlabY, panelWidth - 16, 136};
     SDL_RenderFillRect(renderer, &runlabBg);
     SDL_SetRenderDrawColor(renderer, 70, 86, 118, 255);
     SDL_RenderDrawRect(renderer, &runlabBg);
     drawHexTextFit(renderer, panelX + 12, runlabY + 4, panelWidth - 24, "RUNLAB", SDL_Color{176, 208, 246, 255}, 1);
+
+    char mcpLine[96];
+    if (!mcpStatus.enabled) {
+        std::snprintf(mcpLine, sizeof(mcpLine), "MCP OFF");
+        drawHexTextFit(renderer, panelX + 12, runlabY + 16, panelWidth - 24, mcpLine, dim, 1);
+    } else {
+        const bool activeMcp = !mcpStatus.currentCommand.empty()
+            || mcpStatus.pendingCount > 0
+            || mcpStatus.stepFramesPending > 0;
+        const char* status = activeMcp ? "ACTIVE" : (mcpStatus.clientRecentlySeen ? "CLIENT" : "WAIT");
+        const std::string cmd = mcpStatus.currentCommand.empty() ? "-" : uiUpper(mcpStatus.currentCommand);
+        std::snprintf(
+            mcpLine,
+            sizeof(mcpLine),
+            "MCP %s Q%zu F%d S%d %s",
+            status,
+            mcpStatus.pendingCount,
+            mcpStatus.remainingFrames,
+            mcpStatus.stepFramesPending,
+            cmd.c_str()
+        );
+        drawHexTextFit(
+            renderer,
+            panelX + 12,
+            runlabY + 16,
+            panelWidth - 24,
+            mcpLine,
+            activeMcp ? SDL_Color{120, 255, 196, 255} : SDL_Color{150, 190, 220, 255},
+            1
+        );
+    }
 
     if (runlabState.selectedEntity.has_value() && runlabState.selectedEntity.value() < runlabState.entities.size()) {
         const auto& entity = runlabState.entities[runlabState.selectedEntity.value()];
@@ -820,7 +1053,7 @@ void drawMemoryPanel(
             std::max(0, selectedIndex),
             uiUpper(entity.label).c_str()
         );
-        drawHexTextFit(renderer, panelX + 12, runlabY + 16, panelWidth - 24, line, active, 1);
+        drawHexTextFit(renderer, panelX + 12, runlabY + 28, panelWidth - 24, line, active, 1);
         std::snprintf(
             line,
             sizeof(line),
@@ -828,7 +1061,7 @@ void drawMemoryPanel(
             uiUpper(runlab::entityTypeName(entity.type)).c_str(),
             runlabState.memoryLabels.size()
         );
-        drawHexTextFit(renderer, panelX + 12, runlabY + 28, panelWidth - 24, line, active, 1);
+        drawHexTextFit(renderer, panelX + 12, runlabY + 40, panelWidth - 24, line, active, 1);
     } else {
         const int selectedIndex = selectedSpriteAddr.has_value() ? runlab::oamIndexFromAddress(selectedSpriteAddr.value()) : -1;
         char line[64];
@@ -837,10 +1070,10 @@ void drawMemoryPanel(
         } else {
             std::snprintf(line, sizeof(line), "SEL SPR:NONE ENT:NONE");
         }
-        drawHexTextFit(renderer, panelX + 12, runlabY + 16, panelWidth - 24, line, dim, 1);
+        drawHexTextFit(renderer, panelX + 12, runlabY + 28, panelWidth - 24, line, dim, 1);
         char counts[64];
         std::snprintf(counts, sizeof(counts), "ENTS:%zu WATCH:%zu", runlabState.entities.size(), runlabState.memoryLabels.size());
-        drawHexTextFit(renderer, panelX + 12, runlabY + 28, panelWidth - 24, counts, dim, 1);
+        drawHexTextFit(renderer, panelX + 12, runlabY + 40, panelWidth - 24, counts, dim, 1);
     }
 
     const auto drawCandidateLine = [&](int yPos, const char* prefix, const std::vector<runlab::CorrelationCandidate>& candidates) {
@@ -865,11 +1098,11 @@ void drawMemoryPanel(
         drawHexTextFit(renderer, panelX + 12, yPos, panelWidth - 24, line, SDL_Color{180, 220, 190, 255}, 1);
     };
 
-    drawHexTextFit(renderer, panelX + 12, runlabY + 40, panelWidth - 24, "CORRELATION SUGGESTIONS", SDL_Color{176, 208, 246, 255}, 1);
-    drawCandidateLine(runlabY + 52, "X", runlabState.correlationResult.entityX);
-    drawCandidateLine(runlabY + 64, "Y", runlabState.correlationResult.entityY);
-    drawCandidateLine(runlabY + 76, "CAM", runlabState.correlationResult.cameraX);
-    drawCandidateLine(runlabY + 88, "STATE", runlabState.correlationResult.state);
+    drawHexTextFit(renderer, panelX + 12, runlabY + 52, panelWidth - 24, "CORRELATION SUGGESTIONS", SDL_Color{176, 208, 246, 255}, 1);
+    drawCandidateLine(runlabY + 64, "X", runlabState.correlationResult.entityX);
+    drawCandidateLine(runlabY + 76, "Y", runlabState.correlationResult.entityY);
+    drawCandidateLine(runlabY + 88, "CAM", runlabState.correlationResult.cameraX);
+    drawCandidateLine(runlabY + 100, "STATE", runlabState.correlationResult.state);
 
     const runlab::TimelineEvent* latestImportant = nullptr;
     for (auto it = runlabState.events.rbegin(); it != runlabState.events.rend(); ++it) {
@@ -890,19 +1123,19 @@ void drawMemoryPanel(
             evt.previous,
             evt.current
         );
-        drawHexTextFit(renderer, panelX + 12, runlabY + 100, panelWidth - 24, line, SDL_Color{255, 230, 120, 255}, 1);
+        drawHexTextFit(renderer, panelX + 12, runlabY + 112, panelWidth - 24, line, SDL_Color{255, 230, 120, 255}, 1);
     } else if (!runlabState.events.empty()) {
         const auto& evt = runlabState.events.back();
         char line[96];
         std::snprintf(line, sizeof(line), "EV %s %d>%d", uiUpper(runlab::eventTypeName(evt.type)).c_str(), evt.previous, evt.current);
-        drawHexTextFit(renderer, panelX + 12, runlabY + 100, panelWidth - 24, line, dim, 1);
+        drawHexTextFit(renderer, panelX + 12, runlabY + 112, panelWidth - 24, line, dim, 1);
     } else if (!runlabState.lastDiff.empty()) {
         const auto& diff = runlabState.lastDiff.front();
         char line[64];
         std::snprintf(line, sizeof(line), "DIFF %04X %02X>%02X", diff.address, diff.before, diff.after);
-        drawHexTextFit(renderer, panelX + 12, runlabY + 100, panelWidth - 24, line, SDL_Color{255, 230, 120, 255}, 1);
+        drawHexTextFit(renderer, panelX + 12, runlabY + 112, panelWidth - 24, line, SDL_Color{255, 230, 120, 255}, 1);
     } else {
-        drawHexTextFit(renderer, panelX + 12, runlabY + 100, panelWidth - 24, "EVENTS NONE", dim, 1);
+        drawHexTextFit(renderer, panelX + 12, runlabY + 112, panelWidth - 24, "EVENTS NONE", dim, 1);
     }
 
     if (runlabState.activeGoal.has_value() && runlabState.activeGoal.value() < runlabState.goals.size()) {
@@ -910,9 +1143,9 @@ void drawMemoryPanel(
         const char* status = goal.doneTriggered ? "DONE" : (goal.failTriggered ? "FAIL" : (goal.active ? "ACTIVE" : "IDLE"));
         char line[96];
         std::snprintf(line, sizeof(line), "GOAL %s F%llu", status, static_cast<unsigned long long>(goal.startFrame));
-        drawHexTextFit(renderer, panelX + 12, runlabY + 112, panelWidth - 24, line, active, 1);
+        drawHexTextFit(renderer, panelX + 12, runlabY + 124, panelWidth - 24, line, active, 1);
     } else {
-        drawHexTextFit(renderer, panelX + 12, runlabY + 112, panelWidth - 24, "GOAL NONE", dim, 1);
+        drawHexTextFit(renderer, panelX + 12, runlabY + 124, panelWidth - 24, "GOAL NONE", dim, 1);
     }
     drawHexTextFit(renderer, panelX + 12, panelHeight - 12, panelWidth - 24, "G GOAL R BASE Q CLR C SCAN 1/2/3/4", dim, 1);
 

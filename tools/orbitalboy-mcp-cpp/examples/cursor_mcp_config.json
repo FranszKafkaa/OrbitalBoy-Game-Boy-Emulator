@@ -4,7 +4,13 @@
       "command": "/absolute/path/to/OrbitalBoy-Game-Boy-Emulator/build/tools/orbitalboy-mcp-cpp/orbitalboy-mcp",
       "args": [
         "--state",
-        "/absolute/path/to/OrbitalBoy-Game-Boy-Emulator/.runlab/current-state.json"
+        "/absolute/path/to/OrbitalBoy-Game-Boy-Emulator/.runlab/current-state.json",
+        "--control-queue",
+        "/absolute/path/to/OrbitalBoy-Game-Boy-Emulator/.runlab/commands.jsonl",
+        "--prompt-queue",
+        "/absolute/path/to/OrbitalBoy-Game-Boy-Emulator/.runlab/prompts.jsonl",
+        "--feedback-queue",
+        "/absolute/path/to/OrbitalBoy-Game-Boy-Emulator/.runlab/feedback.jsonl"
       ]
     }
   }

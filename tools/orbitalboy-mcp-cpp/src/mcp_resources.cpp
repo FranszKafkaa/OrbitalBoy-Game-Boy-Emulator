@@ -1,5 +1,6 @@
 #include "mcp_resources.h"
 
+#include <sstream>
 #include <utility>
 
 namespace orbitalboy::mcp {
@@ -49,7 +50,9 @@ Json resourcesList() {
     out.push_back(resource("runlab://events/recent", "Recent events", "Recent RunLab semantic timeline events."));
     out.push_back(resource("runlab://goals/active", "Active goal", "Active goal and completion status."));
     out.push_back(resource("runlab://splits", "Splits", "Current split definitions and trigger state."));
+    out.push_back(resource("runlab://control/status", "Control status", "RunLab MCP input queue status."));
     out.push_back(resource("runlab://screenshot/current", "Current screenshot", "Configured screenshot path metadata.", "application/json"));
+    out.push_back(resource("runlab://prompt/latest", "Latest prompt", "Latest prompt submitted from the emulator Ctrl+T box.", "application/json"));
     Json::Object result;
     result["resources"] = Json(out);
     return Json(result);
@@ -72,6 +75,10 @@ Json readResource(const RunLabClient& client, const std::string& uri, bool* inva
     if (uri == "runlab://events/recent") return contents(uri, state.events(20).dump(2));
     if (uri == "runlab://goals/active") return contents(uri, state.activeGoal().dump(2));
     if (uri == "runlab://splits") return contents(uri, state.splits().dump(2));
+    if (uri == "runlab://control/status") {
+        const Json* control = state.root().find("control");
+        return contents(uri, control ? control->dump(2) : "{\"available\": false}");
+    }
     if (uri == "runlab://screenshot/current") {
         Json::Object obj;
         const std::string configured = screenshotPathFromStatus(state);
@@ -86,6 +93,36 @@ Json readResource(const RunLabClient& client, const std::string& uri, bool* inva
             } else {
                 obj["error"] = pathError;
             }
+        }
+        return contents(uri, Json(obj).dump(2));
+    }
+    if (uri == "runlab://prompt/latest") {
+        Json::Object obj;
+        obj["available"] = false;
+        std::string pathError;
+        const auto promptPath = safeConfiguredPath(client.config().promptQueuePath, &pathError);
+        if (!promptPath.has_value()) {
+            obj["error"] = pathError;
+            return contents(uri, Json(obj).dump(2));
+        }
+        obj["queue_path"] = promptPath->string();
+        std::string readError;
+        const std::string text = readTextFile(promptPath.value(), &readError);
+        if (!readError.empty()) {
+            obj["error"] = readError;
+            return contents(uri, Json(obj).dump(2));
+        }
+        std::istringstream in(text);
+        std::string line;
+        Json latest;
+        while (std::getline(in, line)) {
+            if (line.empty()) continue;
+            auto parsed = Json::parse(line);
+            if (parsed.has_value()) latest = *parsed;
+        }
+        if (!latest.isNull()) {
+            obj["available"] = true;
+            obj["latest"] = latest;
         }
         return contents(uri, Json(obj).dump(2));
     }

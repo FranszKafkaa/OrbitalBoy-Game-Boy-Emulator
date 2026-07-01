@@ -48,6 +48,7 @@ add_executable(gbemu
     src/app/frontend/realtime/save_slots.cpp
     src/app/frontend/realtime/cheat_engine.cpp
     src/app/frontend/realtime/replay_io.cpp
+    src/app/frontend/realtime/runlab_control_queue.cpp
     src/app/frontend/realtime/control_bindings.cpp
     src/app/frontend/realtime/link_transport.cpp
     src/app/frontend/realtime/network_config.cpp
@@ -89,6 +90,7 @@ if (BUILD_TESTING)
         src/app/frontend/runlab.cpp
         src/app/frontend/realtime/cheat_engine.cpp
         src/app/frontend/realtime/replay_io.cpp
+        src/app/frontend/realtime/runlab_control_queue.cpp
         src/app/frontend/realtime/control_bindings.cpp
         src/app/frontend/realtime/link_transport.cpp
         src/app/frontend/realtime/network_config.cpp

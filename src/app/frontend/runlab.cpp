@@ -1088,7 +1088,8 @@ std::string exportCurrentStateJson(
     bool paused,
     bool running,
     const std::string& profilePath,
-    const std::string& screenshotPath
+    const std::string& screenshotPath,
+    const std::string& controlStatusJson
 ) {
     std::ostringstream out;
     out << "{\n";
@@ -1188,6 +1189,7 @@ std::string exportCurrentStateJson(
         out << "    }" << (i + 1 == state.splits.size() ? "" : ",") << "\n";
     }
     out << "  ],\n";
+    out << "  \"control\": " << (controlStatusJson.empty() ? "{ \"enabled\": false }" : controlStatusJson) << ",\n";
     out << "  \"profile\": " << exportProfileJson(state, gameName);
     out << "}\n";
     return out.str();
@@ -1201,7 +1203,8 @@ bool exportCurrentStateFile(
     bool running,
     const std::string& statePath,
     const std::string& profilePath,
-    const std::string& screenshotPath
+    const std::string& screenshotPath,
+    const std::string& controlStatusJson
 ) {
     const std::filesystem::path path(statePath);
     if (path.has_parent_path()) {
@@ -1211,7 +1214,7 @@ bool exportCurrentStateFile(
     if (!file) {
         return false;
     }
-    file << exportCurrentStateJson(state, gameName, frame, paused, running, profilePath, screenshotPath);
+    file << exportCurrentStateJson(state, gameName, frame, paused, running, profilePath, screenshotPath, controlStatusJson);
     return static_cast<bool>(file);
 }
 

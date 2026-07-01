@@ -100,6 +100,30 @@ bool parseAppOptions(int argc, char** argv, AppOptions& outOptions, std::string&
             options.preciseTiming = true;
             continue;
         }
+        if (arg == "--runlab-control") {
+            options.runLabControl = true;
+            continue;
+        }
+        if (arg == "--runlab-state") {
+            if (!readStringArg(argc, argv, i, arg, options.runLabStatePath, errorMessage)) {
+                return false;
+            }
+            if (options.runLabStatePath.empty()) {
+                errorMessage = "valor invalido para --runlab-state";
+                return false;
+            }
+            continue;
+        }
+        if (arg == "--runlab-command-queue") {
+            if (!readStringArg(argc, argv, i, arg, options.runLabCommandQueuePath, errorMessage)) {
+                return false;
+            }
+            if (options.runLabCommandQueuePath.empty()) {
+                errorMessage = "valor invalido para --runlab-command-queue";
+                return false;
+            }
+            continue;
+        }
         if (arg == "--hardware") {
             std::string mode;
             if (!readStringArg(argc, argv, i, arg, mode, errorMessage)) {

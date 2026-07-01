@@ -28,7 +28,10 @@ int runRealtime(
     int linkHostPort,
     const std::string& netplayConnect,
     int netplayHostPort,
-    int netplayDelayFrames
+    int netplayDelayFrames,
+    bool runLabControl,
+    const std::string& runLabStatePath,
+    const std::string& runLabCommandQueuePath
 ) {
     return frontend::runRealtime(
         gb,
@@ -48,7 +51,10 @@ int runRealtime(
         linkHostPort,
         netplayConnect,
         netplayHostPort,
-        netplayDelayFrames
+        netplayDelayFrames,
+        runLabControl,
+        runLabStatePath,
+        runLabCommandQueuePath
     );
 }
 #endif

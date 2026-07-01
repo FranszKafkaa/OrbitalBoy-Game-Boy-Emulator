@@ -10,6 +10,7 @@
 #include "gb/app/frontend/realtime/link_transport.hpp"
 #include "gb/app/frontend/realtime/network_config.hpp"
 #include "gb/app/frontend/realtime/replay_io.hpp"
+#include "gb/app/frontend/realtime/runlab_control_queue.hpp"
 #include "gb/app/frontend/realtime/save_slots.hpp"
 #include "gb/app/frontend/realtime/timing_policy.hpp"
 #include "gb/app/frontend/realtime/top_menu.hpp"
@@ -182,6 +183,110 @@ TEST_CASE("frontend", "control_bindings_fallback_and_mirror") {
     T_EQ(fromMirror.keys[3], 3333);
     T_EQ(fromPrimary.padButtons[1], 1111);
     T_EQ(fromMirror.padButtons[1], 1111);
+}
+
+TEST_CASE("frontend", "runlab_control_command_parser_and_tick") {
+    std::string error;
+    const auto command = gb::frontend::parseRunLabControlCommandLine(
+        "{\"command\":\"hold\",\"buttons\":[\"right\",\"a\"],\"frames\":3}",
+        &error
+    );
+    T_REQUIRE(command.has_value());
+    T_EQ(command->buttonMask, static_cast<std::uint8_t>((1u << 0) | (1u << 4)));
+    T_EQ(command->frames, 3);
+
+    const auto bad = gb::frontend::parseRunLabControlCommandLine(
+        "{\"command\":\"hold\",\"buttons\":[\"banana\"],\"frames\":3}",
+        &error
+    );
+    T_REQUIRE(!bad.has_value());
+
+    const auto step = gb::frontend::parseRunLabControlCommandLine(
+        "{\"command\":\"step_frame\",\"frames\":4}",
+        &error
+    );
+    T_REQUIRE(step.has_value());
+    T_EQ(static_cast<int>(step->type), static_cast<int>(gb::frontend::RunLabControlCommandType::StepFrame));
+    T_EQ(step->frames, 4);
+
+    const auto pause = gb::frontend::parseRunLabControlCommandLine("{\"command\":\"pause\"}", &error);
+    T_REQUIRE(pause.has_value());
+    T_EQ(static_cast<int>(pause->type), static_cast<int>(gb::frontend::RunLabControlCommandType::Pause));
+
+    const auto heartbeat = gb::frontend::parseRunLabControlCommandLine("{\"command\":\"heartbeat\"}", &error);
+    T_REQUIRE(heartbeat.has_value());
+
+    const auto annotation = gb::frontend::parseRunLabControlCommandLine(
+        "{\"command\":\"annotation\",\"label\":\"PLAYER\",\"type\":\"player\",\"x\":12,\"y\":34,\"w\":16,\"h\":24,\"frames\":5}",
+        &error
+    );
+    T_REQUIRE(annotation.has_value());
+    T_EQ(static_cast<int>(annotation->type), static_cast<int>(gb::frontend::RunLabControlCommandType::Annotation));
+    T_EQ(annotation->annotation.label, std::string("PLAYER"));
+    T_EQ(annotation->annotation.type, std::string("player"));
+    T_EQ(annotation->annotation.x, 12);
+    T_EQ(annotation->annotation.y, 34);
+    T_EQ(annotation->annotation.w, 16);
+    T_EQ(annotation->annotation.h, 24);
+    T_EQ(annotation->annotation.frames, 5);
+
+    const auto path = tests::makeTempPath("runlab_control", ".jsonl");
+    tests::ScopedPath cleanup(path);
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << gb::frontend::makeRunLabControlCommandJson("hold", {"right", "a"}, 2) << "\n";
+        out << gb::frontend::makeRunLabControlCommandJson("release_all", {}, 1) << "\n";
+    }
+
+    gb::frontend::RunLabControlQueue queue;
+    queue.configure(path, true);
+    queue.poll(); // first poll seeks to end so stale commands are ignored
+    {
+        std::ofstream out(path, std::ios::app);
+        out << "{\"command\":\"heartbeat\",\"frames\":1}\n";
+        out << "{\"command\":\"annotation\",\"label\":\"ENEMY\",\"type\":\"enemy\",\"x\":30,\"y\":40,\"w\":8,\"h\":8,\"frames\":2}\n";
+        out << gb::frontend::makeRunLabControlCommandJson("tap", {"left"}, 2) << "\n";
+    }
+    queue.poll();
+    T_REQUIRE(queue.clientRecentlySeen());
+    T_EQ(queue.pendingCount(), static_cast<std::size_t>(2));
+    const auto first = queue.tick();
+    T_REQUIRE(!first.active);
+    T_EQ(first.commandName, std::string("annotation"));
+    T_EQ(queue.annotations().size(), static_cast<std::size_t>(1));
+    T_EQ(queue.annotations().front().label, std::string("ENEMY"));
+    const auto second = queue.tick();
+    T_REQUIRE(second.active);
+    T_EQ(second.buttonMask, static_cast<std::uint8_t>(1u << 1));
+    const auto third = queue.tick();
+    T_REQUIRE(third.active);
+    T_EQ(third.buttonMask, static_cast<std::uint8_t>(1u << 1));
+    const auto fourth = queue.tick();
+    T_REQUIRE(!fourth.active);
+    T_REQUIRE(queue.annotations().empty());
+}
+
+TEST_CASE("frontend", "runlab_control_annotations_clear") {
+    const auto path = tests::makeTempPath("runlab_control_annotations", ".jsonl");
+    tests::ScopedPath cleanup(path);
+    {
+        std::ofstream out(path, std::ios::trunc);
+    }
+
+    gb::frontend::RunLabControlQueue queue;
+    queue.configure(path, true);
+    queue.poll();
+    {
+        std::ofstream out(path, std::ios::app);
+        out << "{\"command\":\"annotation\",\"label\":\"SCENARIO\",\"type\":\"scenario\",\"x\":0,\"y\":80,\"w\":160,\"h\":64,\"frames\":30}\n";
+    }
+    queue.poll();
+    const auto first = queue.tick();
+    T_REQUIRE(!first.active);
+    T_EQ(queue.annotations().size(), static_cast<std::size_t>(1));
+    queue.clear();
+    T_REQUIRE(queue.annotations().empty());
+    T_EQ(queue.pendingCount(), static_cast<std::size_t>(0));
 }
 
 TEST_CASE("frontend", "link_endpoint_parser") {
@@ -481,6 +586,23 @@ TEST_CASE("frontend", "runlab_profile_export_includes_goals_and_splits") {
     T_REQUIRE(json.find("\"splits\"") != std::string::npos);
     T_REQUIRE(json.find("\"operator\": \"changed_from_initial\"") != std::string::npos);
     T_REQUIRE(json.find("\"event_detection_rules\"") != std::string::npos);
+}
+
+TEST_CASE("frontend", "runlab_current_state_export_includes_control_status") {
+    gb::frontend::runlab::State state{};
+    const std::string json = gb::frontend::runlab::exportCurrentStateJson(
+        state,
+        "TEST GAME",
+        12,
+        true,
+        true,
+        {},
+        {},
+        "{ \"enabled\": true, \"pending_count\": 2, \"current_command\": \"step_frame\" }"
+    );
+    T_REQUIRE(json.find("\"control\"") != std::string::npos);
+    T_REQUIRE(json.find("\"pending_count\": 2") != std::string::npos);
+    T_REQUIRE(json.find("\"current_command\": \"step_frame\"") != std::string::npos);
 }
 
 TEST_CASE("frontend", "fast_forward_timing_policy_is_paced") {

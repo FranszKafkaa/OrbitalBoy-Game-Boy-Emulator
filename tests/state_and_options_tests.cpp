@@ -312,6 +312,9 @@ TEST_CASE("options", "defaults_when_no_args") {
     T_EQ(options.bootRomPath, std::string(""));
     T_EQ(options.linkConnect, std::string(""));
     T_EQ(options.netplayConnect, std::string(""));
+    T_EQ(options.runLabStatePath, std::string(".runlab/current-state.json"));
+    T_EQ(options.runLabCommandQueuePath, std::string(".runlab/commands.jsonl"));
+    T_REQUIRE(!options.runLabControl);
     T_EQ(options.linkHostPort, 0);
     T_EQ(options.netplayHostPort, 0);
     T_EQ(options.netplayDelayFrames, 0);
@@ -476,6 +479,20 @@ TEST_CASE("options", "netplay_flags_parse") {
     T_EQ(options.netplayHostPort, 6100);
     T_EQ(options.netplayConnect, std::string("10.0.0.2:6100"));
     T_EQ(options.netplayDelayFrames, 3);
+}
+
+TEST_CASE("options", "runlab_control_flags_parse") {
+    gb::AppOptions options;
+    std::string error;
+
+    T_REQUIRE(parseArgs(
+        {"gbemu", "--runlab-control", "--runlab-state", "tmp/current-state.json", "--runlab-command-queue", "tmp/commands.jsonl"},
+        options,
+        error
+    ));
+    T_REQUIRE(options.runLabControl);
+    T_EQ(options.runLabStatePath, std::string("tmp/current-state.json"));
+    T_EQ(options.runLabCommandQueuePath, std::string("tmp/commands.jsonl"));
 }
 
 TEST_CASE("options", "netplay_delay_is_clamped") {

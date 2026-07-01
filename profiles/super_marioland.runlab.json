@@ -1,0 +1,23 @@
+{
+  "game": {
+    "name": "SUPER MARIOLAND",
+    "platform": "gb",
+    "rom_sha1": null
+  },
+  "entities": [
+  ],
+  "memory_labels": [
+  ],
+  "event_detection_rules": {
+    "damage_candidate": "lives/hp/health decreased",
+    "death_candidate": "lives/hp/health reached zero",
+    "level_change_candidate": "level_id/stage/room/map changed",
+    "split_candidate": "level_id/stage/room/map changed",
+    "level_clear_candidate": "game_state entered possible clear/victory value",
+    "goal_reached_candidate": "goal_flag/clear_flag/finish_flag changed from zero to nonzero"
+  },
+  "goals": [
+  ],
+  "splits": [
+  ]
+}

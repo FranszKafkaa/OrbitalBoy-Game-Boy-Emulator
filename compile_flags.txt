@@ -1,0 +1,9 @@
+-std=c++17
+-Wall
+-Wextra
+-Wpedantic
+-Iinclude
+-Itools/orbitalboy-mcp-cpp/src
+-I/opt/homebrew/include
+-D_THREAD_SAFE
+-DGBEMU_USE_SDL2=1

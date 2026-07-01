@@ -38,6 +38,7 @@ enum class TopMenuAction : int {
     ToggleDebugPanel,
     ToggleBreakpointMenu,
     ToggleSearchPanel,
+    ToggleRunLabMcpBridge,
     RunLabExportProfile,
     OpenControlsMenu,
     CycleLinkMode,

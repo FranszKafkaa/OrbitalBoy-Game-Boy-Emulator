@@ -36,6 +36,29 @@ cmake -S . -B build -DGBEMU_BUILD_MCP=ON
 cmake --build build --target orbitalboy-mcp
 ```
 
+Para permitir controle por fila de input do RunLab/MCP, inicie o emulador explicitamente com:
+
+```bash
+./build/gbemu --rom caminho/para/jogo.gb --runlab-control --runlab-command-queue .runlab/commands.jsonl
+```
+
+Atalho equivalente pelo script da raiz:
+
+```bash
+./runlab.sh --emulator --rom caminho/para/jogo.gb
+./runlab.sh --mcp
+```
+
+O modo `--emulator` grava automaticamente `.runlab/current-state.json`, `.runlab/current-screen.ppm` e consome `.runlab/commands.jsonl`.
+O modo `--mcp` escreve na fila somente quando um cliente MCP chama uma tool de controle/anotacao, por exemplo `runlab_control_tap`.
+Tambem ha tools para `runlab_control_pause`, `runlab_control_resume` e `runlab_control_step_frame`.
+O MCP tambem grava heartbeats leves na fila para o painel de debug mostrar `MCP CLIENT` quando o adaptador esta vivo.
+No menu superior do emulador, `DEBUG > RUNLAB MCP ON/OFF` liga ou desliga a ponte de fila no emulador.
+Para controle por IA, use o prompt MCP `control_game_with_runlab`: ele observa com `runlab_get_control_context` e age com `runlab_control_macro`.
+Para identificacao visual por IA, use `runlab_get_visual_context`; uma IA com visao pode ler `.runlab/current-screen.ppm` e chamar `runlab_visual_annotate` para desenhar caixas de player, inimigos e cenario na tela.
+Com o painel de debug aberto, `Ctrl+T` abre uma caixa de texto no emulador; `Enter` grava o pedido em `.runlab/prompts.jsonl`. No cliente MCP, use o prompt `handle_prompt_box` ou a tool `runlab_get_pending_prompt` para a IA ler esse pedido, agir e finalizar com `runlab_ack_prompt`. O MCP escreve feedback em `.runlab/feedback.jsonl`, e o emulador mostra esse retorno na tela.
+O adapter tambem tem um auto-runner simples para prompts como `ande pela direita`, `pule` e `passe de fase`; prompts livres ainda precisam de um cliente de IA.
+
 ## Como rodar
 
 ### Fluxo padrao (SDL2)
@@ -189,12 +212,16 @@ Com o painel de debug aberto:
 - `E`: exporta `profiles/<titulo_da_rom>.runlab.json`.
 - `C`: roda o Correlation Scan, substitui a lista de leituras recentes pelos enderecos RAM candidatos e mostra os candidatos OAM em vermelho por cerca de 240 frames.
 - Clique em um candidato RunLab: fixa o `WATCH` naquele endereco, apaga os demais candidatos vermelhos e mantem somente a entidade selecionada em vermelho forte ate `Q`.
+- `M`: abre o reconhecimento RunLab no lugar da lista de memoria, mostrando player/itens/inimigos/cenario quando houver evidencias de entidades, OAM e labels de memoria.
+- Clique em uma linha do reconhecimento: fixa o `WATCH` no endereco principal daquela linha e seleciona o sprite quando existir OAM associado.
+- `Ctrl+M`: abre o editor manual de memoria antigo.
+- `Ctrl+T`: abre a caixa de prompt RunLab MCP; `Enter` envia para `.runlab/prompts.jsonl` e `Esc` cancela.
 - `1` / `2` / `3` / `4`: promove o melhor candidato atual como `player.x`, `player.y`, `camera_x` ou `state`.
 - `G`: cria/inicia um objetivo padrao a partir dos labels existentes e captura baseline.
 - `R`: recaptura baseline do objetivo ativo.
-- `Q`: limpa a timeline de eventos RunLab e volta a lista de leituras recentes no lugar dos candidatos.
+- `Q`: limpa a timeline de eventos RunLab e volta a lista de leituras recentes no lugar dos candidatos/reconhecimento.
 
-O painel mostra a entidade selecionada, tipo, quantidade de labels vinculados, eventos importantes recentes, objetivo ativo, primeiro diff recente e sugestoes de correlacao para X/Y/camera/state. Tambem ha uma acao `RUNLAB EXPORT` no menu superior `DEBUG`.
+O painel mostra a entidade selecionada, tipo, quantidade de labels vinculados, eventos importantes recentes, objetivo ativo, primeiro diff recente e sugestoes de correlacao para X/Y/camera/state. Tambem ha acoes `RUNLAB MCP ON/OFF` e `RUNLAB EXPORT` no menu superior `DEBUG`.
 
 Event Detection transforma mudancas dos labels em eventos semanticamente nomeados. Exemplos: `lives`/`hp` diminuindo gera `damage_candidate`; chegando a zero gera `death_candidate`; `level_id`/`stage`/`room` mudando gera `level_change_candidate` e `split_candidate`; `goal_flag`/`clear_flag`/`finish_flag` indo de zero para nao-zero gera `goal_reached_candidate`. Mudancas de alta frequencia como `player.x` continuam registradas internamente, mas o painel prioriza eventos importantes.
 

@@ -249,7 +249,8 @@ std::string exportCurrentStateJson(
     bool paused,
     bool running,
     const std::string& profilePath = {},
-    const std::string& screenshotPath = {}
+    const std::string& screenshotPath = {},
+    const std::string& controlStatusJson = {}
 );
 bool exportCurrentStateFile(
     const State& state,
@@ -259,7 +260,8 @@ bool exportCurrentStateFile(
     bool running,
     const std::string& statePath = ".runlab/current-state.json",
     const std::string& profilePath = {},
-    const std::string& screenshotPath = {}
+    const std::string& screenshotPath = {},
+    const std::string& controlStatusJson = {}
 );
 
 } // namespace gb::frontend::runlab
