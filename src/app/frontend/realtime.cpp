@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <random>
@@ -37,7 +38,7 @@
 #include "gb/app/frontend/realtime_support.hpp"
 
 #ifdef GBEMU_USE_SDL2
-#include <SDL2/SDL.h>
+#include "gb/app/sdl_compat.hpp"
 #endif
 
 namespace gb::frontend {
@@ -83,7 +84,7 @@ int runRealtime(
     bool fullscreen = false;
 
     SDL_Window* window = SDL_CreateWindow(
-        "GB Emulator",
+        "Orion Boy",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         gameWidth + panelWidth,
@@ -279,7 +280,8 @@ int runRealtime(
     std::vector<gb::u16> breakpoints{};
     breakpoints.reserve(16);
     BreakpointEditState breakpointEdit{};
-    MemorySearchState memorySearch{};
+    auto memorySearchStorage = std::make_unique<MemorySearchState>();
+    MemorySearchState& memorySearch = *memorySearchStorage;
     std::optional<gb::u16> selectedSpriteAddr;
     int spriteScrollRows = 0;
     std::optional<TopMenuSection> openTopMenuSection;
@@ -323,8 +325,10 @@ int runRealtime(
         uiMessage = "RUNLAB MCP CONTROL ON";
         uiMessageFrames = 180;
     }
-    std::array<unsigned char, gb::PPU::ScreenWidth * gb::PPU::ScreenHeight * 3> pixels{};
-    std::array<unsigned char, gb::PPU::ScreenWidth * gb::PPU::ScreenHeight * 3> sharpPixels{};
+    auto pixelsStorage = std::make_unique<RgbFrame>();
+    auto sharpPixelsStorage = std::make_unique<RgbFrame>();
+    RgbFrame& pixels = *pixelsStorage;
+    RgbFrame& sharpPixels = *sharpPixelsStorage;
     std::mutex gbMutex{};
     std::mutex breakpointsMutex{};
     std::mutex queuedWriteMutex{};
@@ -375,11 +379,11 @@ int runRealtime(
     };
 
     const auto enqueueRawFrameLocked = [&]() {
-        RawFramePacket packet{};
-        packet.sequence = frameSequence.fetch_add(1, std::memory_order_relaxed) + 1;
-        packet.mono = gb.ppu().framebuffer();
-        packet.color = gb.ppu().colorFramebuffer();
-        rawFrameQueue.push(std::move(packet));
+        auto packet = std::make_unique<RawFramePacket>();
+        packet->sequence = frameSequence.fetch_add(1, std::memory_order_relaxed) + 1;
+        packet->mono = gb.ppu().framebuffer();
+        packet->color = gb.ppu().colorFramebuffer();
+        rawFrameQueue.push(std::move(*packet));
     };
 
     const auto joypadMaskFromState = [](const gb::Joypad::State& state) -> std::uint8_t {
@@ -1093,42 +1097,43 @@ int runRealtime(
     std::thread renderThread([&]() {
         std::cout << "[MT][REN] worker iniciado\n";
         std::size_t processed = 0;
-        RawFramePacket raw{};
-        while (rawFrameQueue.waitPop(raw)) {
-            RawFramePacket latest = std::move(raw);
-            RawFramePacket pending{};
-            while (rawFrameQueue.tryPopLatest(pending)) {
-                latest = std::move(pending);
+        auto raw = std::make_unique<RawFramePacket>();
+        auto latest = std::make_unique<RawFramePacket>();
+        auto pending = std::make_unique<RawFramePacket>();
+        while (rawFrameQueue.waitPop(*raw)) {
+            *latest = std::move(*raw);
+            while (rawFrameQueue.tryPopLatest(*pending)) {
+                *latest = std::move(*pending);
             }
 
-            RgbFramePacket out{};
-            out.sequence = latest.sequence;
+            auto out = std::make_unique<RgbFramePacket>();
+            out->sequence = latest->sequence;
             const auto paletteModeLocal = static_cast<DisplayPaletteMode>(paletteModeAtomic.load(std::memory_order_relaxed));
             const auto filterModeLocal = static_cast<VideoFilterMode>(filterModeAtomic.load(std::memory_order_relaxed));
             const bool useCgbPalette = cgbPaletteAvailable && paletteModeLocal == DisplayPaletteMode::GameBoyColor;
 
             if (useCgbPalette) {
-                for (std::size_t i = 0; i < latest.color.size(); ++i) {
-                    const gb::u16 c = latest.color[i];
+                for (std::size_t i = 0; i < latest->color.size(); ++i) {
+                    const gb::u16 c = latest->color[i];
                     const gb::u8 r5 = static_cast<gb::u8>((c >> 0) & 0x1F);
                     const gb::u8 g5 = static_cast<gb::u8>((c >> 5) & 0x1F);
                     const gb::u8 b5 = static_cast<gb::u8>((c >> 10) & 0x1F);
-                    out.pixels[i * 3 + 0] = static_cast<unsigned char>((r5 * 255) / 31);
-                    out.pixels[i * 3 + 1] = static_cast<unsigned char>((g5 * 255) / 31);
-                    out.pixels[i * 3 + 2] = static_cast<unsigned char>((b5 * 255) / 31);
+                    out->pixels[i * 3 + 0] = static_cast<unsigned char>((r5 * 255) / 31);
+                    out->pixels[i * 3 + 1] = static_cast<unsigned char>((g5 * 255) / 31);
+                    out->pixels[i * 3 + 2] = static_cast<unsigned char>((b5 * 255) / 31);
                 }
             } else {
                 const auto& palette = monoPalette(paletteModeLocal);
-                for (std::size_t i = 0; i < latest.mono.size(); ++i) {
-                    const std::size_t shade = static_cast<std::size_t>(latest.mono[i] & 0x03);
-                    out.pixels[i * 3 + 0] = palette[shade][0];
-                    out.pixels[i * 3 + 1] = palette[shade][1];
-                    out.pixels[i * 3 + 2] = palette[shade][2];
+                for (std::size_t i = 0; i < latest->mono.size(); ++i) {
+                    const std::size_t shade = static_cast<std::size_t>(latest->mono[i] & 0x03);
+                    out->pixels[i * 3 + 0] = palette[shade][0];
+                    out->pixels[i * 3 + 1] = palette[shade][1];
+                    out->pixels[i * 3 + 2] = palette[shade][2];
                 }
             }
 
-            applyVideoFilterRgb24(filterModeLocal, out.pixels);
-            rgbFrameQueue.push(std::move(out));
+            applyVideoFilterRgb24(filterModeLocal, out->pixels);
+            rgbFrameQueue.push(std::move(*out));
             ++processed;
             if ((processed % 360) == 0) {
                 std::cout << "[MT][REN] frames=" << processed
@@ -1302,7 +1307,7 @@ int runRealtime(
                         localAppliedMask = localInputMask;
                     }
                     bool replayPlayingNow = false;
-                    std::optional<NetplayFrameRecord> netplayFrameRecord;
+                    std::unique_ptr<NetplayFrameRecord> netplayFrameRecord;
                     {
                         std::lock_guard<std::mutex> replayLock(replayMutex);
                         replayPlayingNow = replayPlaying;
@@ -1357,13 +1362,13 @@ int runRealtime(
                         if (predicted) {
                             ++netplayPredictedCount;
                         }
-                        netplayFrameRecord = NetplayFrameRecord{
+                        netplayFrameRecord = std::make_unique<NetplayFrameRecord>(NetplayFrameRecord{
                             frameId,
                             gb.saveState(),
                             localAppliedMask,
                             remoteMask,
                             predicted,
-                        };
+                        });
                         applyJoypadMask(gb.joypad(), static_cast<std::uint8_t>(localAppliedMask | remoteMask));
                     } else {
                         applyJoypadMask(gb.joypad(), localInputMask);
@@ -1395,8 +1400,8 @@ int runRealtime(
                     }
 
                     if (netplayEnabled && !replayPlayingNow) {
-                        if (netplayFrameRecord.has_value()) {
-                            netplayHistory.push_back(std::move(netplayFrameRecord.value()));
+                        if (netplayFrameRecord) {
+                            netplayHistory.push_back(std::move(*netplayFrameRecord));
                             while (netplayHistory.size() > kNetplayHistoryLimit) {
                                 const std::uint64_t oldFrame = netplayHistory.front().frame;
                                 netplayHistory.pop_front();
@@ -3215,9 +3220,9 @@ int runRealtime(
             }
         }
 
-        RgbFramePacket latestFrame{};
-        if (rgbFrameQueue.tryPopLatest(latestFrame)) {
-            pixels = latestFrame.pixels;
+        auto latestFrame = std::make_unique<RgbFramePacket>();
+        if (rgbFrameQueue.tryPopLatest(*latestFrame)) {
+            pixels = latestFrame->pixels;
         }
         if (requestCapture) {
             const std::string capturePath = nextCapturePath(captureDir);

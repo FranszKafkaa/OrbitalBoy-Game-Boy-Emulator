@@ -2,6 +2,7 @@
 
 #include <string>
 
+#include "gb/core/gba/system.hpp"
 #include "gb/core/gameboy.hpp"
 
 namespace gb {
@@ -32,6 +33,8 @@ int runRealtime(
     const std::string& runLabStatePath,
     const std::string& runLabCommandQueuePath
 );
+
+int runGbaRealtime(gba::System& system, int scale);
 #endif
 
 } // namespace gb

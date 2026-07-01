@@ -9,13 +9,11 @@
 
 namespace {
 
-gb::Cartridge loadCartridgeOrThrow(const tests::RomSpec& spec, tests::ScopedPath& cleanup) {
+void loadCartridge(gb::Cartridge& cart, const tests::RomSpec& spec, tests::ScopedPath& cleanup) {
     const auto romPath = tests::writeTempRom(spec);
     cleanup = tests::ScopedPath(romPath);
 
-    gb::Cartridge cart;
     T_REQUIRE(cart.loadFromFile(romPath.string()));
-    return cart;
 }
 
 } // namespace
@@ -41,7 +39,8 @@ TEST_CASE("cartridge", "title_type_and_loaded_path") {
     spec.cartridgeType = 0x00;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     T_EQ(cart.title(), std::string("HELLO"));
     T_EQ(cart.cartridgeType(), 0x00);
@@ -54,7 +53,8 @@ TEST_CASE("cartridge", "cgb_flags_detection") {
     spec.cgbFlag = 0xC0;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     T_REQUIRE(cart.cgbSupported());
     T_REQUIRE(cart.cgbOnly());
@@ -69,7 +69,8 @@ TEST_CASE("cartridge", "nombc_reads_from_rom") {
     spec.cartridgeType = 0x00;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     T_EQ(cart.read(0x0150), 0x00);
     T_EQ(cart.read(0x4000), 0x01);
@@ -82,7 +83,8 @@ TEST_CASE("cartridge", "nombc_ram_read_write_when_present") {
     spec.ramCode = 0x02;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     T_REQUIRE(cart.hasRam());
     cart.write(0xA000, 0x5A);
@@ -96,7 +98,8 @@ TEST_CASE("cartridge", "battery_backed_ram_detection") {
     withBattery.ramCode = 0x03;
 
     tests::ScopedPath cleanupBattery;
-    auto cartBattery = loadCartridgeOrThrow(withBattery, cleanupBattery);
+    gb::Cartridge cartBattery;
+    loadCartridge(cartBattery, withBattery, cleanupBattery);
     T_REQUIRE(cartBattery.hasBatteryBackedRam());
 
     tests::RomSpec withoutBattery{};
@@ -105,7 +108,8 @@ TEST_CASE("cartridge", "battery_backed_ram_detection") {
     withoutBattery.ramCode = 0x03;
 
     tests::ScopedPath cleanupNoBattery;
-    auto cartNoBattery = loadCartridgeOrThrow(withoutBattery, cleanupNoBattery);
+    gb::Cartridge cartNoBattery;
+    loadCartridge(cartNoBattery, withoutBattery, cleanupNoBattery);
     T_REQUIRE(!cartNoBattery.hasBatteryBackedRam());
 }
 
@@ -117,7 +121,8 @@ TEST_CASE("cartridge", "mbc1_switches_rom_bank") {
     spec.fillBanksWithIndex = true;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     T_EQ(cart.read(0x4000), 0x01);
     cart.write(0x2000, 0x02);
@@ -132,7 +137,8 @@ TEST_CASE("cartridge", "mbc1_bank_zero_maps_to_one") {
     spec.fillBanksWithIndex = true;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     cart.write(0x2000, 0x00);
     T_EQ(cart.read(0x4000), 0x01);
@@ -145,7 +151,8 @@ TEST_CASE("cartridge", "mbc1_requires_ram_enable") {
     spec.ramCode = 0x03;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     cart.write(0xA000, 0xA5);
     T_EQ(cart.read(0xA000), 0xFF);
@@ -162,7 +169,8 @@ TEST_CASE("cartridge", "mbc1_ram_bank_mode") {
     spec.ramCode = 0x03;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     cart.write(0x0000, 0x0A);
     cart.write(0x6000, 0x01);
@@ -188,7 +196,8 @@ TEST_CASE("cartridge", "mmm01_switches_rom_bank_after_mapping_lock") {
     spec.fillBanksWithIndex = true;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     // Antes do lock, escrita em 0x2000 ajusta base.
     cart.write(0x2000, 0x02);
@@ -208,7 +217,8 @@ TEST_CASE("cartridge", "mbc5_switches_rom_bank") {
     spec.fillBanksWithIndex = true;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     cart.write(0x2000, 0x03);
     T_EQ(cart.read(0x4000), 0x03);
@@ -221,7 +231,8 @@ TEST_CASE("cartridge", "mbc5_ram_bank_switch") {
     spec.ramCode = 0x03;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     cart.write(0x0000, 0x0A);
 
@@ -245,7 +256,8 @@ TEST_CASE("cartridge", "huc3_virtual_command_register_roundtrip") {
     spec.ramCode = 0x03;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     cart.write(0x0000, 0x1A); // modo HuC3 comando 0x0A
     cart.write(0xA000, 0x0D);
@@ -267,7 +279,8 @@ TEST_CASE("cartridge", "state_roundtrip_restores_mapper_and_ram") {
     spec.fillBanksWithIndex = true;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     cart.write(0x0000, 0x0A);
     cart.write(0x2000, 0x02);
@@ -293,7 +306,8 @@ TEST_CASE("cartridge", "load_state_ignores_mismatched_cartridge_type") {
     spec.ramCode = 0x02;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     cart.write(0xA000, 0x12);
 
@@ -312,7 +326,8 @@ TEST_CASE("cartridge", "save_and_load_ram_file_roundtrip") {
     spec.ramCode = 0x02;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     cart.write(0xA000, 0xBE);
 
@@ -322,7 +337,8 @@ TEST_CASE("cartridge", "save_and_load_ram_file_roundtrip") {
     T_REQUIRE(cart.saveRamToFile(ramPath.string()));
 
     tests::ScopedPath cleanup2;
-    auto otherCart = loadCartridgeOrThrow(spec, cleanup2);
+    gb::Cartridge otherCart;
+    loadCartridge(otherCart, spec, cleanup2);
     T_REQUIRE(otherCart.loadRamFromFile(ramPath.string()));
     T_EQ(otherCart.read(0xA000), 0xBE);
 }
@@ -334,7 +350,8 @@ TEST_CASE("cartridge", "ram_file_ops_fail_without_ram") {
     spec.ramCode = 0x00;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     const auto ramPath = tests::makeTempPath("cart_no_ram", ".sav");
     tests::ScopedPath cleanupRam(ramPath);
@@ -352,7 +369,8 @@ TEST_CASE("cartridge", "mbc2_internal_ram_uses_low_nibble_only") {
     spec.fillBanksWithIndex = true;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     cart.write(0x0000, 0x0A); // RAM enable (A8=0)
     cart.write(0x2100, 0x03); // ROM bank (A8=1)
@@ -371,7 +389,8 @@ TEST_CASE("cartridge", "mbc3_switches_rom_and_ram_banks") {
     spec.fillBanksWithIndex = true;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     cart.write(0x2000, 0x05);
     T_EQ(cart.read(0x4000), 0x05);
@@ -394,7 +413,8 @@ TEST_CASE("cartridge", "mbc3_rtc_register_read_write") {
     spec.ramCode = 0x03;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     cart.write(0x0000, 0x0A);
 
@@ -419,7 +439,8 @@ TEST_CASE("cartridge", "huc1_uses_mbc1_style_banking") {
     spec.fillBanksWithIndex = true;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     cart.write(0x2000, 0x02);
     T_EQ(cart.read(0x4000), 0x02);
@@ -433,7 +454,8 @@ TEST_CASE("cartridge", "huc3_uses_mbc3_style_banking") {
     spec.fillBanksWithIndex = true;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     cart.write(0x2000, 0x03);
     T_EQ(cart.read(0x4000), 0x03);
@@ -446,7 +468,8 @@ TEST_CASE("cartridge", "rtc_detection_and_file_roundtrip_for_mbc3_timer") {
     spec.ramCode = 0x03;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
     T_REQUIRE(cart.hasRtc());
 
     cart.write(0x0000, 0x0A);
@@ -479,7 +502,8 @@ TEST_CASE("cartridge", "rtc_file_ops_fail_without_timer_hardware") {
     spec.ramCode = 0x03;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
     T_REQUIRE(!cart.hasRtc());
 
     const auto rtcPath = tests::makeTempPath("cart_no_rtc", ".rtc");
@@ -497,7 +521,8 @@ TEST_CASE("cartridge", "mmm01_uses_base_bank_before_mapping_lock") {
     spec.fillBanksWithIndex = true;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     cart.write(0x2000, 0x02);
     // Antes do lock, o MMM01 aplica baseBank + romBankLow (default=1).
@@ -511,7 +536,8 @@ TEST_CASE("cartridge", "mbc7_fallback_exposes_small_persistent_ram") {
     spec.ramCode = 0x00;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     T_REQUIRE(cart.hasRam());
     T_REQUIRE(cart.hasBatteryBackedRam());
@@ -528,7 +554,8 @@ TEST_CASE("cartridge", "mbc7_sensor_register_window_read_write") {
     spec.ramCode = 0x00;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     cart.write(0x0000, 0x0A);
     cart.write(0xA000, 0x77);
@@ -543,7 +570,8 @@ TEST_CASE("cartridge", "camera_fallback_uses_mbc5_like_banking") {
     spec.fillBanksWithIndex = true;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     T_REQUIRE(cart.hasRam());
     T_REQUIRE(cart.hasBatteryBackedRam());
@@ -560,7 +588,8 @@ TEST_CASE("cartridge", "camera_mapper_register_mode_and_ram_mode") {
     spec.fillBanksWithIndex = true;
 
     tests::ScopedPath cleanup;
-    auto cart = loadCartridgeOrThrow(spec, cleanup);
+    gb::Cartridge cart;
+    loadCartridge(cart, spec, cleanup);
 
     cart.write(0x0000, 0x0A);
 

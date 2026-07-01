@@ -1,4 +1,6 @@
 /build/
+/build-*/
+/build-*.log
 /gbemu
 /frame.ppm
 *.o
@@ -14,3 +16,10 @@ roms/*
 states/*
 captures/*
 .runlab/*
+*.bmp
+scratch
+*.log
+logs
+
+.vscode
+.idea

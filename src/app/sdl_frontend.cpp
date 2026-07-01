@@ -1,5 +1,6 @@
 #include "gb/app/sdl_frontend.hpp"
 
+#include "gb/app/frontend/gba_realtime.hpp"
 #include "gb/app/frontend/realtime.hpp"
 #include "gb/app/frontend/rom_selector.hpp"
 
@@ -56,6 +57,10 @@ int runRealtime(
         runLabStatePath,
         runLabCommandQueuePath
     );
+}
+
+int runGbaRealtime(gba::System& system, int scale) {
+    return frontend::runGbaRealtime(system, scale);
 }
 #endif
 
