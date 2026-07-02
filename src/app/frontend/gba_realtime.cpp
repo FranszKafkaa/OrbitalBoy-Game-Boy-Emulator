@@ -55,6 +55,12 @@ struct GbaDebugEditState {
     std::string text{};
 };
 
+struct GbaTextEditState {
+    bool active = false;
+    u32 baseAddress = 0;
+    std::string text{};
+};
+
 struct GbaSpriteDebugRow {
     u32 address = 0;
     int index = 0;
@@ -66,6 +72,12 @@ struct GbaSpriteDebugRow {
     u16 attr1 = 0;
     u16 attr2 = 0;
     bool visible = false;
+};
+
+struct GbaSpritePreview {
+    int width = 0;
+    int height = 0;
+    std::vector<u16> pixels{};
 };
 
 bool isHexKeyChar(char ch) {
@@ -128,6 +140,10 @@ std::string hex16(u16 value) {
     char out[5]{};
     std::snprintf(out, sizeof(out), "%04X", static_cast<unsigned>(value));
     return out;
+}
+
+char gbaTextPreviewChar(u8 value) {
+    return value >= 0x20 && value <= 0x7E ? static_cast<char>(value) : '.';
 }
 
 void gbaSpriteDimensions(u16 attr0, u16 attr1, int& width, int& height) {
@@ -198,6 +214,85 @@ std::optional<GbaSpriteDebugRow> findGbaSpriteByAddress(const std::vector<GbaSpr
         return std::nullopt;
     }
     return *it;
+}
+
+std::optional<u32> gbaOamSpriteBaseForAddress(u32 address) {
+    constexpr u32 oamBase = 0x07000000U;
+    constexpr u32 oamEnd = 0x070003FFU;
+    if (address < oamBase || address > oamEnd) {
+        return std::nullopt;
+    }
+    return oamBase + ((address - oamBase) / 8U) * 8U;
+}
+
+template <typename Core>
+std::optional<GbaSpritePreview> buildGbaSpritePreview(const Core& core, const GbaSpriteDebugRow& sprite) {
+    constexpr u32 objVramBase = 0x06010000U;
+    constexpr u32 objPaletteBase = 0x05000200U;
+    constexpr u32 dispcnt = 0x04000000U;
+
+    const auto dispcntValue = core.debugRead16(dispcnt).value_or(0);
+    const bool oneDimensionalMapping = (dispcntValue & 0x0040U) != 0;
+    const bool color256 = (sprite.attr0 & 0x2000U) != 0;
+    const bool affine = (sprite.attr0 & 0x0100U) != 0;
+    const bool hflip = !affine && (sprite.attr1 & 0x1000U) != 0;
+    const bool vflip = !affine && (sprite.attr1 & 0x2000U) != 0;
+    const int tileStep = color256 ? 2 : 1;
+    const int widthTiles = std::max(1, sprite.width / 8);
+    const u32 baseTile = static_cast<u32>(sprite.attr2 & 0x03FFU);
+    const u32 paletteBank = static_cast<u32>((sprite.attr2 >> 12U) & 0x0FU);
+
+    GbaSpritePreview preview{};
+    preview.width = sprite.width;
+    preview.height = sprite.height;
+    preview.pixels.assign(static_cast<std::size_t>(preview.width * preview.height), 0);
+
+    bool anyPixel = false;
+    for (int py = 0; py < preview.height; ++py) {
+        const int srcY = vflip ? (preview.height - 1 - py) : py;
+        const int tileY = srcY / 8;
+        const int inTileY = srcY & 7;
+        for (int px = 0; px < preview.width; ++px) {
+            const int srcX = hflip ? (preview.width - 1 - px) : px;
+            const int tileX = srcX / 8;
+            const int inTileX = srcX & 7;
+            const u32 tileNumber = oneDimensionalMapping
+                ? baseTile + static_cast<u32>(tileY * widthTiles * tileStep + tileX * tileStep)
+                : baseTile + static_cast<u32>(tileY * 32 + tileX * tileStep);
+            const u32 tileAddress = objVramBase + tileNumber * 32U;
+
+            u32 paletteIndex = 0;
+            if (color256) {
+                const auto byte = core.debugRead8(tileAddress + static_cast<u32>(inTileY * 8 + inTileX));
+                if (!byte.has_value() || byte.value() == 0) {
+                    continue;
+                }
+                paletteIndex = byte.value();
+            } else {
+                const auto byte = core.debugRead8(tileAddress + static_cast<u32>(inTileY * 4 + inTileX / 2));
+                if (!byte.has_value()) {
+                    continue;
+                }
+                const u8 nibble = (inTileX & 1) == 0 ? static_cast<u8>(byte.value() & 0x0FU) : static_cast<u8>(byte.value() >> 4U);
+                if (nibble == 0) {
+                    continue;
+                }
+                paletteIndex = paletteBank * 16U + nibble;
+            }
+
+            const auto color = core.debugRead16(objPaletteBase + paletteIndex * 2U);
+            if (!color.has_value()) {
+                continue;
+            }
+            preview.pixels[static_cast<std::size_t>(py * preview.width + px)] = *color;
+            anyPixel = true;
+        }
+    }
+
+    if (!anyPixel) {
+        return std::nullopt;
+    }
+    return preview;
 }
 
 int gbaDebugReadMaxLines(int outputH) {
@@ -372,17 +467,36 @@ std::vector<std::string> buildGbaMemoryRows(const Core& core, u32 startAddress, 
     for (int row = 0; row < rows; ++row) {
         const u32 base = startAddress + static_cast<u32>(row * 8);
         std::string line = hex32(base) + " ";
+        std::string ascii;
+        ascii.reserve(8);
         for (int i = 0; i < 8; ++i) {
             if (const auto value = core.debugRead8(base + static_cast<u32>(i))) {
                 line += hex8(*value);
+                ascii.push_back(gbaTextPreviewChar(*value));
             } else {
                 line += "__";
+                ascii.push_back('.');
             }
             if (i != 7) {
                 line += " ";
             }
         }
+        line += " " + ascii;
         out.push_back(line);
+    }
+    return out;
+}
+
+template <typename Core>
+std::string readGbaTextPreview(const Core& core, u32 startAddress, int maxBytes) {
+    std::string out;
+    out.reserve(static_cast<std::size_t>(std::max(0, maxBytes)));
+    for (int i = 0; i < maxBytes; ++i) {
+        const auto value = core.debugRead8(startAddress + static_cast<u32>(i));
+        if (!value.has_value() || *value == 0) {
+            break;
+        }
+        out.push_back(gbaTextPreviewChar(*value));
     }
     return out;
 }
@@ -579,6 +693,43 @@ void drawGbaTextFit(SDL_Renderer* renderer, int x, int y, int maxPixels, const s
     drawHexText(renderer, x, y, clippedGbaText(text, maxPixels, scale), color, scale);
 }
 
+void drawGbaSpritePreview(
+    SDL_Renderer* renderer,
+    const GbaSpritePreview& preview,
+    int x,
+    int y,
+    int maxW,
+    int maxH
+) {
+    if (preview.width <= 0 || preview.height <= 0 || preview.pixels.empty() || maxW <= 0 || maxH <= 0) {
+        return;
+    }
+
+    const int scale = std::max(1, std::min(maxW / preview.width, maxH / preview.height));
+    const int drawW = preview.width * scale;
+    const int drawH = preview.height * scale;
+    SDL_SetRenderDrawColor(renderer, 10, 12, 18, 255);
+    SDL_Rect bg{x - 2, y - 2, drawW + 4, drawH + 4};
+    SDL_RenderFillRect(renderer, &bg);
+    SDL_SetRenderDrawColor(renderer, 78, 90, 120, 255);
+    SDL_RenderDrawRect(renderer, &bg);
+
+    for (int py = 0; py < preview.height; ++py) {
+        for (int px = 0; px < preview.width; ++px) {
+            const u16 color = preview.pixels[static_cast<std::size_t>(py * preview.width + px)];
+            if (color == 0) {
+                continue;
+            }
+            const std::uint8_t r = expand5(static_cast<std::uint16_t>(color & 0x001FU));
+            const std::uint8_t g = expand5(static_cast<std::uint16_t>((color >> 5U) & 0x001FU));
+            const std::uint8_t b = expand5(static_cast<std::uint16_t>((color >> 10U) & 0x001FU));
+            SDL_SetRenderDrawColor(renderer, r, g, b, 255);
+            SDL_Rect pixel{x + px * scale, y + py * scale, scale, scale};
+            SDL_RenderFillRect(renderer, &pixel);
+        }
+    }
+}
+
 void drawGbaDebugPanel(
     SDL_Renderer* renderer,
     int outputW,
@@ -590,9 +741,11 @@ void drawGbaDebugPanel(
     const std::vector<std::string>& disasmRows,
     const std::vector<std::string>& memoryRows,
     const std::vector<GbaSpriteDebugRow>& spriteRows,
+    const std::optional<GbaSpritePreview>& selectedSpritePreview,
     u32 debugAddress,
     std::size_t debugRegionIndex,
     const GbaDebugEditState& editState,
+    const GbaTextEditState& textEdit,
     std::optional<u32> selectedSpriteAddress,
     const std::vector<u32>& breakpoints,
     bool paused,
@@ -658,7 +811,9 @@ void drawGbaDebugPanel(
     drawGbaTextFit(renderer, watchX + 4, 24, watchTextW, hex32(debugAddress), active, 1);
     drawGbaTextFit(renderer, watchX + 4, 32, watchTextW, regionLabel, dim, 1);
 
-    if (editState.field != GbaDebugEditField::None) {
+    if (textEdit.active) {
+        drawGbaTextFit(renderer, watchX + 4, 40, watchTextW, "TEXT " + hex32(textEdit.baseAddress), warn, 1);
+    } else if (editState.field != GbaDebugEditField::None) {
         const std::string prefix = editState.field == GbaDebugEditField::Address ? "EDIT ADDR " : "EDIT VAL  ";
         drawGbaTextFit(renderer, watchX + 4, 40, watchTextW, prefix + editState.text + "_", warn, 1);
     } else {
@@ -677,6 +832,11 @@ void drawGbaDebugPanel(
             SDL_SetRenderDrawColor(renderer, 124, 208, 168, 255);
             SDL_RenderDrawPoint(renderer, graphBg.x + 1 + i, graphBg.y + graphBg.h - 2 - v);
         }
+    }
+    if (textEdit.active) {
+        SDL_SetRenderDrawColor(renderer, 22, 28, 40, 255);
+        SDL_RenderFillRect(renderer, &graphBg);
+        drawGbaTextFit(renderer, graphBg.x + 3, graphBg.y + 4, graphBg.w - 6, textEdit.text + "_", SDL_Color{124, 208, 168, 255}, 1);
     }
 
     const int readStartY = 118;
@@ -764,7 +924,22 @@ void drawGbaDebugPanel(
     SDL_SetRenderDrawColor(renderer, 54, 60, 80, 255);
     SDL_RenderDrawLine(renderer, x + 8, detailY, x + kPanelWidth - 8, detailY);
     drawGbaTextFit(renderer, x + 12, detailY + 4, kPanelWidth - 24, "SPR SEL", active, 1);
-    if (snapshot.available) {
+    const auto selectedSprite = selectedSpriteAddress.has_value()
+        ? findGbaSpriteByAddress(spriteRows, selectedSpriteAddress.value())
+        : std::optional<GbaSpriteDebugRow>{};
+    if (selectedSprite.has_value()) {
+        const auto& sprite = selectedSprite.value();
+        drawGbaTextFit(renderer, x + 12, detailY + 18, 124, "SPR " + std::to_string(sprite.index), warn, 1);
+        drawGbaTextFit(renderer, x + 12, detailY + 30, 124, "OAM " + hex32(sprite.address), active, 1);
+        drawGbaTextFit(renderer, x + 12, detailY + 42, 124, "XY " + std::to_string(sprite.x) + "," + std::to_string(sprite.y), active, 1);
+        drawGbaTextFit(renderer, x + 12, detailY + 54, 124, std::to_string(sprite.width) + "x" + std::to_string(sprite.height) + " T" + std::to_string(sprite.attr2 & 0x03FFU), dim, 1);
+        if (selectedSpritePreview.has_value()) {
+            drawGbaSpritePreview(renderer, selectedSpritePreview.value(), x + 142, detailY + 18, kPanelWidth - 154, 58);
+        } else {
+            drawGbaTextFit(renderer, x + 142, detailY + 30, kPanelWidth - 154, "SEM PREVIEW", dim, 1);
+            drawGbaTextFit(renderer, x + 142, detailY + 42, kPanelWidth - 154, "TILE VAZIO", dim, 1);
+        }
+    } else if (snapshot.available) {
         drawGbaTextFit(renderer, x + 12, detailY + 18, kPanelWidth - 24, "SP " + hex32(snapshot.cpu.regs[13]) + " LR " + hex32(snapshot.cpu.regs[14]), active, 1);
         drawGbaTextFit(renderer, x + 12, detailY + 30, kPanelWidth - 24, "CPSR " + hex32(snapshot.cpu.cpsr) + " " + snapshot.cpu.mode, active, 1);
         drawGbaTextFit(renderer, x + 12, detailY + 42, kPanelWidth - 24, "R0 " + hex32(snapshot.cpu.regs[0]) + " R1 " + hex32(snapshot.cpu.regs[1]), dim, 1);
@@ -1012,6 +1187,7 @@ int runGbaRealtimeCommon(
     u32 debugAddress = 0x02000000U;
     std::size_t debugRegionIndex = 1;
     GbaDebugEditState debugEdit{};
+    GbaTextEditState textEdit{};
     GbaDebugView debugView = GbaDebugView::CpuMemory;
     std::vector<u32> debugBreakpoints{};
     std::optional<u32> selectedSpriteAddress{};
@@ -1049,6 +1225,8 @@ int runGbaRealtimeCommon(
             showBreakpointMenu = false;
             showSearchPanel = false;
             debugEdit = GbaDebugEditState{};
+            textEdit = GbaTextEditState{};
+            SDL_StopTextInput();
             selectedSpriteAddress.reset();
         }
     };
@@ -1145,13 +1323,20 @@ int runGbaRealtimeCommon(
         setMessage("REGION " + snapshot.memoryBlocks[debugRegionIndex].shortName + " " + hex32(debugAddress), 75);
     };
 
+    const auto stopTextEdit = [&]() {
+        textEdit = GbaTextEditState{};
+        SDL_StopTextInput();
+    };
+
     const auto beginAddressEdit = [&]() {
+        stopTextEdit();
         debugEdit.field = GbaDebugEditField::Address;
         debugEdit.text = hex32(debugAddress);
         setDebugPanelVisible(true);
     };
 
     const auto beginValueEdit = [&]() {
+        stopTextEdit();
         debugEdit.field = GbaDebugEditField::Value;
         debugEdit.text = hex8(core.debugRead8(debugAddress).value_or(0U));
         setDebugPanelVisible(true);
@@ -1159,6 +1344,15 @@ int runGbaRealtimeCommon(
 
     const auto cancelDebugEdit = [&]() {
         debugEdit = GbaDebugEditState{};
+    };
+
+    const auto beginTextEdit = [&]() {
+        textEdit.active = true;
+        textEdit.baseAddress = debugAddress;
+        textEdit.text = readGbaTextPreview(core, debugAddress, 32);
+        debugEdit = GbaDebugEditState{};
+        SDL_StartTextInput();
+        setMessage("TEXT EDIT " + hex32(debugAddress), 90);
     };
 
     const auto applyDebugEdit = [&]() {
@@ -1170,6 +1364,12 @@ int runGbaRealtimeCommon(
         }
         if (debugEdit.field == GbaDebugEditField::Address) {
             debugAddress = *parsed;
+            if (const auto spriteBase = gbaOamSpriteBaseForAddress(debugAddress)) {
+                selectedSpriteAddress = *spriteBase;
+                debugView = GbaDebugView::Video;
+            } else {
+                selectedSpriteAddress.reset();
+            }
             setMessage("MEM " + hex32(debugAddress));
         } else if (debugEdit.field == GbaDebugEditField::Value) {
             const u8 value = static_cast<u8>(*parsed & 0xFFU);
@@ -1314,6 +1514,22 @@ int runGbaRealtimeCommon(
                     SDL_GetRendererOutputSize(renderer, &outputW, &outputH);
                     const int panelX = outputW - kPanelWidth;
                     if (mx >= panelX) {
+                        constexpr int readStartY = 118;
+                        const int readMaxLines = gbaDebugReadMaxLines(outputH);
+                        if (my >= readStartY && my < readStartY + readMaxLines * kReadLineHeight) {
+                            const int row = (my - readStartY) / kReadLineHeight;
+                            const u32 clickedAddress = debugAddress + static_cast<u32>(row * 8);
+                            debugAddress = clickedAddress;
+                            if (const auto spriteBase = gbaOamSpriteBaseForAddress(clickedAddress)) {
+                                selectedSpriteAddress = *spriteBase;
+                                debugView = GbaDebugView::Video;
+                                setMessage("OAM SPR " + std::to_string((*spriteBase - 0x07000000U) / 8U) + " " + hex32(*spriteBase), 90);
+                            } else {
+                                selectedSpriteAddress.reset();
+                                setMessage("MEM " + hex32(clickedAddress), 60);
+                            }
+                            continue;
+                        }
                         const int spriteListY = gbaSpriteListY(outputH);
                         const int spriteMaxLines = gbaSpriteVisibleLines(outputH);
                         if (my >= spriteListY && my < spriteListY + spriteMaxLines * kSpriteLineHeight) {
@@ -1355,8 +1571,41 @@ int runGbaRealtimeCommon(
                     continue;
                 }
             }
+            if (event.type == SDL_TEXTINPUT && textEdit.active) {
+                for (const char* ch = event.text.text; *ch != '\0'; ++ch) {
+                    const unsigned char raw = static_cast<unsigned char>(*ch);
+                    if (raw < 0x20 || raw > 0x7E || textEdit.text.size() >= 32U) {
+                        continue;
+                    }
+                    const u32 address = textEdit.baseAddress + static_cast<u32>(textEdit.text.size());
+                    if (core.debugWrite8(address, static_cast<u8>(raw))) {
+                        textEdit.text.push_back(static_cast<char>(raw));
+                        debugAddress = address;
+                        setMessage("TEXT WRITE " + hex32(address), 45);
+                    } else {
+                        setMessage("TEXT WRITE FAIL");
+                        break;
+                    }
+                }
+                continue;
+            }
             if (event.type == SDL_KEYDOWN) {
                 const SDL_Keycode key = event.key.keysym.sym;
+                if (textEdit.active) {
+                    if (key == SDLK_ESCAPE || key == SDLK_RETURN || key == SDLK_KP_ENTER) {
+                        stopTextEdit();
+                        setMessage("TEXT EDIT OFF", 75);
+                    } else if (key == SDLK_BACKSPACE) {
+                        if (!textEdit.text.empty()) {
+                            textEdit.text.pop_back();
+                            const u32 address = textEdit.baseAddress + static_cast<u32>(textEdit.text.size());
+                            (void)core.debugWrite8(address, 0);
+                            debugAddress = address;
+                            setMessage("TEXT ERASE " + hex32(address), 45);
+                        }
+                    }
+                    continue;
+                }
                 if (debugEdit.field != GbaDebugEditField::None) {
                     if (key == SDLK_ESCAPE) {
                         cancelDebugEdit();
@@ -1451,6 +1700,8 @@ int runGbaRealtimeCommon(
                     beginAddressEdit();
                 } else if (showPanel && key == SDLK_e) {
                     beginValueEdit();
+                } else if (showPanel && key == SDLK_t) {
+                    beginTextEdit();
                 } else if (showPanel && key >= SDLK_1 && key <= SDLK_9) {
                     const auto snapshot = core.debugSnapshot();
                     const std::size_t index = static_cast<std::size_t>(key - SDLK_1);
@@ -1569,9 +1820,11 @@ int runGbaRealtimeCommon(
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, renderTexture, nullptr, &dst);
         const auto spriteRows = showPanel ? snapshotGbaSprites(core) : std::vector<GbaSpriteDebugRow>{};
+        std::optional<GbaSpritePreview> selectedSpritePreview{};
         if (showPanel && selectedSpriteAddress.has_value()) {
             if (const auto selected = findGbaSpriteByAddress(spriteRows, selectedSpriteAddress.value())) {
                 drawGbaSelectedSpriteOverlay(renderer, dst, selected.value());
+                selectedSpritePreview = buildGbaSpritePreview(core, selected.value());
             } else {
                 selectedSpriteAddress.reset();
             }
@@ -1596,9 +1849,11 @@ int runGbaRealtimeCommon(
                 disasmRows,
                 memoryRows,
                 spriteRows,
+                selectedSpritePreview,
                 debugAddress,
                 debugRegionIndex,
                 debugEdit,
+                textEdit,
                 selectedSpriteAddress,
                 debugBreakpoints,
                 paused,
