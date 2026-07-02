@@ -25,25 +25,7 @@ option(GBEMU_BUILD_MCP "Build read-only OrbitalBoy RunLab MCP stdio adapter" OFF
 find_path(MGBA_INCLUDE_DIR mgba/core/core.h)
 find_library(MGBA_LIBRARY NAMES mgba libmgba)
 
-if (WIN32 AND GBEMU_USE_SDL2)
-    set(_gbemu_vcpkg_roots)
-    if (DEFINED ENV{VCPKG_ROOT} AND NOT "$ENV{VCPKG_ROOT}" STREQUAL "")
-        list(APPEND _gbemu_vcpkg_roots "$ENV{VCPKG_ROOT}")
-    endif()
-    list(APPEND _gbemu_vcpkg_roots "C:/vcpkg")
-
-    foreach(_root IN LISTS _gbemu_vcpkg_roots)
-        foreach(_triplet IN ITEMS x64-windows x64-windows-static)
-            if (EXISTS "${_root}/installed/${_triplet}/share/sdl2/SDL2Config.cmake")
-                list(APPEND CMAKE_PREFIX_PATH "${_root}/installed/${_triplet}")
-            endif()
-        endforeach()
-    endforeach()
-
-    list(REMOVE_DUPLICATES CMAKE_PREFIX_PATH)
-endif()
-
-add_library(gbcore
+set(GBEMU_CORE_SOURCES
     src/core/gameboy.cpp
     src/core/gameboy_state_io.cpp
     src/core/gba/system.cpp
@@ -73,6 +55,77 @@ add_library(gbcore
     src/core/joypad.cpp
 )
 
+set(GBEMU_APP_SOURCES
+    src/app/main.cpp
+    src/app/app_options.cpp
+    src/app/cover_fetcher.cpp
+    src/app/headless_runner.cpp
+    src/app/rom_suite_runner.cpp
+    src/app/runtime_paths.cpp
+    src/app/sdl_frontend.cpp
+)
+
+set(GBEMU_REALTIME_SUPPORT_SOURCES
+    src/app/frontend/realtime/frame_timeline.cpp
+    src/app/frontend/realtime/save_slots.cpp
+    src/app/frontend/realtime/cheat_engine.cpp
+    src/app/frontend/realtime/replay_io.cpp
+    src/app/frontend/realtime/runlab_control_queue.cpp
+    src/app/frontend/realtime/control_bindings.cpp
+    src/app/frontend/realtime/link_transport.cpp
+    src/app/frontend/realtime/network_config.cpp
+    src/app/frontend/realtime/top_menu.cpp
+)
+
+set(GBEMU_SDL_FRONTEND_SOURCES
+    src/app/frontend/debug_ui.cpp
+    src/app/frontend/runlab.cpp
+    src/app/frontend/realtime_support.cpp
+    src/app/frontend/realtime/audio_ring_buffer.cpp
+    ${GBEMU_REALTIME_SUPPORT_SOURCES}
+    src/app/frontend/gba_realtime.cpp
+    src/app/frontend/realtime.cpp
+    src/app/frontend/rom_selector.cpp
+)
+
+set(GBEMU_TEST_SUPPORT_SOURCES
+    src/app/app_options.cpp
+    src/app/rom_suite_runner.cpp
+    src/app/frontend/runlab.cpp
+    ${GBEMU_REALTIME_SUPPORT_SOURCES}
+)
+
+set(GBEMU_TEST_SOURCES
+    tests/test_main.cpp
+    tests/cpu_behavior_tests.cpp
+    tests/cartridge_tests.cpp
+    tests/bus_tests.cpp
+    tests/peripheral_tests.cpp
+    tests/state_and_options_tests.cpp
+    tests/gba_phase2_tests.cpp
+    tests/frontend_feature_tests.cpp
+)
+
+if (WIN32 AND GBEMU_USE_SDL2)
+    set(_gbemu_vcpkg_roots)
+    if (DEFINED ENV{VCPKG_ROOT} AND NOT "$ENV{VCPKG_ROOT}" STREQUAL "")
+        list(APPEND _gbemu_vcpkg_roots "$ENV{VCPKG_ROOT}")
+    endif()
+    list(APPEND _gbemu_vcpkg_roots "C:/vcpkg")
+
+    foreach(_root IN LISTS _gbemu_vcpkg_roots)
+        foreach(_triplet IN ITEMS x64-windows x64-windows-static)
+            if (EXISTS "${_root}/installed/${_triplet}/share/sdl2/SDL2Config.cmake")
+                list(APPEND CMAKE_PREFIX_PATH "${_root}/installed/${_triplet}")
+            endif()
+        endforeach()
+    endforeach()
+
+    list(REMOVE_DUPLICATES CMAKE_PREFIX_PATH)
+endif()
+
+add_library(gbcore ${GBEMU_CORE_SOURCES})
+
 target_include_directories(gbcore PUBLIC include)
 if (MGBA_INCLUDE_DIR AND MGBA_LIBRARY)
     target_include_directories(gbcore PRIVATE ${MGBA_INCLUDE_DIR})
@@ -83,15 +136,7 @@ else()
     message(STATUS "mGBA core not found; native mGBA backend disabled")
 endif()
 
-add_executable(gbemu
-    src/app/main.cpp
-    src/app/app_options.cpp
-    src/app/cover_fetcher.cpp
-    src/app/headless_runner.cpp
-    src/app/rom_suite_runner.cpp
-    src/app/runtime_paths.cpp
-    src/app/sdl_frontend.cpp
-)
+add_executable(gbemu ${GBEMU_APP_SOURCES})
 target_link_libraries(gbemu PRIVATE gbcore)
 if (WIN32 AND MSVC)
     target_link_options(gbemu PRIVATE /STACK:8388608)
@@ -100,24 +145,7 @@ endif()
 if (GBEMU_USE_SDL2)
     find_package(SDL2 CONFIG QUIET)
     if (SDL2_FOUND)
-        target_sources(gbemu PRIVATE
-            src/app/frontend/debug_ui.cpp
-            src/app/frontend/runlab.cpp
-            src/app/frontend/realtime_support.cpp
-            src/app/frontend/realtime/frame_timeline.cpp
-            src/app/frontend/realtime/audio_ring_buffer.cpp
-            src/app/frontend/realtime/save_slots.cpp
-            src/app/frontend/realtime/cheat_engine.cpp
-            src/app/frontend/realtime/replay_io.cpp
-            src/app/frontend/realtime/runlab_control_queue.cpp
-            src/app/frontend/realtime/control_bindings.cpp
-            src/app/frontend/realtime/link_transport.cpp
-            src/app/frontend/realtime/network_config.cpp
-            src/app/frontend/realtime/top_menu.cpp
-            src/app/frontend/gba_realtime.cpp
-            src/app/frontend/realtime.cpp
-            src/app/frontend/rom_selector.cpp
-        )
+        target_sources(gbemu PRIVATE ${GBEMU_SDL_FRONTEND_SOURCES})
         target_link_libraries(gbemu PRIVATE SDL2::SDL2)
         if (TARGET SDL2::SDL2main)
             target_link_libraries(gbemu PRIVATE SDL2::SDL2main)
@@ -160,28 +188,18 @@ endif()
 
 if (BUILD_TESTING)
     add_executable(gbemu_tests
-        src/app/app_options.cpp
-        src/app/rom_suite_runner.cpp
-        src/app/frontend/realtime/save_slots.cpp
-        src/app/frontend/runlab.cpp
-        src/app/frontend/realtime/cheat_engine.cpp
-        src/app/frontend/realtime/replay_io.cpp
-        src/app/frontend/realtime/runlab_control_queue.cpp
-        src/app/frontend/realtime/control_bindings.cpp
-        src/app/frontend/realtime/link_transport.cpp
-        src/app/frontend/realtime/network_config.cpp
-        src/app/frontend/realtime/frame_timeline.cpp
-        src/app/frontend/realtime/top_menu.cpp
-        tests/test_main.cpp
-        tests/cpu_behavior_tests.cpp
-        tests/cartridge_tests.cpp
-        tests/bus_tests.cpp
-        tests/peripheral_tests.cpp
-        tests/state_and_options_tests.cpp
-        tests/gba_phase2_tests.cpp
-        tests/frontend_feature_tests.cpp
+        ${GBEMU_TEST_SUPPORT_SOURCES}
+        ${GBEMU_TEST_SOURCES}
     )
     target_link_libraries(gbemu_tests PRIVATE gbcore)
+    if (SDL2_FOUND)
+        target_sources(gbemu_tests PRIVATE
+            src/app/frontend/debug_ui.cpp
+            src/app/frontend/realtime_support.cpp
+        )
+        target_link_libraries(gbemu_tests PRIVATE SDL2::SDL2)
+        target_compile_definitions(gbemu_tests PRIVATE GBEMU_USE_SDL2=1 SDL_MAIN_HANDLED=1)
+    endif()
     if (MSVC)
         target_compile_options(gbemu_tests PRIVATE /W4 /EHsc)
         target_link_options(gbemu_tests PRIVATE /STACK:8388608)

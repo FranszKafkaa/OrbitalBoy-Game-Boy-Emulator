@@ -12,19 +12,12 @@ public:
 
     u8 read(u16 address) const override {
         if (address < 0x4000) {
-            if (address < rom_.size()) {
-                return rom_[address];
-            }
-            return 0xFF;
+            return readRomByte(rom_, address);
         }
 
         if (address < 0x8000) {
             const u32 bank = static_cast<u32>(romBank_ % romBankCount_);
-            const u32 idx = bank * 0x4000 + (address - 0x4000);
-            if (idx < rom_.size()) {
-                return rom_[idx];
-            }
-            return 0xFF;
+            return readRomBank(rom_, bank, address - 0x4000);
         }
 
         if (address >= 0xA000 && address <= 0xBFFF && ramEnabled_ && !ram_.empty()) {

@@ -251,6 +251,47 @@ std::vector<std::filesystem::path> discoverRomFiles() {
 
 } // namespace
 
+std::vector<std::string> coverCandidateNamesForRom(const std::filesystem::path& romPath) {
+    return candidateNamesForRom(romPath);
+}
+
+bool downloadCoverForRomName(
+    const std::filesystem::path& romPath,
+    const std::string& gameName,
+    const std::filesystem::path& outputPath
+) {
+    const auto repo = libretroThumbnailRepoForRom(romPath);
+    if (!repo.has_value() || gameName.empty()) {
+        return false;
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(outputPath.parent_path(), ec);
+    std::filesystem::remove(outputPath, ec);
+    const auto url = coverUrl(*repo, gameName);
+    if (!downloadUrlToFile(url, outputPath)) {
+        return false;
+    }
+
+    if (!isValidImageFile(outputPath)) {
+        if (const auto alias = readThumbnailAlias(outputPath)) {
+            std::filesystem::remove(outputPath, ec);
+            const auto aliasUrl = coverUrl(*repo, *alias);
+            if (!downloadUrlToFile(aliasUrl, outputPath)) {
+                return false;
+            }
+        }
+    }
+
+    if (!std::filesystem::exists(outputPath)
+        || std::filesystem::file_size(outputPath, ec) == 0U
+        || !isValidImageFile(outputPath)) {
+        std::filesystem::remove(outputPath, ec);
+        return false;
+    }
+    return true;
+}
+
 int fetchMissingRomCovers(bool force) {
     const auto roms = discoverRomFiles();
     if (roms.empty()) {

@@ -87,15 +87,16 @@ int runRealtime(
         "Orion Boy",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
-        gameWidth + panelWidth,
+        gameWidth,
         gameHeight,
-        SDL_WINDOW_SHOWN
+        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
     );
     if (!window) {
         std::cerr << "erro SDL_CreateWindow: " << SDL_GetError() << "\n";
         SDL_Quit();
         return 1;
     }
+    SDL_SetWindowMinimumSize(window, width, height);
 
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!renderer) {
@@ -1032,6 +1033,17 @@ int runRealtime(
     };
 
     const auto toggleDebugPanelState = [&]() {
+        if (!fullscreen) {
+            int currentW = gameWidth;
+            int currentH = gameHeight;
+            SDL_GetWindowSize(window, &currentW, &currentH);
+            const int nextW = showPanel
+                ? std::max(width, currentW - panelWidth)
+                : std::max(width + panelWidth, currentW + panelWidth);
+            SDL_SetWindowMinimumSize(window, showPanel ? width : width + panelWidth, height);
+            SDL_SetWindowSize(window, nextW, std::max(height, currentH));
+            SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+        }
         showPanel = !showPanel;
         if (!showPanel) {
             selectedSpriteAddr.reset();
@@ -1081,7 +1093,8 @@ int runRealtime(
             fullscreen = !fullscreen;
         } else {
             if (!fullscreen) {
-                SDL_SetWindowSize(window, gameWidth + panelWidth, gameHeight);
+                SDL_SetWindowMinimumSize(window, width, height);
+                SDL_SetWindowSize(window, gameWidth, gameHeight);
                 SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
             }
             uiMessage = fullscreen ? "FULLSCREEN ON" : "FULLSCREEN OFF";

@@ -1,4 +1,5 @@
 #include "factory.hpp"
+#include "common.hpp"
 
 namespace gb {
 namespace cartridge_mapper {
@@ -11,17 +12,11 @@ public:
 
     u8 read(u16 address) const override {
         if (address < 0x8000) {
-            if (address < rom_.size()) {
-                return rom_[address];
-            }
-            return 0xFF;
+            return readRomByte(rom_, address);
         }
 
         if (address >= 0xA000 && address <= 0xBFFF && !ram_.empty()) {
-            const u32 idx = address - 0xA000;
-            if (idx < ram_.size()) {
-                return ram_[idx];
-            }
+            return readRamBank(ram_, 0, address - 0xA000);
         }
 
         return 0xFF;
@@ -29,10 +24,7 @@ public:
 
     void write(u16 address, u8 value) override {
         if (address >= 0xA000 && address <= 0xBFFF && !ram_.empty()) {
-            const u32 idx = address - 0xA000;
-            if (idx < ram_.size()) {
-                ram_[idx] = value;
-            }
+            writeRamBank(ram_, 0, address - 0xA000, value);
         }
     }
 

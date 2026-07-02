@@ -16,24 +16,21 @@ public:
             if (mode_ == 1) {
                 bank = (baseBank_ + (static_cast<u32>(bankHigh_) << 5)) % romBankCount_;
             }
-            const u32 idx = bank * 0x4000 + address;
-            return idx < rom_.size() ? rom_[idx] : 0xFF;
+            return readRomBank(rom_, bank, address);
         }
         if (address < 0x8000) {
             u32 bank = (baseBank_ + romBankLow_ + (static_cast<u32>(bankHigh_) << 5)) % romBankCount_;
             if (bank == baseBank_) {
                 bank = (bank + 1) % romBankCount_;
             }
-            const u32 idx = bank * 0x4000 + (address - 0x4000);
-            return idx < rom_.size() ? rom_[idx] : 0xFF;
+            return readRomBank(rom_, bank, address - 0x4000);
         }
         if (address >= 0xA000 && address <= 0xBFFF && ramEnabled_ && !ram_.empty()) {
             u32 bank = 0;
             if (mode_ == 1 && ramBankCount_ > 0) {
                 bank = static_cast<u32>(bankHigh_) % ramBankCount_;
             }
-            const u32 idx = bank * 0x2000 + (address - 0xA000);
-            return idx < ram_.size() ? ram_[idx] : 0xFF;
+            return readRamBank(ram_, bank, address - 0xA000);
         }
         return 0xFF;
     }
@@ -70,10 +67,7 @@ public:
             if (mode_ == 1 && ramBankCount_ > 0) {
                 bank = static_cast<u32>(bankHigh_) % ramBankCount_;
             }
-            const u32 idx = bank * 0x2000 + (address - 0xA000);
-            if (idx < ram_.size()) {
-                ram_[idx] = value;
-            }
+            writeRamBank(ram_, bank, address - 0xA000, value);
         }
     }
 

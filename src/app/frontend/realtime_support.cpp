@@ -416,11 +416,8 @@ BlitLayout computeGameBlitLayout(
             drawH = outputH;
         }
     } else {
-        const float sx = static_cast<float>(contentW) / static_cast<float>(screenW);
-        const float sy = static_cast<float>(outputH) / static_cast<float>(screenH);
-        const float s = std::max(0.1f, std::min(sx, sy));
-        drawW = std::max(1, static_cast<int>(screenW * s + 0.5f));
-        drawH = std::max(1, static_cast<int>(screenH * s + 0.5f));
+        drawW = contentW;
+        drawH = outputH;
     }
 
     const int gameX = contentX + (contentW - drawW) / 2;

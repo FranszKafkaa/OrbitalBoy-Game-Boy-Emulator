@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "gb/app/cover_fetcher.hpp"
 #include "gb/app/frontend/debug_ui.hpp"
 #include "gb/app/frontend/rom_selector.hpp"
 #include "gb/app/runtime_paths.hpp"
@@ -63,6 +64,7 @@ struct RomEntry {
     std::string label;
     std::string romPath;
     std::string imagePath;
+    std::string directoryPath;
     std::string system;
 };
 
@@ -126,6 +128,17 @@ void drawBadge(SDL_Renderer* renderer, int x, int y, const std::string& text, SD
     SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
     SDL_RenderDrawRect(renderer, &outer);
     drawHexText(renderer, x + 5, y + 5, text, color, 1);
+}
+
+std::string clippedText(const std::string& text, std::size_t maxLen) {
+    if (text.size() <= maxLen) {
+        return text;
+    }
+    return text.substr(0, maxLen);
+}
+
+SDL_Rect centeredRect(int outerW, int outerH, int w, int h) {
+    return SDL_Rect{std::max(0, (outerW - w) / 2), std::max(0, (outerH - h) / 2), w, h};
 }
 
 #if defined(_WIN32)
@@ -360,6 +373,7 @@ std::vector<RomEntry> discoverRoms() {
             r.label = normalizeLabel(entry.path().filename().string(), 24);
             r.romPath = gb::resolveRomPathForRuntime(foundRom->string());
             r.imagePath = foundImage ? gb::resolveRomPathForRuntime(foundImage->string()) : std::string();
+            r.directoryPath = gb::resolveRomPathForRuntime(entry.path().string());
             r.system = systemLabelForRom(*foundRom);
             roms.push_back(std::move(r));
         }
@@ -384,7 +398,7 @@ std::string chooseRomWithSdlDialog() {
     constexpr int kMinGapX = 12;
     constexpr int kGapY = 12;
 
-    const auto roms = discoverRoms();
+    auto roms = discoverRoms();
     if (roms.empty()) {
         SDL_ShowSimpleMessageBox(
             SDL_MESSAGEBOX_WARNING,
@@ -475,6 +489,90 @@ std::string chooseRomWithSdlDialog() {
     bool running = true;
     std::string chosen;
     std::vector<SDL_Texture*> previewTextures(roms.size(), nullptr);
+    struct CoverPopup {
+        bool open = false;
+        int romIndex = -1;
+        std::string query{};
+        std::string status{};
+        std::string tempPath{};
+        SDL_Texture* preview = nullptr;
+        bool downloaded = false;
+    } coverPopup;
+
+    const auto destroyCoverPreview = [&]() {
+        if (coverPopup.preview != nullptr) {
+            SDL_DestroyTexture(coverPopup.preview);
+            coverPopup.preview = nullptr;
+        }
+        coverPopup.downloaded = false;
+    };
+
+    const auto closeCoverPopup = [&]() {
+        destroyCoverPreview();
+        if (!coverPopup.tempPath.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(coverPopup.tempPath, ec);
+        }
+        coverPopup = CoverPopup{};
+        SDL_StopTextInput();
+    };
+
+    const auto openCoverPopup = [&](int romIndex) {
+        closeCoverPopup();
+        coverPopup.open = true;
+        coverPopup.romIndex = romIndex;
+        coverPopup.status = "EDITE O NOME E CLIQUE BUSCAR";
+        const auto candidates = gb::coverCandidateNamesForRom(std::filesystem::path(roms[static_cast<std::size_t>(romIndex)].romPath));
+        coverPopup.query = candidates.empty() ? roms[static_cast<std::size_t>(romIndex)].label : candidates.front();
+        coverPopup.tempPath = (std::filesystem::path(roms[static_cast<std::size_t>(romIndex)].directoryPath) / ".capa.preview.png").string();
+        SDL_StartTextInput();
+    };
+
+    const auto fetchCoverPreview = [&]() {
+        if (!coverPopup.open || coverPopup.romIndex < 0) {
+            return;
+        }
+        destroyCoverPreview();
+        coverPopup.status = "BUSCANDO...";
+        const auto& rom = roms[static_cast<std::size_t>(coverPopup.romIndex)];
+        if (!gb::downloadCoverForRomName(std::filesystem::path(rom.romPath), coverPopup.query, std::filesystem::path(coverPopup.tempPath))) {
+            coverPopup.status = "CAPA NAO ENCONTRADA";
+            return;
+        }
+        SDL_Surface* surface = loadPreviewSurface(coverPopup.tempPath);
+        if (surface == nullptr) {
+            coverPopup.status = "PREVIEW INVALIDO";
+            return;
+        }
+        coverPopup.preview = SDL_CreateTextureFromSurface(renderer, surface);
+        SDL_FreeSurface(surface);
+        if (coverPopup.preview == nullptr) {
+            coverPopup.status = "TEXTURA INVALIDA";
+            return;
+        }
+        coverPopup.downloaded = true;
+        coverPopup.status = "CONFIRME PARA SALVAR";
+    };
+
+    const auto confirmCoverPreview = [&]() {
+        if (!coverPopup.open || !coverPopup.downloaded || coverPopup.romIndex < 0) {
+            return;
+        }
+        auto& rom = roms[static_cast<std::size_t>(coverPopup.romIndex)];
+        const auto outputPath = std::filesystem::path(rom.directoryPath) / "capa.png";
+        std::error_code ec;
+        std::filesystem::copy_file(coverPopup.tempPath, outputPath, std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) {
+            coverPopup.status = "FALHA AO SALVAR";
+            return;
+        }
+        rom.imagePath = outputPath.string();
+        if (previewTextures[static_cast<std::size_t>(coverPopup.romIndex)] != nullptr) {
+            SDL_DestroyTexture(previewTextures[static_cast<std::size_t>(coverPopup.romIndex)]);
+            previewTextures[static_cast<std::size_t>(coverPopup.romIndex)] = nullptr;
+        }
+        closeCoverPopup();
+    };
 
     while (running) {
         SDL_Event ev;
@@ -482,6 +580,50 @@ std::string chooseRomWithSdlDialog() {
             if (ev.type == SDL_QUIT) {
                 running = false;
                 break;
+            }
+            if (coverPopup.open) {
+                if (ev.type == SDL_TEXTINPUT) {
+                    if (coverPopup.query.size() < 96U) {
+                        coverPopup.query += ev.text.text;
+                    }
+                    continue;
+                }
+                if (ev.type == SDL_KEYDOWN) {
+                    const SDL_Keycode key = ev.key.keysym.sym;
+                    if (key == SDLK_ESCAPE) {
+                        closeCoverPopup();
+                    } else if (key == SDLK_RETURN || key == SDLK_KP_ENTER) {
+                        fetchCoverPreview();
+                    } else if (key == SDLK_BACKSPACE) {
+                        if (!coverPopup.query.empty()) {
+                            coverPopup.query.pop_back();
+                        }
+                    }
+                    continue;
+                }
+                if (ev.type == SDL_MOUSEBUTTONDOWN && ev.button.button == SDL_BUTTON_LEFT) {
+                    int w = 0;
+                    int h = 0;
+                    SDL_GetRendererOutputSize(renderer, &w, &h);
+                    const SDL_Rect box = centeredRect(w, h, std::min(560, w - 48), std::min(440, h - 48));
+                    const SDL_Rect searchButton{box.x + box.w - 118, box.y + 50, 92, 24};
+                    const SDL_Rect saveButton{box.x + box.w - 224, box.y + box.h - 42, 94, 24};
+                    const SDL_Rect cancelButton{box.x + box.w - 120, box.y + box.h - 42, 94, 24};
+                    const int mx = ev.button.x;
+                    const int my = ev.button.y;
+                    const auto hit = [&](const SDL_Rect& r) {
+                        return mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h;
+                    };
+                    if (hit(searchButton)) {
+                        fetchCoverPreview();
+                    } else if (hit(saveButton)) {
+                        confirmCoverPreview();
+                    } else if (hit(cancelButton)) {
+                        closeCoverPopup();
+                    }
+                    continue;
+                }
+                continue;
             }
             if (ev.type == SDL_KEYDOWN) {
                 const int maxIdx = static_cast<int>(roms.size()) - 1;
@@ -522,6 +664,9 @@ std::string chooseRomWithSdlDialog() {
                     chosen = roms[static_cast<std::size_t>(selected)].romPath;
                     running = false;
                     break;
+                case SDLK_c:
+                    openCoverPopup(selected);
+                    break;
                 default:
                     break;
                 }
@@ -550,6 +695,9 @@ std::string chooseRomWithSdlDialog() {
                     }
                     lastClickIdx = hover;
                     lastClickTicks = now;
+                } else if (ev.type == SDL_MOUSEBUTTONDOWN && ev.button.button == SDL_BUTTON_RIGHT && hover >= 0) {
+                    selected = hover;
+                    openCoverPopup(hover);
                 }
             }
         }
@@ -672,7 +820,7 @@ std::string chooseRomWithSdlDialog() {
         SDL_RenderFillRect(renderer, &footer);
         SDL_SetRenderDrawColor(renderer, 38, 50, 76, 255);
         SDL_RenderDrawLine(renderer, 0, h - 34, w, h - 34);
-        drawHexText(renderer, 22, h - 23, "ENTER OPEN  DOUBLE CLICK OPEN  ESC CANCEL", SDL_Color{170, 181, 207, 255}, 1);
+        drawHexText(renderer, 22, h - 23, "ENTER OPEN  DOUBLE CLICK OPEN  C/RIGHT CLICK CAPA  ESC CANCEL", SDL_Color{170, 181, 207, 255}, 1);
 
         if (totalRows > visibleRows) {
             const int trackH = areaH - 16;
@@ -689,6 +837,68 @@ std::string chooseRomWithSdlDialog() {
             SDL_RenderFillRect(renderer, &thumb);
         }
 
+        if (coverPopup.open && coverPopup.romIndex >= 0) {
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 170);
+            SDL_Rect veil{0, 0, w, h};
+            SDL_RenderFillRect(renderer, &veil);
+
+            const SDL_Rect box = centeredRect(w, h, std::min(560, w - 48), std::min(440, h - 48));
+            drawPanel(renderer, box, SDL_Color{16, 22, 34, 255}, SDL_Color{92, 112, 154, 255});
+
+            const auto& rom = roms[static_cast<std::size_t>(coverPopup.romIndex)];
+            drawHexText(renderer, box.x + 18, box.y + 16, "BAIXAR ARTE DA CAPA", SDL_Color{248, 250, 255, 255}, 2);
+            drawBadge(renderer, box.x + box.w - 66, box.y + 17, rom.system, systemAccentColor(rom.system));
+
+            SDL_Rect input{box.x + 18, box.y + 50, box.w - 154, 24};
+            drawPanel(renderer, input, SDL_Color{8, 11, 18, 255}, SDL_Color{70, 86, 122, 255});
+            drawHexText(renderer, input.x + 8, input.y + 8, clippedText(coverPopup.query, 50) + "_", SDL_Color{226, 236, 255, 255}, 1);
+
+            SDL_Rect searchButton{box.x + box.w - 118, box.y + 50, 92, 24};
+            drawPanel(renderer, searchButton, SDL_Color{44, 58, 86, 255}, SDL_Color{255, 190, 92, 255});
+            drawHexText(renderer, searchButton.x + 19, searchButton.y + 8, "BUSCAR", SDL_Color{255, 226, 160, 255}, 1);
+
+            SDL_Rect previewBox{box.x + 18, box.y + 92, box.w - 36, box.h - 152};
+            drawPanel(renderer, previewBox, SDL_Color{8, 11, 18, 255}, SDL_Color{48, 60, 86, 255});
+            if (coverPopup.preview != nullptr) {
+                int tw = 0;
+                int th = 0;
+                SDL_QueryTexture(coverPopup.preview, nullptr, nullptr, &tw, &th);
+                if (tw > 0 && th > 0) {
+                    const float scale = std::min(
+                        static_cast<float>(previewBox.w - 20) / static_cast<float>(tw),
+                        static_cast<float>(previewBox.h - 20) / static_cast<float>(th)
+                    );
+                    const int rw = std::max(1, static_cast<int>(tw * scale));
+                    const int rh = std::max(1, static_cast<int>(th * scale));
+                    SDL_Rect dst{previewBox.x + (previewBox.w - rw) / 2, previewBox.y + (previewBox.h - rh) / 2, rw, rh};
+                    SDL_RenderCopy(renderer, coverPopup.preview, nullptr, &dst);
+                }
+            } else {
+                drawHexText(renderer, previewBox.x + 18, previewBox.y + previewBox.h / 2 - 4, "SEM PREVIEW", SDL_Color{104, 118, 150, 255}, 1);
+            }
+
+            drawHexText(renderer, box.x + 18, box.y + box.h - 54, clippedText(coverPopup.status, 58), SDL_Color{255, 222, 128, 255}, 1);
+
+            SDL_Rect saveButton{box.x + box.w - 224, box.y + box.h - 42, 94, 24};
+            SDL_Rect cancelButton{box.x + box.w - 120, box.y + box.h - 42, 94, 24};
+            drawPanel(
+                renderer,
+                saveButton,
+                coverPopup.downloaded ? SDL_Color{34, 72, 52, 255} : SDL_Color{34, 42, 52, 255},
+                coverPopup.downloaded ? SDL_Color{126, 214, 168, 255} : SDL_Color{70, 80, 100, 255}
+            );
+            drawHexText(
+                renderer,
+                saveButton.x + 15,
+                saveButton.y + 8,
+                "CONFIRMAR",
+                coverPopup.downloaded ? SDL_Color{180, 255, 210, 255} : SDL_Color{110, 120, 140, 255},
+                1
+            );
+            drawPanel(renderer, cancelButton, SDL_Color{54, 38, 42, 255}, SDL_Color{160, 92, 102, 255});
+            drawHexText(renderer, cancelButton.x + 24, cancelButton.y + 8, "CANCELA", SDL_Color{255, 190, 196, 255}, 1);
+        }
+
         SDL_RenderPresent(renderer);
     }
 
@@ -697,6 +907,7 @@ std::string chooseRomWithSdlDialog() {
             SDL_DestroyTexture(texture);
         }
     }
+    closeCoverPopup();
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     return chosen;

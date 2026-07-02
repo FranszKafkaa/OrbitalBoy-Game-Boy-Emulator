@@ -17,11 +17,7 @@ public:
                 bank = static_cast<u32>(bankHigh_) << 5;
                 bank %= romBankCount_;
             }
-            const u32 idx = bank * 0x4000 + address;
-            if (idx < rom_.size()) {
-                return rom_[idx];
-            }
-            return 0xFF;
+            return readRomBank(rom_, bank, address);
         }
 
         if (address < 0x8000) {
@@ -31,11 +27,7 @@ public:
             if (bank == 0) {
                 bank = 1;
             }
-            const u32 idx = bank * 0x4000 + (address - 0x4000);
-            if (idx < rom_.size()) {
-                return rom_[idx];
-            }
-            return 0xFF;
+            return readRomBank(rom_, bank, address - 0x4000);
         }
 
         if (address >= 0xA000 && address <= 0xBFFF && ramEnabled_ && !ram_.empty()) {
@@ -43,10 +35,7 @@ public:
             if (mode_ == 1 && ramBankCount_ > 0) {
                 bank = static_cast<u32>(bankHigh_) % ramBankCount_;
             }
-            const u32 idx = bank * 0x2000 + (address - 0xA000);
-            if (idx < ram_.size()) {
-                return ram_[idx];
-            }
+            return readRamBank(ram_, bank, address - 0xA000);
         }
 
         return 0xFF;
@@ -78,10 +67,7 @@ public:
             if (mode_ == 1 && ramBankCount_ > 0) {
                 bank = static_cast<u32>(bankHigh_) % ramBankCount_;
             }
-            const u32 idx = bank * 0x2000 + (address - 0xA000);
-            if (idx < ram_.size()) {
-                ram_[idx] = value;
-            }
+            writeRamBank(ram_, bank, address - 0xA000, value);
         }
     }
 

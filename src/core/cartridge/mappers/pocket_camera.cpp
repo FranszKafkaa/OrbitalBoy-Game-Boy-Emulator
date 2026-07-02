@@ -13,19 +13,18 @@ public:
     PocketCameraMapper(std::vector<u8>& rom, std::vector<u8>& ram)
         : rom_(rom), ram_(ram), romBankCount_(safeRomBankCount(rom)), ramBankCount_(safeRamBankCount(ram)) {
         if (ram_.empty()) {
-            ram_.assign(0x2000, 0x00);
+            ram_.assign(kRamBankSize, 0x00);
             ramBankCount_ = safeRamBankCount(ram_);
         }
     }
 
     u8 read(u16 address) const override {
         if (address < 0x4000) {
-            return address < rom_.size() ? rom_[address] : 0xFF;
+            return readRomByte(rom_, address);
         }
         if (address < 0x8000) {
             const u32 bank = static_cast<u32>(romBank_ % romBankCount_);
-            const u32 idx = bank * 0x4000 + (address - 0x4000);
-            return idx < rom_.size() ? rom_[idx] : 0xFF;
+            return readRomBank(rom_, bank, address - 0x4000);
         }
         if (address < 0xA000 || address > 0xBFFF || !ramEnabled_) {
             return 0xFF;
@@ -37,8 +36,7 @@ public:
         }
 
         const u32 bank = ramBankCount_ == 0 ? 0 : static_cast<u32>(ramBank_ % ramBankCount_);
-        const u32 idx = bank * 0x2000 + (address - 0xA000);
-        return idx < ram_.size() ? ram_[idx] : 0xFF;
+        return readRamBank(ram_, bank, address - 0xA000);
     }
 
     void write(u16 address, u8 value) override {
@@ -72,10 +70,7 @@ public:
         }
 
         const u32 bank = ramBankCount_ == 0 ? 0 : static_cast<u32>(ramBank_ % ramBankCount_);
-        const u32 idx = bank * 0x2000 + (address - 0xA000);
-        if (idx < ram_.size()) {
-            ram_[idx] = value;
-        }
+        writeRamBank(ram_, bank, address - 0xA000, value);
     }
 
     [[nodiscard]] std::vector<u8> state() const override {

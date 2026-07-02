@@ -14,6 +14,7 @@
 #include "gb/app/frontend/realtime/save_slots.hpp"
 #include "gb/app/frontend/realtime/timing_policy.hpp"
 #include "gb/app/frontend/realtime/top_menu.hpp"
+#include "gb/app/frontend/realtime_support.hpp"
 #include "gb/app/frontend/runlab.hpp"
 #include "gb/core/gameboy.hpp"
 
@@ -127,6 +128,48 @@ TEST_CASE("frontend", "pack_buttons_bit_layout") {
     const auto mask = gb::frontend::packButtons(true, false, true, false, true, false, true, false);
     T_EQ(mask, static_cast<std::uint8_t>(0x55));
 }
+
+#ifdef GBEMU_USE_SDL2
+TEST_CASE("frontend", "windowed_blit_fills_game_area_without_debug") {
+    const auto blit = gb::frontend::computeGameBlitLayout(
+        800,
+        600,
+        gb::PPU::ScreenWidth,
+        gb::PPU::ScreenHeight,
+        260,
+        false,
+        false,
+        gb::frontend::FullscreenScaleMode::CrispFit
+    );
+
+    T_EQ(blit.contentDst.x, 0);
+    T_EQ(blit.contentDst.w, 800);
+    T_EQ(blit.gameDst.x, 0);
+    T_EQ(blit.gameDst.y, 0);
+    T_EQ(blit.gameDst.w, 800);
+    T_EQ(blit.gameDst.h, 600);
+}
+
+TEST_CASE("frontend", "windowed_blit_keeps_debug_panel_outside_game_area") {
+    const auto blit = gb::frontend::computeGameBlitLayout(
+        1060,
+        600,
+        gb::PPU::ScreenWidth,
+        gb::PPU::ScreenHeight,
+        260,
+        true,
+        false,
+        gb::frontend::FullscreenScaleMode::CrispFit
+    );
+
+    T_EQ(blit.contentDst.x, 0);
+    T_EQ(blit.contentDst.w, 800);
+    T_EQ(blit.gameDst.x, 0);
+    T_EQ(blit.gameDst.y, 0);
+    T_EQ(blit.gameDst.w, 800);
+    T_EQ(blit.gameDst.h, 600);
+}
+#endif
 
 TEST_CASE("frontend", "control_bindings_save_load_apply") {
     gb::frontend::ControlBindings bindings = gb::frontend::defaultControlBindings();
