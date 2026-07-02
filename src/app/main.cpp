@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "gb/app/app_options.hpp"
+#include "gb/app/cover_fetcher.hpp"
 #include "gb/app/headless_runner.hpp"
 #include "gb/app/rom_suite_runner.hpp"
 #include "gb/app/runtime_paths.hpp"
@@ -588,6 +589,10 @@ int main(int argc, char** argv) {
     }
 
     ResolvedTargetSystem resolvedTargetSystem = resolveTargetSystem(options);
+
+    if (options.fetchCovers) {
+        return gb::fetchMissingRomCovers(options.forceFetchCovers);
+    }
 
     if (!options.romSuiteManifest.empty()) {
         if (resolvedTargetSystem == ResolvedTargetSystem::Gba) {

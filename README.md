@@ -99,6 +99,18 @@ Extensoes reconhecidas:
 
 Capas `.jpg` ou `.jpeg` sao opcionais.
 
+Para baixar capas automaticamente de uma fonte aberta (`libretro-thumbnails`):
+
+```bash
+./build/gbemu --fetch-covers
+```
+
+O comando salva `capa.png` ao lado de cada ROM sem imagem. Para substituir capas existentes:
+
+```bash
+./build/gbemu --force-fetch-covers
+```
+
 ## Controles
 
 ### Jogo

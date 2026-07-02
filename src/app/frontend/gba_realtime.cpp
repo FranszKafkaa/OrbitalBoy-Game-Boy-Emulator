@@ -2,6 +2,7 @@
 
 #ifdef GBEMU_USE_SDL2
 #include "gb/app/frontend/debug_ui.hpp"
+#include "gb/app/frontend/realtime/save_slots.hpp"
 #include "gb/app/frontend/realtime/top_menu.hpp"
 #include "gb/app/frontend/realtime_support.hpp"
 #include "gb/app/sdl_compat.hpp"
@@ -38,6 +39,15 @@ enum class GbaDebugEditField {
     None,
     Address,
     Value,
+};
+
+enum class GbaDebugView {
+    CpuMemory = 0,
+    Video = 1,
+    Audio = 2,
+    Breakpoints = 3,
+    Help = 4,
+    Count = 5,
 };
 
 struct GbaDebugEditState {
@@ -105,6 +115,22 @@ std::string hex16(u16 value) {
     char out[5]{};
     std::snprintf(out, sizeof(out), "%04X", static_cast<unsigned>(value));
     return out;
+}
+
+const char* gbaDebugViewName(GbaDebugView view) {
+    switch (view) {
+    case GbaDebugView::CpuMemory: return "CPU/MEM";
+    case GbaDebugView::Video: return "VIDEO";
+    case GbaDebugView::Audio: return "AUDIO";
+    case GbaDebugView::Breakpoints: return "BP";
+    case GbaDebugView::Help: return "HELP";
+    default: return "";
+    }
+}
+
+GbaDebugView nextGbaDebugView(GbaDebugView view) {
+    const int next = (static_cast<int>(view) + 1) % static_cast<int>(GbaDebugView::Count);
+    return static_cast<GbaDebugView>(next);
 }
 
 bool audioDisabledByDebug() {
@@ -435,6 +461,22 @@ void drawTopMenuBar(
     }
 }
 
+std::string clippedGbaText(const std::string& text, int maxPixels, int scale) {
+    if (scale <= 0 || maxPixels <= 0) {
+        return {};
+    }
+    const int charW = 6 * scale;
+    const std::size_t maxChars = static_cast<std::size_t>(std::max(0, maxPixels / charW));
+    if (text.size() <= maxChars) {
+        return text;
+    }
+    return text.substr(0, maxChars);
+}
+
+void drawGbaTextFit(SDL_Renderer* renderer, int x, int y, int maxPixels, const std::string& text, SDL_Color color, int scale) {
+    drawHexText(renderer, x, y, clippedGbaText(text, maxPixels, scale), color, scale);
+}
+
 void drawGbaDebugPanel(
     SDL_Renderer* renderer,
     int outputW,
@@ -453,128 +495,207 @@ void drawGbaDebugPanel(
     bool muted,
     bool fastForward,
     double fps,
+    GbaDebugView view,
     bool showBreakpointMenu,
     bool showSearchPanel
 ) {
+    (void)fastForward;
     const int x = outputW - kPanelWidth;
-    SDL_SetRenderDrawColor(renderer, 10, 12, 20, 238);
+    SDL_SetRenderDrawColor(renderer, 18, 20, 28, 255);
     SDL_Rect panel{x, 0, kPanelWidth, outputH};
     SDL_RenderFillRect(renderer, &panel);
-    SDL_SetRenderDrawColor(renderer, 58, 70, 98, 255);
-    SDL_RenderDrawRect(renderer, &panel);
 
-    const SDL_Color active{226, 236, 255, 255};
-    const SDL_Color dim{138, 152, 182, 255};
+    SDL_SetRenderDrawColor(renderer, 40, 44, 58, 255);
+    SDL_RenderDrawLine(renderer, x, 0, x, outputH);
+
+    const SDL_Color active{220, 225, 235, 255};
+    const SDL_Color dim{120, 125, 140, 255};
     const SDL_Color warn{255, 222, 128, 255};
     const SDL_Color ok{134, 222, 170, 255};
 
-    int y = 12;
-    drawHexText(renderer, x + 12, y, "GBA DEBUG", SDL_Color{176, 208, 246, 255}, 2);
-    y += 24;
-    drawHexText(renderer, x + 12, y, paused ? "PAUSED" : "RUNNING", paused ? warn : ok, 1);
-    drawHexText(renderer, x + 94, y, muted ? "MUTED" : "AUDIO ON", muted ? warn : ok, 1);
-    drawHexText(renderer, x + 178, y, fastForward ? "FF" : "1X", fastForward ? warn : active, 1);
-    y += 18;
-    drawHexText(renderer, x + 12, y, "CORE " + coreName.substr(0, 28), active, 1);
-    y += 14;
-    drawHexText(renderer, x + 12, y, "ROM  " + title.substr(0, 28), active, 1);
-    y += 14;
-    drawHexText(renderer, x + 12, y, "FPS  " + std::to_string(static_cast<int>(fps + 0.5)), fps >= 55.0 ? ok : warn, 1);
-    y += 14;
-    drawHexText(renderer, x + 12, y, "FRAME " + std::to_string(snapshot.available ? snapshot.frameCounter : 0U), active, 1);
-    y += 22;
+    const int leftX = x + 12;
+    const int splitX = x + std::clamp(kPanelWidth / 2 + 4, 122, kPanelWidth - 96);
+    const int leftW = std::max(36, splitX - leftX - 6);
+    const int watchX = splitX;
+    const int watchW = std::max(58, (x + kPanelWidth - 8) - watchX);
+    const int watchTextW = std::max(16, watchW - 8);
 
-    drawHexText(renderer, x + 12, y, "SESSION", SDL_Color{176, 208, 246, 255}, 1);
-    y += 14;
-    drawHexText(renderer, x + 18, y, "SPACE PAUSE  P/M MUTE  TAB FF", dim, 1);
-    y += 12;
-    drawHexText(renderer, x + 18, y, "F FULL  N SCALE  F9/F12 CAP", dim, 1);
-    y += 12;
-    drawHexText(renderer, x + 18, y, "I/F1 DEBUG  F3/F10 TOP  F11 HELP", dim, 1);
-    y += 22;
-
-    drawHexText(renderer, x + 12, y, "CPU ARM7TDMI", SDL_Color{176, 208, 246, 255}, 1);
-    y += 14;
-    if (snapshot.available) {
-        drawHexText(renderer, x + 18, y, "PC " + hex32(snapshot.cpu.regs[15]) + " " + (snapshot.cpu.thumb ? "THUMB" : "ARM"), active, 1);
-        y += 12;
-        drawHexText(renderer, x + 18, y, "SP " + hex32(snapshot.cpu.regs[13]) + " LR " + hex32(snapshot.cpu.regs[14]).substr(0, 4), active, 1);
-        y += 12;
-        drawHexText(renderer, x + 18, y, "CPSR " + hex32(snapshot.cpu.cpsr) + " " + snapshot.cpu.mode, active, 1);
-        y += 12;
-        drawHexText(renderer, x + 18, y, "R0 " + hex32(snapshot.cpu.regs[0]) + " R1 " + hex32(snapshot.cpu.regs[1]).substr(0, 4), dim, 1);
-        y += 12;
-        drawHexText(renderer, x + 18, y, "R2 " + hex32(snapshot.cpu.regs[2]) + " R3 " + hex32(snapshot.cpu.regs[3]).substr(0, 4), dim, 1);
-    } else {
-        drawHexText(renderer, x + 18, y, "DEBUG PROFUNDO INDISPONIVEL", SDL_Color{255, 170, 150, 255}, 1);
-        y += 12;
-        drawHexText(renderer, x + 18, y, "USE CORE NATIVO MGBA", SDL_Color{255, 170, 150, 255}, 1);
-    }
-    y += 22;
-
-    if (!disasmRows.empty()) {
-        drawHexText(renderer, x + 12, y, "DISASM", SDL_Color{176, 208, 246, 255}, 1);
-        y += 14;
-        for (const auto& row : disasmRows) {
-            if (y > outputH - 190) {
-                break;
-            }
-            const bool current = !row.empty() && row[0] == '>';
-            drawHexText(renderer, x + 18, y, row.substr(0, 38), current ? warn : dim, 1);
-            y += 12;
-        }
-        y += 10;
+    int headerY = 12;
+    drawGbaTextFit(renderer, leftX, headerY, leftW, paused ? "PAUSED" : "RUNNING", active, 2);
+    headerY += 18;
+    drawGbaTextFit(renderer, leftX, headerY, leftW, muted ? "MUTED" : "AUDIO-ON", paused ? dim : active, 2);
+    headerY += 18;
+    char fpsLine[24];
+    std::snprintf(fpsLine, sizeof(fpsLine), "FPS:%05.1f", fps);
+    drawGbaTextFit(renderer, leftX, headerY, leftW, fpsLine, fps >= 55.0 ? ok : SDL_Color{255, 210, 140, 255}, 1);
+    headerY += 10;
+    const u32 pc = snapshot.available ? snapshot.cpu.regs[15] : 0U;
+    drawGbaTextFit(renderer, leftX, headerY, leftW, "PC:" + hex32(pc).substr(4) + " " + (snapshot.cpu.thumb ? "TH" : "ARM"), active, 1);
+    headerY += 10;
+    drawGbaTextFit(renderer, leftX, headerY, leftW, "CORE " + coreName, dim, 1);
+    headerY += 10;
+    drawGbaTextFit(renderer, leftX, headerY, leftW, "DISASM", dim, 1);
+    headerY += 9;
+    const int disasmCount = std::min<int>(3, static_cast<int>(disasmRows.size()));
+    for (int i = 0; i < disasmCount; ++i) {
+        drawGbaTextFit(renderer, leftX, headerY + i * 10, leftW, disasmRows[static_cast<std::size_t>(i)], active, 1);
     }
 
+    SDL_SetRenderDrawColor(renderer, 28, 34, 48, 255);
+    SDL_Rect watchBg{watchX, 8, watchW, 64};
+    SDL_RenderFillRect(renderer, &watchBg);
+    SDL_SetRenderDrawColor(renderer, 72, 88, 118, 255);
+    SDL_RenderDrawRect(renderer, &watchBg);
+    drawGbaTextFit(renderer, watchX + 4, 12, watchTextW, "WATCH", active, 1);
     std::string regionLabel = "REGION";
     if (snapshot.available && debugRegionIndex < snapshot.memoryBlocks.size()) {
         regionLabel = snapshot.memoryBlocks[debugRegionIndex].shortName;
     }
-    drawHexText(renderer, x + 12, y, "MEM " + hex32(debugAddress) + " " + regionLabel, SDL_Color{176, 208, 246, 255}, 1);
-    y += 14;
-    for (const auto& row : memoryRows) {
-        if (y > outputH - 110) {
-            break;
-        }
-        drawHexText(renderer, x + 18, y, row, active, 1);
-        y += 12;
-    }
-    y += 10;
+    drawGbaTextFit(renderer, watchX + 4, 24, watchTextW, hex32(debugAddress), active, 1);
+    drawGbaTextFit(renderer, watchX + 4, 32, watchTextW, regionLabel, dim, 1);
 
     if (editState.field != GbaDebugEditField::None) {
         const std::string prefix = editState.field == GbaDebugEditField::Address ? "EDIT ADDR " : "EDIT VAL  ";
-        drawHexText(renderer, x + 18, y, prefix + editState.text + "_", warn, 1);
-        y += 14;
+        drawGbaTextFit(renderer, watchX + 4, 40, watchTextW, prefix + editState.text + "_", warn, 1);
     } else {
-        drawHexText(renderer, x + 18, y, "1-9 REGION  G ADDR  E VALUE", dim, 1);
-        y += 12;
-        drawHexText(renderer, x + 18, y, "PGUP/DN SCROLL  INS INC BYTE", dim, 1);
-        y += 14;
+        drawGbaTextFit(renderer, watchX + 4, 40, watchTextW, gbaDebugViewName(view), warn, 1);
+    }
+    SDL_SetRenderDrawColor(renderer, 22, 28, 40, 255);
+    SDL_Rect graphBg{watchX + 4, 50, std::max(12, watchW - 8), 16};
+    SDL_RenderFillRect(renderer, &graphBg);
+    SDL_SetRenderDrawColor(renderer, 58, 70, 96, 255);
+    SDL_RenderDrawRect(renderer, &graphBg);
+    if (snapshot.available) {
+        const int graphW = graphBg.w - 2;
+        const u32 frame = snapshot.frameCounter;
+        for (int i = 0; i < graphW; ++i) {
+            const int v = static_cast<int>((frame + static_cast<u32>(i * 7)) & 0x0FU);
+            SDL_SetRenderDrawColor(renderer, 124, 208, 168, 255);
+            SDL_RenderDrawPoint(renderer, graphBg.x + 1 + i, graphBg.y + graphBg.h - 2 - v);
+        }
     }
 
-    drawHexText(renderer, x + 12, y, "BREAKPOINTS", SDL_Color{176, 208, 246, 255}, 1);
-    y += 14;
-    drawHexText(renderer, x + 18, y, showBreakpointMenu ? "BP PANEL ON" : "BP PANEL OFF", showBreakpointMenu ? warn : dim, 1);
-    y += 12;
-    drawHexText(renderer, x + 18, y, showSearchPanel ? "SEARCH PANEL ON" : "SEARCH PANEL OFF", showSearchPanel ? warn : dim, 1);
-    y += 12;
-    const int visibleBp = std::min<int>(3, static_cast<int>(breakpoints.size()));
-    for (int i = 0; i < visibleBp; ++i) {
-        drawHexText(renderer, x + 18, y, "BP" + std::to_string(i + 1) + " " + hex32(breakpoints[static_cast<std::size_t>(i)]), warn, 1);
-        y += 12;
-    }
-    if (breakpoints.empty()) {
-        drawHexText(renderer, x + 18, y, "B TOGGLE BP AT PC", dim, 1);
-        y += 12;
+    const int readStartY = 118;
+    if (showBreakpointMenu) {
+        SDL_SetRenderDrawColor(renderer, 26, 30, 42, 255);
+        SDL_Rect bpMenuBg{x + 8, kBreakpointMenuTopY, kPanelWidth - 16, readStartY - kBreakpointMenuTopY - 4};
+        SDL_RenderFillRect(renderer, &bpMenuBg);
+        SDL_SetRenderDrawColor(renderer, 60, 72, 98, 255);
+        SDL_RenderDrawRect(renderer, &bpMenuBg);
+        drawGbaTextFit(renderer, x + 12, kBreakpointMenuTopY + 2, kPanelWidth - 24, "BP/WP MENU", active, 1);
+        drawGbaTextFit(renderer, x + 12, kBreakpointRowYWatch, kPanelWidth - 24, showSearchPanel ? "SEARCH ON" : "SEARCH OFF", showSearchPanel ? warn : dim, 1);
+        drawGbaTextFit(renderer, x + 12, kBreakpointRowYPc, kPanelWidth - 24, "BP PC " + hex32(pc), active, 1);
+        drawGbaTextFit(renderer, x + 12, kBreakpointRowYAddr, kPanelWidth - 24, "G ADDR  E VALUE", active, 1);
     }
 
-    if (snapshot.available && !snapshot.memoryBlocks.empty() && y < outputH - 44) {
-        const auto& block = snapshot.memoryBlocks.front();
-        drawHexText(renderer, x + 12, y + 6, "MAP " + block.shortName + " " + hex32(block.start), dim, 1);
+    SDL_SetRenderDrawColor(renderer, 54, 60, 80, 255);
+    SDL_RenderDrawLine(renderer, x + 8, readStartY - 10, x + kPanelWidth - 8, readStartY - 10);
+
+    int y = readStartY;
+    constexpr int lineHeight = kReadLineHeight;
+    const int maxLines = std::max(1, std::min(8, (outputH - readStartY - 176) / lineHeight));
+    if (view == GbaDebugView::CpuMemory) {
+        for (int i = 0; i < maxLines && i < static_cast<int>(memoryRows.size()); ++i) {
+            drawGbaTextFit(renderer, x + 20, y + i * lineHeight, kPanelWidth - 28, memoryRows[static_cast<std::size_t>(i)], active, 1);
+        }
+    } else if (view == GbaDebugView::Video) {
+        int row = 0;
+        for (const auto& layer : snapshot.videoLayers) {
+            if (row >= maxLines) break;
+            SDL_Color color = layer.enabled ? SDL_Color{124, 208, 168, 255} : dim;
+            SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
+            SDL_Rect marker{x + 10, y + row * lineHeight + 2, 4, 8};
+            SDL_RenderFillRect(renderer, &marker);
+            drawGbaTextFit(renderer, x + 20, y + row * lineHeight, kPanelWidth - 28, layer.name + " " + layer.type + (layer.enabled ? " ON" : " OFF"), color, 1);
+            ++row;
+        }
+        for (const auto& block : snapshot.memoryBlocks) {
+            if (row >= maxLines) break;
+            if (block.shortName == "VRAM" || block.shortName == "PRAM" || block.shortName == "OAM") {
+                drawGbaTextFit(renderer, x + 20, y + row * lineHeight, kPanelWidth - 28, block.shortName + " " + hex32(block.start), active, 1);
+                ++row;
+            }
+        }
+    } else if (view == GbaDebugView::Audio) {
+        int row = 0;
+        for (const auto& channel : snapshot.audioChannels) {
+            if (row >= maxLines) break;
+            SDL_Color color = channel.enabled ? SDL_Color{124, 208, 168, 255} : dim;
+            SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
+            SDL_Rect marker{x + 10, y + row * lineHeight + 2, 4, 8};
+            SDL_RenderFillRect(renderer, &marker);
+            drawGbaTextFit(renderer, x + 20, y + row * lineHeight, kPanelWidth - 28, channel.name + " " + channel.type + (channel.enabled ? " ON" : " OFF"), color, 1);
+            ++row;
+        }
+        if (row == 0) {
+            drawGbaTextFit(renderer, x + 20, y, kPanelWidth - 28, muted ? "FRONTEND MUTED" : "FRONTEND AUDIO ON", muted ? warn : active, 1);
+        }
+    } else if (view == GbaDebugView::Breakpoints) {
+        if (breakpoints.empty()) {
+            drawGbaTextFit(renderer, x + 20, y, kPanelWidth - 28, "B TOGGLE BP AT PC", dim, 1);
+        }
+        for (int i = 0; i < maxLines && i < static_cast<int>(breakpoints.size()); ++i) {
+            SDL_SetRenderDrawColor(renderer, 255, 222, 128, 255);
+            SDL_Rect marker{x + 10, y + i * lineHeight + 2, 4, 8};
+            SDL_RenderFillRect(renderer, &marker);
+            drawGbaTextFit(renderer, x + 20, y + i * lineHeight, kPanelWidth - 28, "BP" + std::to_string(i + 1) + " " + hex32(breakpoints[static_cast<std::size_t>(i)]), warn, 1);
+        }
+    } else {
+        const std::vector<std::string> lines{
+            "I DEBUG  TAB ABA  SPACE PAUSE",
+            "F1/F2 SLOT  CTRL+S SAVE",
+            "F5/CTRL+L LOAD  F9 CAPTURE",
+            "F7 STEP INSTRUCTION",
+            "B BP PC  D BP PANEL",
+            "G ADDR  E VALUE  1-9 REGION",
+            "HOME MEM PC  PGUP/PGDN MEM",
+            "INS INC BYTE"
+        };
+        for (int i = 0; i < maxLines && i < static_cast<int>(lines.size()); ++i) {
+            drawGbaTextFit(renderer, x + 20, y + i * lineHeight, kPanelWidth - 28, lines[static_cast<std::size_t>(i)], dim, 1);
+        }
     }
+
+    const int detailY = readStartY + maxLines * lineHeight + kSelectedSectionTopGap;
+    SDL_SetRenderDrawColor(renderer, 54, 60, 80, 255);
+    SDL_RenderDrawLine(renderer, x + 8, detailY, x + kPanelWidth - 8, detailY);
+    drawGbaTextFit(renderer, x + 12, detailY + 4, kPanelWidth - 24, "SPR SEL", active, 1);
+    if (snapshot.available) {
+        drawGbaTextFit(renderer, x + 12, detailY + 18, kPanelWidth - 24, "SP " + hex32(snapshot.cpu.regs[13]) + " LR " + hex32(snapshot.cpu.regs[14]), active, 1);
+        drawGbaTextFit(renderer, x + 12, detailY + 30, kPanelWidth - 24, "CPSR " + hex32(snapshot.cpu.cpsr) + " " + snapshot.cpu.mode, active, 1);
+        drawGbaTextFit(renderer, x + 12, detailY + 42, kPanelWidth - 24, "R0 " + hex32(snapshot.cpu.regs[0]) + " R1 " + hex32(snapshot.cpu.regs[1]), dim, 1);
+        drawGbaTextFit(renderer, x + 12, detailY + 54, kPanelWidth - 24, title, dim, 1);
+    } else {
+        drawGbaTextFit(renderer, x + 12, detailY + 18, kPanelWidth - 24, "DEBUG PROFUNDO INDISPONIVEL", SDL_Color{255, 170, 150, 255}, 1);
+        drawGbaTextFit(renderer, x + 12, detailY + 30, kPanelWidth - 24, "USE CORE NATIVO MGBA", SDL_Color{255, 170, 150, 255}, 1);
+    }
+
+    const int spriteY = detailY + 96 + kSectionGap + kSpriteHeaderOffset;
+    SDL_SetRenderDrawColor(renderer, 54, 60, 80, 255);
+    SDL_RenderDrawLine(renderer, x + 8, spriteY - 4, x + kPanelWidth - 8, spriteY - 4);
+    drawGbaTextFit(renderer, x + 12, spriteY, kPanelWidth - 24, "SPRITES/OAM", active, 1);
+    if (snapshot.available) {
+        int row = 0;
+        for (const auto& block : snapshot.memoryBlocks) {
+            if (row >= 4) break;
+            if (block.shortName == "OAM" || block.shortName == "VRAM" || block.shortName == "PRAM" || block.shortName == "I/O") {
+                drawGbaTextFit(renderer, x + 12, spriteY + 14 + row * kSpriteLineHeight, kPanelWidth - 24, block.shortName + " " + hex32(block.start) + " " + (block.writable ? "RW" : "RO"), active, 1);
+                ++row;
+            }
+        }
+    }
+
+    const int runlabY = std::max(spriteY + 72, outputH - 78);
+    SDL_SetRenderDrawColor(renderer, 54, 60, 80, 255);
+    SDL_RenderDrawLine(renderer, x + 8, runlabY, x + kPanelWidth - 8, runlabY);
+    drawGbaTextFit(renderer, x + 12, runlabY + 4, kPanelWidth - 24, "RUNLAB", SDL_Color{176, 208, 246, 255}, 1);
+    drawGbaTextFit(renderer, x + 12, runlabY + 16, kPanelWidth - 24, "GBA DEBUG ADAPTER", dim, 1);
+    drawGbaTextFit(renderer, x + 12, runlabY + 28, kPanelWidth - 24, "VIEW " + std::string(gbaDebugViewName(view)), active, 1);
 
     if (!message.empty()) {
-        drawHexText(renderer, x + 12, std::max(12, outputH - 22), message.substr(0, 34), warn, 1);
+        drawGbaTextFit(renderer, x + 12, std::max(12, outputH - 22), kPanelWidth - 24, message.substr(0, 34), warn, 1);
+    } else {
+        drawGbaTextFit(renderer, x + 12, outputH - 12, kPanelWidth - 24, "TAB VIEW B BP G ADDR E VAL", dim, 1);
     }
 }
 
@@ -726,6 +847,7 @@ int runGbaRealtimeCommon(
     bool showSearchPanel = false;
     FullscreenScaleMode fullscreenMode = FullscreenScaleMode::CrispFit;
     int scaleMenuIndex = 0;
+    int activeSaveSlot = 0;
     std::optional<TopMenuSection> openTopMenuSection{};
     std::optional<TopMenuSection> hoveredTopMenuSection{};
     int hoveredTopMenuItem = -1;
@@ -739,6 +861,7 @@ int runGbaRealtimeCommon(
     u32 debugAddress = 0x02000000U;
     std::size_t debugRegionIndex = 1;
     GbaDebugEditState debugEdit{};
+    GbaDebugView debugView = GbaDebugView::CpuMemory;
     std::vector<u32> debugBreakpoints{};
 
     const auto setMessage = [&](std::string message, int frames = 120) {
@@ -770,6 +893,43 @@ int runGbaRealtimeCommon(
             setMessage("CAPTURE OK");
         } else {
             setMessage("CAPTURE FAIL");
+        }
+    };
+
+    const auto saveStateToActiveSlot = [&]() {
+        const std::string slotStatePath = saveSlotStatePath(statePath, activeSaveSlot);
+        const std::string slotMetaPath = saveSlotMetaPath(statePath, activeSaveSlot);
+        const bool saved = core.saveStateToFile(slotStatePath);
+        if (saved) {
+            SaveSlotMeta meta{};
+            meta.slot = activeSaveSlot;
+            meta.title = std::filesystem::path(core.loadedRomPath()).filename().string();
+            meta.timestamp = nowIso8601Local();
+            if (const auto snapshot = core.debugSnapshot(); snapshot.available) {
+                meta.frame = snapshot.frameCounter;
+            }
+            writeSaveSlotMeta(slotMetaPath, meta);
+            setMessage("STATE SAVED S" + std::to_string(activeSaveSlot));
+            std::cout << "state GBA salvo: " << slotStatePath << "\n";
+        } else {
+            setMessage("SAVE FAIL");
+            std::cerr << "falha ao salvar state GBA: " << slotStatePath << "\n";
+        }
+    };
+
+    const auto loadStateFromActiveSlot = [&]() {
+        const std::string slotStatePath = saveSlotStatePath(statePath, activeSaveSlot);
+        bool loaded = core.loadStateFromFile(slotStatePath);
+        if (!loaded && activeSaveSlot == 0) {
+            loaded = core.loadStateFromFile(statePath);
+        }
+        clearAudio();
+        if (loaded) {
+            setMessage("STATE LOADED S" + std::to_string(activeSaveSlot));
+            std::cout << "state GBA carregado: " << slotStatePath << "\n";
+        } else {
+            setMessage("NO STATE S" + std::to_string(activeSaveSlot));
+            std::cerr << "state GBA nao encontrado: " << slotStatePath << "\n";
         }
     };
 
@@ -854,11 +1014,10 @@ int runGbaRealtimeCommon(
             setMessage(fastForward ? "FF ON" : "FF OFF");
             break;
         case TopMenuAction::SaveState:
-            setMessage(core.saveStateToFile(statePath) ? "SAVE STATE OK" : "SAVE STATE FAIL");
+            saveStateToActiveSlot();
             break;
         case TopMenuAction::LoadState:
-            setMessage(core.loadStateFromFile(statePath) ? "LOAD STATE OK" : "LOAD STATE FAIL");
-            clearAudio();
+            loadStateFromActiveSlot();
             break;
         case TopMenuAction::BackToMenu:
             backToMenu = true;
@@ -1051,8 +1210,21 @@ int runGbaRealtimeCommon(
                     dispatchTopMenuAction(TopMenuAction::ToggleFullscreen);
                 } else if (key == SDLK_n) {
                     dispatchTopMenuAction(TopMenuAction::ToggleScaleMenu);
-                } else if (key == SDLK_F1 || key == SDLK_i) {
+                } else if (key == SDLK_i) {
                     dispatchTopMenuAction(TopMenuAction::ToggleDebugPanel);
+                } else if (key == SDLK_F1) {
+                    activeSaveSlot = normalizeSaveSlot(activeSaveSlot - 1);
+                    setMessage("SLOT " + std::to_string(activeSaveSlot), 90);
+                } else if (key == SDLK_F2) {
+                    activeSaveSlot = normalizeSaveSlot(activeSaveSlot + 1);
+                    setMessage("SLOT " + std::to_string(activeSaveSlot), 90);
+                } else if (key == SDLK_s && (event.key.keysym.mod & KMOD_CTRL)) {
+                    saveStateToActiveSlot();
+                } else if (key == SDLK_F5 || (key == SDLK_l && (event.key.keysym.mod & KMOD_CTRL))) {
+                    loadStateFromActiveSlot();
+                } else if (showPanel && key == SDLK_TAB) {
+                    debugView = nextGbaDebugView(debugView);
+                    setMessage(std::string("DEBUG ") + gbaDebugViewName(debugView), 75);
                 } else if (showPanel && key == SDLK_F7) {
                     paused = true;
                     core.setInputState(readGbaInput(eventInput, gamepad));
@@ -1112,7 +1284,7 @@ int runGbaRealtimeCommon(
                 continue;
             }
             if (event.type == SDL_KEYUP) {
-                if (event.key.keysym.sym == SDLK_TAB) {
+                if (event.key.keysym.sym == SDLK_TAB && !showPanel) {
                     fastForward = false;
                     clearAudio();
                 } else {
@@ -1213,6 +1385,7 @@ int runGbaRealtimeCommon(
                 muted,
                 fastForward,
                 fps,
+                debugView,
                 showBreakpointMenu,
                 showSearchPanel
             );

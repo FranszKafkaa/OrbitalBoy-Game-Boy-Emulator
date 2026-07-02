@@ -16,6 +16,12 @@
 #include "gb/app/sdl_compat.hpp"
 #endif
 
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <ImageIO/ImageIO.h>
+#endif
+
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -38,14 +44,18 @@ bool hasRomExtension(const std::filesystem::path& path) {
     return ext == ".gb" || ext == ".gbc" || ext == ".gba";
 }
 
+std::string toLowerAscii(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return text;
+}
+
 bool hasImageExtension(const std::filesystem::path& path) {
     if (!path.has_extension()) {
         return false;
     }
-    std::string ext = path.extension().string();
-    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-    });
+    std::string ext = toLowerAscii(path.extension().string());
     return ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp";
 }
 
@@ -53,6 +63,7 @@ struct RomEntry {
     std::string label;
     std::string romPath;
     std::string imagePath;
+    std::string system;
 };
 
 std::string normalizeLabel(std::string text, std::size_t maxLen) {
@@ -71,6 +82,50 @@ std::string normalizeLabel(std::string text, std::size_t maxLen) {
         text = text.substr(0, maxLen);
     }
     return text;
+}
+
+std::string systemLabelForRom(const std::filesystem::path& path) {
+    const std::string ext = toLowerAscii(path.extension().string());
+    if (ext == ".gba") {
+        return "GBA";
+    }
+    if (ext == ".gbc") {
+        return "GBC";
+    }
+    return "GB";
+}
+
+SDL_Color systemAccentColor(const std::string& system) {
+    if (system == "GBA") {
+        return SDL_Color{255, 190, 92, 255};
+    }
+    if (system == "GBC") {
+        return SDL_Color{126, 214, 168, 255};
+    }
+    return SDL_Color{132, 174, 255, 255};
+}
+
+void drawPanel(SDL_Renderer* renderer, const SDL_Rect& rect, SDL_Color fill, SDL_Color border) {
+    SDL_SetRenderDrawColor(renderer, fill.r, fill.g, fill.b, fill.a);
+    SDL_RenderFillRect(renderer, &rect);
+    SDL_SetRenderDrawColor(renderer, border.r, border.g, border.b, border.a);
+    SDL_RenderDrawRect(renderer, &rect);
+}
+
+void drawBadge(SDL_Renderer* renderer, int x, int y, const std::string& text, SDL_Color color) {
+    const int w = 10 + static_cast<int>(text.size()) * 9;
+    SDL_Rect outer{x, y, w, 18};
+    SDL_SetRenderDrawColor(
+        renderer,
+        static_cast<Uint8>(std::max(0, static_cast<int>(color.r) - 120)),
+        static_cast<Uint8>(std::max(0, static_cast<int>(color.g) - 120)),
+        static_cast<Uint8>(std::max(0, static_cast<int>(color.b) - 120)),
+        255
+    );
+    SDL_RenderFillRect(renderer, &outer);
+    SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
+    SDL_RenderDrawRect(renderer, &outer);
+    drawHexText(renderer, x + 5, y + 5, text, color, 1);
 }
 
 #if defined(_WIN32)
@@ -176,6 +231,75 @@ SDL_Surface* loadPreviewSurfaceWithWic(const std::filesystem::path& imagePath) {
 }
 #endif
 
+#if defined(__APPLE__)
+SDL_Surface* loadPreviewSurfaceWithImageIo(const std::filesystem::path& imagePath) {
+    const std::string pathText = imagePath.string();
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(
+        kCFAllocatorDefault,
+        reinterpret_cast<const UInt8*>(pathText.c_str()),
+        static_cast<CFIndex>(pathText.size()),
+        false
+    );
+    if (url == nullptr) {
+        return nullptr;
+    }
+
+    CGImageSourceRef source = CGImageSourceCreateWithURL(url, nullptr);
+    CFRelease(url);
+    if (source == nullptr) {
+        return nullptr;
+    }
+
+    CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, nullptr);
+    CFRelease(source);
+    if (image == nullptr) {
+        return nullptr;
+    }
+
+    const auto width = static_cast<int>(CGImageGetWidth(image));
+    const auto height = static_cast<int>(CGImageGetHeight(image));
+    if (width <= 0 || height <= 0) {
+        CGImageRelease(image);
+        return nullptr;
+    }
+
+    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(
+        0,
+        width,
+        height,
+        32,
+        SDL_PIXELFORMAT_RGBA32
+    );
+    if (surface == nullptr) {
+        CGImageRelease(image);
+        return nullptr;
+    }
+
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = CGBitmapContextCreate(
+        surface->pixels,
+        static_cast<std::size_t>(width),
+        static_cast<std::size_t>(height),
+        8,
+        static_cast<std::size_t>(surface->pitch),
+        colorSpace,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big
+    );
+    CGColorSpaceRelease(colorSpace);
+    if (context == nullptr) {
+        SDL_FreeSurface(surface);
+        CGImageRelease(image);
+        return nullptr;
+    }
+
+    CGContextClearRect(context, CGRectMake(0, 0, width, height));
+    CGContextDrawImage(context, CGRectMake(0, 0, width, height), image);
+    CGContextRelease(context);
+    CGImageRelease(image);
+    return surface;
+}
+#endif
+
 SDL_Surface* loadPreviewSurface(const std::string& imagePath) {
     if (imagePath.empty()) {
         return nullptr;
@@ -189,7 +313,13 @@ SDL_Surface* loadPreviewSurface(const std::string& imagePath) {
 
 #if defined(_WIN32)
     return loadPreviewSurfaceWithWic(std::filesystem::path(imagePath));
+#elif defined(__APPLE__)
+    return loadPreviewSurfaceWithImageIo(std::filesystem::path(imagePath));
 #else
+    const std::filesystem::path path(imagePath);
+    if (toLowerAscii(path.extension().string()) == ".bmp") {
+        return SDL_LoadBMP(imagePath.c_str());
+    }
     return nullptr;
 #endif
 }
@@ -227,9 +357,10 @@ std::vector<RomEntry> discoverRoms() {
                 continue;
             }
             RomEntry r;
-            r.label = normalizeLabel(entry.path().filename().string(), 18);
+            r.label = normalizeLabel(entry.path().filename().string(), 24);
             r.romPath = gb::resolveRomPathForRuntime(foundRom->string());
             r.imagePath = foundImage ? gb::resolveRomPathForRuntime(foundImage->string()) : std::string();
+            r.system = systemLabelForRom(*foundRom);
             roms.push_back(std::move(r));
         }
     }
@@ -244,12 +375,13 @@ std::vector<RomEntry> discoverRoms() {
 }
 
 std::string chooseRomWithSdlDialog() {
-    constexpr int kMargin = 20;
-    constexpr int kTop = 78;
-    constexpr int kBottomPad = 54;
-    constexpr int kCardW = 170;
-    constexpr int kCardH = 120;
-    constexpr int kMinGapX = 20;
+    constexpr int kMargin = 18;
+    constexpr int kTop = 88;
+    constexpr int kBottomPad = 44;
+    constexpr int kGridPad = 12;
+    constexpr int kCardW = 158;
+    constexpr int kCardH = 172;
+    constexpr int kMinGapX = 12;
     constexpr int kGapY = 12;
 
     const auto roms = discoverRoms();
@@ -267,8 +399,8 @@ std::string chooseRomWithSdlDialog() {
         "Selecionar ROM",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
-        920,
-        560,
+        1000,
+        640,
         SDL_WINDOW_SHOWN
     );
     if (!window) {
@@ -282,8 +414,8 @@ std::string chooseRomWithSdlDialog() {
     }
 
     auto colsFromWidth = [&](int w) -> int {
-        const int areaW = std::max(1, w - kMargin * 2);
-        return std::max(1, (areaW + kMinGapX) / (kCardW + kMinGapX));
+        const int contentW = std::max(1, w - kMargin * 2 - kGridPad * 2 - 18);
+        return std::max(1, (contentW + kMinGapX) / (kCardW + kMinGapX));
     };
 
     struct RowLayout {
@@ -293,36 +425,35 @@ std::string chooseRomWithSdlDialog() {
         int startX = 0;
     };
 
-    auto calcRowLayout = [&](int areaW, int rowGlobal, int cols) -> RowLayout {
+    auto calcRowLayout = [&](int rowGlobal, int cols) -> RowLayout {
         RowLayout out;
         out.startIdx = rowGlobal * cols;
         if (out.startIdx < 0 || out.startIdx >= static_cast<int>(roms.size())) {
             return out;
         }
         out.items = std::min(cols, static_cast<int>(roms.size()) - out.startIdx);
-        out.gapX = std::max(kMinGapX, (areaW - out.items * kCardW) / (out.items + 1));
-        const int rowWidth = out.items * kCardW + (out.items - 1) * out.gapX;
-        out.startX = kMargin + std::max(0, (areaW - rowWidth) / 2);
+        out.gapX = kMinGapX;
+        out.startX = kMargin + kGridPad;
         return out;
     };
 
     auto cardAt = [&](int mx, int my, int w, int h, int scrollRows) -> int {
         const int areaW = w - kMargin * 2;
-        const int areaH = h - kTop - kBottomPad;
+        const int areaH = h - kTop - kBottomPad - kGridPad * 2;
         const int cols = colsFromWidth(w);
 
-        if (mx < kMargin || mx >= kMargin + areaW || my < kTop || my >= kTop + areaH) {
+        if (mx < kMargin + kGridPad || mx >= kMargin + areaW || my < kTop + kGridPad || my >= kTop + kGridPad + areaH) {
             return -1;
         }
 
-        const int rowVisible = (my - kTop) / (kCardH + kGapY);
-        const int yInCell = (my - kTop) % (kCardH + kGapY);
+        const int rowVisible = (my - kTop - kGridPad) / (kCardH + kGapY);
+        const int yInCell = (my - kTop - kGridPad) % (kCardH + kGapY);
         if (yInCell >= kCardH) {
             return -1;
         }
 
         const int rowGlobal = scrollRows + rowVisible;
-        const auto layout = calcRowLayout(areaW, rowGlobal, cols);
+        const auto layout = calcRowLayout(rowGlobal, cols);
         if (layout.items == 0) {
             return -1;
         }
@@ -428,8 +559,9 @@ std::string chooseRomWithSdlDialog() {
         SDL_GetRendererOutputSize(renderer, &w, &h);
         const int areaW = w - kMargin * 2;
         const int areaH = h - kTop - kBottomPad;
+        const int gridH = std::max(1, areaH - kGridPad * 2);
         const int cols = colsFromWidth(w);
-        const int visibleRows = std::max(1, (areaH + kGapY) / (kCardH + kGapY));
+        const int visibleRows = std::max(1, (gridH + kGapY) / (kCardH + kGapY));
         const int totalRows = std::max(1, (static_cast<int>(roms.size()) + cols - 1) / cols);
 
         selected = std::clamp(selected, 0, static_cast<int>(roms.size()) - 1);
@@ -442,59 +574,67 @@ std::string chooseRomWithSdlDialog() {
         }
         scrollRows = std::clamp(scrollRows, 0, std::max(0, totalRows - visibleRows));
 
-        SDL_SetRenderDrawColor(renderer, 18, 20, 28, 255);
+        SDL_SetRenderDrawColor(renderer, 9, 12, 19, 255);
         SDL_RenderClear(renderer);
 
-        drawHexText(renderer, 18, 16, "SELECIONE A ROM", SDL_Color{240, 244, 255, 255}, 2);
-        drawHexText(renderer, 18, 40, "CLIQUE DUPLO OU PRESSIONE ENTER", SDL_Color{150, 160, 185, 255}, 1);
+        SDL_Rect topBand{0, 0, w, 74};
+        SDL_SetRenderDrawColor(renderer, 14, 19, 30, 255);
+        SDL_RenderFillRect(renderer, &topBand);
+        SDL_SetRenderDrawColor(renderer, 255, 190, 92, 255);
+        SDL_RenderDrawLine(renderer, 18, 73, w - 18, 73);
+        SDL_SetRenderDrawColor(renderer, 38, 50, 76, 255);
+        SDL_RenderDrawLine(renderer, 0, 74, w, 74);
 
-        SDL_SetRenderDrawColor(renderer, 30, 35, 48, 255);
+        drawHexText(renderer, 22, 16, "ORBITALBOY", SDL_Color{248, 250, 255, 255}, 2);
+        drawHexText(renderer, 22, 43, "BIBLIOTECA", SDL_Color{156, 169, 198, 255}, 1);
+
+        char countText[32];
+        std::snprintf(countText, sizeof(countText), "%d ROMS", static_cast<int>(roms.size()));
+        drawHexText(renderer, std::max(22, w - 154), 16, countText, SDL_Color{255, 190, 92, 255}, 2);
+        drawHexText(renderer, std::max(22, w - 308), 46, "ENTER ABRE  ESC SAI  SETAS NAVEGAM", SDL_Color{154, 166, 196, 255}, 1);
+
         SDL_Rect listBg{kMargin, kTop, areaW, areaH};
-        SDL_RenderFillRect(renderer, &listBg);
-        SDL_SetRenderDrawColor(renderer, 64, 72, 92, 255);
-        SDL_RenderDrawRect(renderer, &listBg);
+        drawPanel(renderer, listBg, SDL_Color{13, 17, 27, 255}, SDL_Color{38, 50, 76, 255});
 
         for (int row = 0; row < visibleRows; ++row) {
             const int rowGlobal = row + scrollRows;
-            const auto layout = calcRowLayout(areaW, rowGlobal, cols);
+            const auto layout = calcRowLayout(rowGlobal, cols);
             if (layout.items == 0) {
                 continue;
             }
             for (int col = 0; col < layout.items; ++col) {
                 const int idx = layout.startIdx + col;
                 const int x = layout.startX + col * (kCardW + layout.gapX);
-                const int y = kTop + row * (kCardH + kGapY);
+                const int y = kTop + kGridPad + row * (kCardH + kGapY);
                 const bool isSel = idx == selected;
                 const bool isHover = idx == hover;
+                const auto& rom = roms[static_cast<std::size_t>(idx)];
+                const SDL_Color accent = systemAccentColor(rom.system);
 
-                SDL_SetRenderDrawColor(renderer, 38, 44, 62, 255);
                 SDL_Rect card{x, y, kCardW, kCardH};
-                SDL_RenderFillRect(renderer, &card);
-                SDL_SetRenderDrawColor(renderer, isSel ? 118 : (isHover ? 94 : 70), isSel ? 142 : (isHover ? 112 : 84), isSel ? 190 : (isHover ? 150 : 110), 255);
-                SDL_RenderDrawRect(renderer, &card);
+                if (isSel) {
+                    SDL_Rect glow{x - 2, y - 2, kCardW + 4, kCardH + 4};
+                    SDL_SetRenderDrawColor(renderer, accent.r / 4, accent.g / 4, accent.b / 4, 255);
+                    SDL_RenderFillRect(renderer, &glow);
+                }
+                const SDL_Color fill = isSel
+                    ? SDL_Color{34, 42, 62, 255}
+                    : (isHover ? SDL_Color{27, 34, 52, 255} : SDL_Color{20, 25, 39, 255});
+                const SDL_Color border = isSel
+                    ? accent
+                    : (isHover ? SDL_Color{86, 104, 140, 255} : SDL_Color{44, 56, 82, 255});
+                drawPanel(renderer, card, fill, border);
 
-                SDL_SetRenderDrawColor(renderer, 24, 28, 40, 255);
-                SDL_Rect ph{x + 10, y + 10, kCardW - 20, 64};
-                SDL_RenderFillRect(renderer, &ph);
-                SDL_SetRenderDrawColor(renderer, 86, 96, 126, 255);
-                SDL_RenderDrawRect(renderer, &ph);
-#ifdef GBEMU_USE_SDL2_IMAGE
-                if (previewTextures[static_cast<std::size_t>(idx)] == nullptr && !roms[static_cast<std::size_t>(idx)].imagePath.empty()) {
-                    SDL_Surface* surface = loadPreviewSurface(roms[static_cast<std::size_t>(idx)].imagePath);
+                SDL_Rect ph{x + 10, y + 10, kCardW - 20, 112};
+                drawPanel(renderer, ph, SDL_Color{8, 11, 18, 255}, SDL_Color{48, 60, 86, 255});
+                if (previewTextures[static_cast<std::size_t>(idx)] == nullptr && !rom.imagePath.empty()) {
+                    SDL_Surface* surface = loadPreviewSurface(rom.imagePath);
                     if (surface) {
                         previewTextures[static_cast<std::size_t>(idx)] = SDL_CreateTextureFromSurface(renderer, surface);
                         SDL_FreeSurface(surface);
                     }
                 }
-#else
-                if (previewTextures[static_cast<std::size_t>(idx)] == nullptr && !roms[static_cast<std::size_t>(idx)].imagePath.empty()) {
-                    SDL_Surface* surface = loadPreviewSurface(roms[static_cast<std::size_t>(idx)].imagePath);
-                    if (surface) {
-                        previewTextures[static_cast<std::size_t>(idx)] = SDL_CreateTextureFromSurface(renderer, surface);
-                        SDL_FreeSurface(surface);
-                    }
-                }
-#endif
+
                 SDL_Texture* preview = previewTextures[static_cast<std::size_t>(idx)];
                 if (preview) {
                     int tw = 0;
@@ -511,17 +651,44 @@ std::string chooseRomWithSdlDialog() {
                         SDL_RenderCopy(renderer, preview, nullptr, &dst);
                     }
                 } else {
-                    drawHexText(renderer, x + 16, y + 34, "NO IMG", SDL_Color{140, 150, 176, 255}, 1);
+                    drawHexText(renderer, x + 46, y + 60, "NO IMG", SDL_Color{104, 118, 150, 255}, 1);
                 }
 
-                char prefix[16];
-                std::snprintf(prefix, sizeof(prefix), "%03d", idx + 1);
-                drawHexText(renderer, x + 10, y + 82, prefix, SDL_Color{220, 226, 236, 255}, 1);
-                drawHexText(renderer, x + 50, y + 82, roms[static_cast<std::size_t>(idx)].label, SDL_Color{220, 226, 236, 255}, 1);
+                drawBadge(renderer, x + 10, y + 130, rom.system, accent);
+                const std::string label = (isSel ? "> " : "") + rom.label.substr(0, 18);
+                drawHexText(
+                    renderer,
+                    x + 10,
+                    y + 153,
+                    label,
+                    isSel ? SDL_Color{248, 250, 255, 255} : SDL_Color{205, 214, 232, 255},
+                    1
+                );
             }
         }
 
-        drawHexText(renderer, 18, h - 30, "ENTER OPEN  ESC CANCEL", SDL_Color{170, 176, 196, 255}, 1);
+        SDL_Rect footer{0, h - 34, w, 34};
+        SDL_SetRenderDrawColor(renderer, 14, 19, 30, 255);
+        SDL_RenderFillRect(renderer, &footer);
+        SDL_SetRenderDrawColor(renderer, 38, 50, 76, 255);
+        SDL_RenderDrawLine(renderer, 0, h - 34, w, h - 34);
+        drawHexText(renderer, 22, h - 23, "ENTER OPEN  DOUBLE CLICK OPEN  ESC CANCEL", SDL_Color{170, 181, 207, 255}, 1);
+
+        if (totalRows > visibleRows) {
+            const int trackH = areaH - 16;
+            const int trackX = kMargin + areaW - 13;
+            const int trackY = kTop + 8;
+            SDL_Rect track{trackX, trackY, 7, trackH};
+            SDL_SetRenderDrawColor(renderer, 31, 41, 62, 255);
+            SDL_RenderFillRect(renderer, &track);
+            const int thumbH = std::max(24, (trackH * visibleRows) / totalRows);
+            const int maxScroll = std::max(1, totalRows - visibleRows);
+            const int thumbY = trackY + ((trackH - thumbH) * scrollRows) / maxScroll;
+            SDL_Rect thumb{trackX, thumbY, 7, thumbH};
+            SDL_SetRenderDrawColor(renderer, 132, 154, 210, 255);
+            SDL_RenderFillRect(renderer, &thumb);
+        }
+
         SDL_RenderPresent(renderer);
     }
 

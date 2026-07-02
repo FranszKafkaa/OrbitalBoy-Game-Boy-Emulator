@@ -26,6 +26,8 @@ struct AppOptions {
     std::string runLabCommandQueuePath = ".runlab/commands.jsonl";
     bool headless = false;
     bool chooseRom = false;
+    bool fetchCovers = false;
+    bool forceFetchCovers = false;
     bool preciseTiming = false;
     bool runLabControl = false;
     HardwareModePreference hardwareMode = HardwareModePreference::Auto;

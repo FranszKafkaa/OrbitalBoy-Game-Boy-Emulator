@@ -86,6 +86,7 @@ endif()
 add_executable(gbemu
     src/app/main.cpp
     src/app/app_options.cpp
+    src/app/cover_fetcher.cpp
     src/app/headless_runner.cpp
     src/app/rom_suite_runner.cpp
     src/app/runtime_paths.cpp
@@ -123,6 +124,9 @@ if (GBEMU_USE_SDL2)
         endif()
         if (WIN32)
             target_link_libraries(gbemu PRIVATE ole32 windowscodecs)
+        endif()
+        if (APPLE)
+            target_link_libraries(gbemu PRIVATE "-framework CoreFoundation" "-framework CoreGraphics" "-framework ImageIO")
         endif()
         target_compile_definitions(gbemu PRIVATE GBEMU_USE_SDL2=1 SDL_MAIN_HANDLED=1)
         add_custom_command(TARGET gbemu POST_BUILD

@@ -96,6 +96,15 @@ bool parseAppOptions(int argc, char** argv, AppOptions& outOptions, std::string&
             options.chooseRom = true;
             continue;
         }
+        if (arg == "--fetch-covers") {
+            options.fetchCovers = true;
+            continue;
+        }
+        if (arg == "--force-fetch-covers") {
+            options.fetchCovers = true;
+            options.forceFetchCovers = true;
+            continue;
+        }
         if (arg == "--precise-timing") {
             options.preciseTiming = true;
             continue;
