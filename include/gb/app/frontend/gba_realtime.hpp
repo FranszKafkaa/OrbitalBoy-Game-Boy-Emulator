@@ -1,11 +1,27 @@
 #pragma once
 
-#include "gb/core/gba/system.hpp"
+#include <string>
+
+#include "gb/core/gba/libretro_core.hpp"
+#include "gb/core/gba/mgba_core.hpp"
 
 #ifdef GBEMU_USE_SDL2
 namespace gb::frontend {
 
-int runGbaRealtime(gba::System& system, int scale);
+int runGbaLibretroRealtime(
+    gba::LibretroCore& core,
+    int scale,
+    const std::string& statePath,
+    const std::string& batteryRamPath,
+    const std::string& captureDir
+);
+int runGbaMgbaRealtime(
+    gba::MgbaCore& core,
+    int scale,
+    const std::string& statePath,
+    const std::string& batteryRamPath,
+    const std::string& captureDir
+);
 
 } // namespace gb::frontend
 #endif

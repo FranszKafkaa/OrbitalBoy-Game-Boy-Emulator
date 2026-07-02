@@ -114,6 +114,10 @@ private:
 
     int currentSampleA_ = 0;
     int currentSampleB_ = 0;
+    u16 soundCntL_ = 0;
+    u16 soundCntH_ = 0;
+    u16 soundCntX_ = 0;
+    u16 soundBias_ = 0x0200U;
 
     SquareChannel ch1_{};
     SquareChannel ch2_{};

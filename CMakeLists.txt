@@ -22,6 +22,9 @@ endif()
 option(GBEMU_USE_SDL2 "Build with SDL2 real-time frontend when available" ON)
 option(GBEMU_BUILD_MCP "Build read-only OrbitalBoy RunLab MCP stdio adapter" OFF)
 
+find_path(MGBA_INCLUDE_DIR mgba/core/core.h)
+find_library(MGBA_LIBRARY NAMES mgba libmgba)
+
 if (WIN32 AND GBEMU_USE_SDL2)
     set(_gbemu_vcpkg_roots)
     if (DEFINED ENV{VCPKG_ROOT} AND NOT "$ENV{VCPKG_ROOT}" STREQUAL "")
@@ -48,6 +51,8 @@ add_library(gbcore
     src/core/gba/cpu.cpp
     src/core/gba/ppu.cpp
     src/core/gba/apu.cpp
+    src/core/gba/libretro_core.cpp
+    src/core/gba/mgba_core.cpp
     src/core/cartridge.cpp
     src/core/cartridge/mappers/no_mbc.cpp
     src/core/cartridge/mappers/mbc1.cpp
@@ -69,6 +74,14 @@ add_library(gbcore
 )
 
 target_include_directories(gbcore PUBLIC include)
+if (MGBA_INCLUDE_DIR AND MGBA_LIBRARY)
+    target_include_directories(gbcore PRIVATE ${MGBA_INCLUDE_DIR})
+    target_link_libraries(gbcore PUBLIC ${MGBA_LIBRARY})
+    target_compile_definitions(gbcore PUBLIC GBEMU_HAVE_MGBA=1)
+    message(STATUS "mGBA core enabled: ${MGBA_LIBRARY}")
+else()
+    message(STATUS "mGBA core not found; native mGBA backend disabled")
+endif()
 
 add_executable(gbemu
     src/app/main.cpp

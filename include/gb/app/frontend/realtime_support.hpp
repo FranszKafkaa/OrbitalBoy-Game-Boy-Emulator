@@ -59,6 +59,7 @@ const char* linkCableUiName(LinkCableMode mode);
 const char* filterUiName(VideoFilterMode mode);
 
 void applySharpenRgb24(const RgbFrame& in, RgbFrame& out);
+void applySharpenRgb24(const unsigned char* in, unsigned char* out, int width, int height);
 void applyVideoFilterRgb24(VideoFilterMode mode, RgbFrame& pixels);
 
 PopupWindowLayout fullscreenScaleMenuLayout(int outputW, int outputH);

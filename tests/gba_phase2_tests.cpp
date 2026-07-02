@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "gb/core/environment.hpp"
+#include "gb/core/gba/apu.hpp"
 #include "gb/core/gba/cpu.hpp"
 #include "gb/core/gba/memory.hpp"
 #include "gb/core/gba/ppu.hpp"
@@ -1468,6 +1469,38 @@ TEST_CASE("cpu", "gba_memory_fifo_b_uses_timer1_selection") {
 
     T_EQ(memory.audioFifoLevel(1), static_cast<std::size_t>(16U));
     T_EQ(memory.read32(0x040000C8U), 0x02000050U);
+}
+
+TEST_CASE("cpu", "gba_apu_times_direct_sound_control_writes_within_tick") {
+    gb::gba::Memory memory;
+    std::vector<gb::u8> rom(0x200, 0x00);
+    T_REQUIRE(memory.loadRom(rom));
+
+    gb::gba::Apu apu;
+    apu.reset();
+
+    memory.write32(0x040000A0U, 0x7F7F7F7FU);
+    memory.step(512);
+    memory.writeIo16(0x0084U, 0x0080U); // master enable after the first sample slot
+    memory.writeIo16(0x0082U, 0x0304U); // FIFO A full volume, left + right, timer 0
+    memory.writeIo16(0x0100U, 0xFFFEU);
+    memory.writeIo16(0x0102U, 0x0080U);
+    memory.step(2);
+
+    apu.tick(1024, memory);
+    const auto samples = apu.takeSamples();
+    T_REQUIRE(samples.size() >= 4U);
+    T_EQ(samples[0], static_cast<std::int16_t>(0));
+    T_EQ(samples[1], static_cast<std::int16_t>(0));
+
+    bool heardEnabledSegment = false;
+    for (std::size_t i = 2; i + 1U < samples.size(); i += 2U) {
+        if (samples[i] != 0 || samples[i + 1U] != 0) {
+            heardEnabledSegment = true;
+            break;
+        }
+    }
+    T_REQUIRE(heardEnabledSegment);
 }
 
 TEST_CASE("cpu", "gba_memory_access_timing_distinguishes_iwram_ewram_and_rom") {

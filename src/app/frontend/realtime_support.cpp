@@ -31,7 +31,7 @@ const char* scaleModeUiName(FullscreenScaleMode mode) {
     switch (mode) {
     case FullscreenScaleMode::CrispFit: return "CRISP FIT";
     case FullscreenScaleMode::FullStretch: return "FULL STRETCH";
-    default: return "FULL STRETCH SHARP";
+    default: return "UPSCALE SHARP";
     }
 }
 
@@ -53,16 +53,21 @@ const char* filterUiName(VideoFilterMode mode) {
 }
 
 void applySharpenRgb24(const RgbFrame& in, RgbFrame& out) {
-    constexpr int w = gb::PPU::ScreenWidth;
-    constexpr int h = gb::PPU::ScreenHeight;
     out = in;
-    for (int y = 1; y < h - 1; ++y) {
-        for (int x = 1; x < w - 1; ++x) {
-            const int i = (y * w + x) * 3;
-            const int l = (y * w + (x - 1)) * 3;
-            const int r = (y * w + (x + 1)) * 3;
-            const int u = ((y - 1) * w + x) * 3;
-            const int d = ((y + 1) * w + x) * 3;
+    applySharpenRgb24(in.data(), out.data(), gb::PPU::ScreenWidth, gb::PPU::ScreenHeight);
+}
+
+void applySharpenRgb24(const unsigned char* in, unsigned char* out, int width, int height) {
+    if (in == nullptr || out == nullptr || width <= 2 || height <= 2) {
+        return;
+    }
+    for (int y = 1; y < height - 1; ++y) {
+        for (int x = 1; x < width - 1; ++x) {
+            const int i = (y * width + x) * 3;
+            const int l = (y * width + (x - 1)) * 3;
+            const int r = (y * width + (x + 1)) * 3;
+            const int u = ((y - 1) * width + x) * 3;
+            const int d = ((y + 1) * width + x) * 3;
             for (int c = 0; c < 3; ++c) {
                 int v = 5 * static_cast<int>(in[static_cast<std::size_t>(i + c)])
                       - static_cast<int>(in[static_cast<std::size_t>(l + c)])
@@ -172,7 +177,7 @@ void drawFullscreenScaleMenu(SDL_Renderer* renderer, int outputW, int outputH, i
     const std::array<const char*, 3> items{
         "1 CRISP FIT BARRAS",
         "2 FULL STRETCH",
-        "3 FULL STRETCH SHARP",
+        "3 UPSCALE SHARP",
     };
     for (int i = 0; i < static_cast<int>(items.size()); ++i) {
         const bool selected = i == selectedIndex;

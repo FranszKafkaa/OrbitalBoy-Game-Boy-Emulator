@@ -358,6 +358,9 @@ int runRealtime(
     updateWindowTitle(window, gb.cartridge().title(), paused, muted);
 #if SDL_VERSION_ATLEAST(2, 0, 12)
     SDL_SetTextureScaleMode(texture, SDL_ScaleModeNearest);
+    if (sharpTexture) {
+        SDL_SetTextureScaleMode(sharpTexture, SDL_ScaleModeLinear);
+    }
 #endif
     {
         std::lock_guard<std::mutex> gbLock(gbMutex);
@@ -3246,7 +3249,7 @@ int runRealtime(
 #if SDL_VERSION_ATLEAST(2, 0, 12)
         SDL_SetTextureScaleMode(texture, SDL_ScaleModeNearest);
         if (sharpTexture) {
-            SDL_SetTextureScaleMode(sharpTexture, SDL_ScaleModeNearest);
+            SDL_SetTextureScaleMode(sharpTexture, SDL_ScaleModeLinear);
         }
 #endif
         SDL_Texture* renderTexture = texture;

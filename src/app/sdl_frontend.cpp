@@ -59,8 +59,24 @@ int runRealtime(
     );
 }
 
-int runGbaRealtime(gba::System& system, int scale) {
-    return frontend::runGbaRealtime(system, scale);
+int runGbaLibretroRealtime(
+    gba::LibretroCore& core,
+    int scale,
+    const std::string& statePath,
+    const std::string& batteryRamPath,
+    const std::string& captureDir
+) {
+    return frontend::runGbaLibretroRealtime(core, scale, statePath, batteryRamPath, captureDir);
+}
+
+int runGbaMgbaRealtime(
+    gba::MgbaCore& core,
+    int scale,
+    const std::string& statePath,
+    const std::string& batteryRamPath,
+    const std::string& captureDir
+) {
+    return frontend::runGbaMgbaRealtime(core, scale, statePath, batteryRamPath, captureDir);
 }
 #endif
 

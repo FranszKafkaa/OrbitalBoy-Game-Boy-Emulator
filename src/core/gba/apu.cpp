@@ -160,6 +160,10 @@ void Apu::reset() {
     lastTickStats_ = TickStats{};
     currentSampleA_ = 0;
     currentSampleB_ = 0;
+    soundCntL_ = 0;
+    soundCntH_ = 0;
+    soundCntX_ = 0;
+    soundBias_ = 0x0200U;
     ch1_ = Apu::SquareChannel{};
     ch2_ = Apu::SquareChannel{};
     ch3_ = Apu::WaveChannel{};
@@ -608,32 +612,20 @@ void Apu::tick(int cpuCycles, Memory& memory) {
         return;
     }
 
-    const u16 soundCntL = memory.readIo16(kSoundCntL);
-    const u16 soundCntH = memory.readIo16(kSoundCntH);
-    const u16 soundCntX = memory.readIo16(kSoundCntX);
-    const u16 soundBias = memory.readIo16(kSoundBias);
-    const bool masterEnable = (soundCntX & 0x0080U) != 0U;
+    u16 soundCntL = soundCntL_;
+    u16 soundCntH = soundCntH_;
+    u16 soundCntX = soundCntX_;
+    u16 soundBias = soundBias_;
     lastTickStats_ = TickStats{};
-    lastTickStats_.soundCntL = soundCntL;
-    lastTickStats_.soundCntH = soundCntH;
-    lastTickStats_.soundCntX = soundCntX;
-    lastTickStats_.soundBias = soundBias;
-    lastTickStats_.masterEnable = masterEnable;
 
-    const int scaleA = (soundCntH & 0x0004U) ? kFullVolumeScale : kHalfVolumeScale;
-    const bool fifoARight = (soundCntH & 0x0100U) != 0U;
-    const bool fifoALeft = (soundCntH & 0x0200U) != 0U;
-    const int scaleB = (soundCntH & 0x0008U) ? kFullVolumeScale : kHalfVolumeScale;
-    const bool fifoBRight = (soundCntH & 0x1000U) != 0U;
-    const bool fifoBLeft = (soundCntH & 0x2000U) != 0U;
-    const int bias = static_cast<int>(soundBias & kBiasMask);
     const bool disablePsg = gbaAudioDisablePsg();
     const bool disableFifo = gbaAudioDisableFifo();
     const float outputScale = gbaAudioOutputScale();
     const float highPassA = gbaAudioHighPassCoeff();
     const float lowPassA = gbaAudioLowPassCoeff();
 
-    const auto applyBias = [bias](int sample) {
+    const auto applyBias = [](int sample, u16 currentSoundBias) {
+        const int bias = static_cast<int>(currentSoundBias & kBiasMask);
         int biased = sample + bias;
         if (biased < 0) {
             biased = 0;
@@ -655,6 +647,13 @@ void Apu::tick(int cpuCycles, Memory& memory) {
             return;
         }
 
+        const bool masterEnable = (soundCntX & 0x0080U) != 0U;
+        const int scaleA = (soundCntH & 0x0004U) ? kFullVolumeScale : kHalfVolumeScale;
+        const bool fifoARight = (soundCntH & 0x0100U) != 0U;
+        const bool fifoALeft = (soundCntH & 0x0200U) != 0U;
+        const int scaleB = (soundCntH & 0x0008U) ? kFullVolumeScale : kHalfVolumeScale;
+        const bool fifoBRight = (soundCntH & 0x1000U) != 0U;
+        const bool fifoBLeft = (soundCntH & 0x2000U) != 0U;
         const bool psgAnyEnabled = !disablePsg && (ch1_.enabled || ch2_.enabled || ch3_.enabled || ch4_.enabled);
         const bool psgAudible = masterEnable && psgAnyEnabled && (soundCntL & 0xFF00U) != 0U;
 
@@ -684,8 +683,8 @@ void Apu::tick(int cpuCycles, Memory& memory) {
 
             appendRepeatedStereoSamples(
                 sampleBuffer_,
-                filterHardwareDacSample(applyBias(left), highPassA, lowPassA, outputScale, hpPrevInL_, hpPrevOutL_, lpPrevOutL_),
-                filterHardwareDacSample(applyBias(right), highPassA, lowPassA, outputScale, hpPrevInR_, hpPrevOutR_, lpPrevOutR_),
+                filterHardwareDacSample(applyBias(left, soundBias), highPassA, lowPassA, outputScale, hpPrevInL_, hpPrevOutL_, lpPrevOutL_),
+                filterHardwareDacSample(applyBias(right, soundBias), highPassA, lowPassA, outputScale, hpPrevInR_, hpPrevOutR_, lpPrevOutR_),
                 sampleCount);
             return;
         }
@@ -722,7 +721,7 @@ void Apu::tick(int cpuCycles, Memory& memory) {
             }
 
             sampleBuffer_.push_back(filterHardwareDacSample(
-                applyBias(left),
+                applyBias(left, soundBias),
                 highPassA,
                 lowPassA,
                 outputScale,
@@ -730,7 +729,7 @@ void Apu::tick(int cpuCycles, Memory& memory) {
                 hpPrevOutL_,
                 lpPrevOutL_));
             sampleBuffer_.push_back(filterHardwareDacSample(
-                applyBias(right),
+                applyBias(right, soundBias),
                 highPassA,
                 lowPassA,
                 outputScale,
@@ -748,6 +747,32 @@ void Apu::tick(int cpuCycles, Memory& memory) {
     const std::size_t generatedStart = sampleBuffer_.size();
     lastTickStats_.fifoEventCount = static_cast<std::uint32_t>(fifoEvents.size());
     lastTickStats_.regEventCount = static_cast<std::uint32_t>(regEvents.size());
+
+    const auto updateMixerRegister = [&](const Memory::AudioRegisterWriteEvent& event) {
+        const auto update16 = [](u16 current, u32 ioOffset, u8 value, u32 base) {
+            return (ioOffset == base)
+                ? static_cast<u16>((current & 0xFF00U) | value)
+                : static_cast<u16>((current & 0x00FFU) | (static_cast<u16>(value) << 8U));
+        };
+
+        if (event.ioOffset >= kSoundCntL && event.ioOffset < kSoundCntL + 2U) {
+            soundCntL = update16(soundCntL, event.ioOffset, event.value, kSoundCntL);
+            return true;
+        }
+        if (event.ioOffset >= kSoundCntH && event.ioOffset < kSoundCntH + 2U) {
+            soundCntH = update16(soundCntH, event.ioOffset, event.value, kSoundCntH);
+            return true;
+        }
+        if (event.ioOffset >= kSoundCntX && event.ioOffset < kSoundCntX + 2U) {
+            soundCntX = update16(soundCntX, event.ioOffset, event.value, kSoundCntX);
+            return true;
+        }
+        if (event.ioOffset >= kSoundBias && event.ioOffset < kSoundBias + 2U) {
+            soundBias = update16(soundBias, event.ioOffset, event.value, kSoundBias);
+            return true;
+        }
+        return false;
+    };
 
     while (fifoEventIndex < fifoEvents.size() || regEventIndex < regEvents.size()) {
         const std::uint32_t nextFifoOffset = fifoEventIndex < fifoEvents.size()
@@ -768,7 +793,9 @@ void Apu::tick(int cpuCycles, Memory& memory) {
             if (std::min(event.cycleOffset, static_cast<std::uint32_t>(cpuCycles)) != nextOffset) {
                 break;
             }
-            applyAudioRegisterWrite(event);
+            if (!updateMixerRegister(event)) {
+                applyAudioRegisterWrite(event);
+            }
             ++regEventIndex;
         }
 
@@ -802,12 +829,22 @@ void Apu::tick(int cpuCycles, Memory& memory) {
             lastTickStats_.peakRight = right;
         }
     }
+    soundCntL_ = memory.readIo16(kSoundCntL);
+    soundCntH_ = memory.readIo16(kSoundCntH);
+    soundCntX_ = memory.readIo16(kSoundCntX);
+    soundBias_ = memory.readIo16(kSoundBias);
+    lastTickStats_.soundCntL = soundCntL_;
+    lastTickStats_.soundCntH = soundCntH_;
+    lastTickStats_.soundCntX = soundCntX_;
+    lastTickStats_.soundBias = soundBias_;
+    lastTickStats_.masterEnable = (soundCntX_ & 0x0080U) != 0U;
+
     if (gbaAudioStateLoggingEnabled()) {
         static std::uint64_t tickCounter = 0;
         ++tickCounter;
         if ((tickCounter % static_cast<std::uint64_t>(gbaAudioStateLogEvery())) == 0U) {
             std::cerr << "[GBA][AUDIO] tick=" << tickCounter
-                      << " master=" << static_cast<unsigned>(masterEnable)
+                      << " master=" << static_cast<unsigned>(lastTickStats_.masterEnable)
                       << " soundCntL=0x" << std::hex << soundCntL
                       << " soundCntH=0x" << soundCntH
                       << " soundCntX=0x" << soundCntX

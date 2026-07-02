@@ -2,7 +2,8 @@
 
 #include <string>
 
-#include "gb/core/gba/system.hpp"
+#include "gb/core/gba/libretro_core.hpp"
+#include "gb/core/gba/mgba_core.hpp"
 #include "gb/core/gameboy.hpp"
 
 namespace gb {
@@ -34,7 +35,20 @@ int runRealtime(
     const std::string& runLabCommandQueuePath
 );
 
-int runGbaRealtime(gba::System& system, int scale);
+int runGbaLibretroRealtime(
+    gba::LibretroCore& core,
+    int scale,
+    const std::string& statePath,
+    const std::string& batteryRamPath,
+    const std::string& captureDir
+);
+int runGbaMgbaRealtime(
+    gba::MgbaCore& core,
+    int scale,
+    const std::string& statePath,
+    const std::string& batteryRamPath,
+    const std::string& captureDir
+);
 #endif
 
 } // namespace gb

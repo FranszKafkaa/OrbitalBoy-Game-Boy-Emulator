@@ -435,6 +435,7 @@ bool Memory::isSoundFifoAddress(u32 address, int& fifoIndex) {
 
 bool Memory::isAudioRegisterEventOffset(u32 ioOffset) {
     return (ioOffset >= 0x0060U && ioOffset <= 0x007DU)
+        || (ioOffset >= 0x0080U && ioOffset <= 0x0089U)
         || (ioOffset >= 0x0090U && ioOffset <= 0x009FU);
 }
 
