@@ -4,6 +4,7 @@ project(gameboy_emulator_cpp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -21,20 +22,23 @@ endif()
 
 option(GBEMU_USE_SDL2 "Build with SDL2 real-time frontend when available" ON)
 option(GBEMU_BUILD_MCP "Build read-only OrbitalBoy RunLab MCP stdio adapter" OFF)
+option(GBEMU_ENABLE_GBA "Build native mGBA runtime support" ON)
+option(GBEMU_BUILD_EXPERIMENTAL_GBA "Build the in-house experimental GBA core and tests" OFF)
 
-find_path(MGBA_INCLUDE_DIR mgba/core/core.h)
-find_library(MGBA_LIBRARY NAMES mgba libmgba)
+if (GBEMU_ENABLE_GBA)
+    find_path(MGBA_INCLUDE_DIR mgba/core/core.h)
+    find_library(MGBA_LIBRARY NAMES mgba libmgba)
+    if (NOT MGBA_INCLUDE_DIR OR NOT MGBA_LIBRARY)
+        message(FATAL_ERROR
+            "GBEMU_ENABLE_GBA=ON requires native mGBA headers and library. "
+            "Install mGBA or use -DGBEMU_ENABLE_GBA=OFF for a GB/GBC-only build.")
+    endif()
+endif()
 
 set(GBEMU_CORE_SOURCES
     src/core/gameboy.cpp
     src/core/gameboy_state_io.cpp
-    src/core/gba/system.cpp
-    src/core/gba/memory.cpp
-    src/core/gba/cpu.cpp
-    src/core/gba/ppu.cpp
-    src/core/gba/apu.cpp
     src/core/gba/libretro_core.cpp
-    src/core/gba/mgba_core.cpp
     src/core/cartridge.cpp
     src/core/cartridge/mappers/no_mbc.cpp
     src/core/cartridge/mappers/mbc1.cpp
@@ -53,6 +57,14 @@ set(GBEMU_CORE_SOURCES
     src/core/apu.cpp
     src/core/timer.cpp
     src/core/joypad.cpp
+)
+
+set(GBEMU_EXPERIMENTAL_GBA_SOURCES
+    src/core/gba/system.cpp
+    src/core/gba/memory.cpp
+    src/core/gba/cpu.cpp
+    src/core/gba/ppu.cpp
+    src/core/gba/apu.cpp
 )
 
 set(GBEMU_APP_SOURCES
@@ -102,7 +114,6 @@ set(GBEMU_TEST_SOURCES
     tests/bus_tests.cpp
     tests/peripheral_tests.cpp
     tests/state_and_options_tests.cpp
-    tests/gba_phase2_tests.cpp
     tests/frontend_feature_tests.cpp
 )
 
@@ -127,17 +138,25 @@ endif()
 add_library(gbcore ${GBEMU_CORE_SOURCES})
 
 target_include_directories(gbcore PUBLIC include)
-if (MGBA_INCLUDE_DIR AND MGBA_LIBRARY)
-    target_include_directories(gbcore PRIVATE ${MGBA_INCLUDE_DIR})
-    target_link_libraries(gbcore PUBLIC ${MGBA_LIBRARY})
-    target_compile_definitions(gbcore PUBLIC GBEMU_HAVE_MGBA=1)
+
+add_library(gbgba_mgba src/core/gba/mgba_core.cpp)
+target_include_directories(gbgba_mgba PUBLIC include)
+if (GBEMU_ENABLE_GBA)
+    target_include_directories(gbgba_mgba PRIVATE ${MGBA_INCLUDE_DIR})
+    target_link_libraries(gbgba_mgba PUBLIC ${MGBA_LIBRARY})
+    target_compile_definitions(gbgba_mgba PUBLIC GBEMU_HAVE_MGBA=1)
     message(STATUS "mGBA core enabled: ${MGBA_LIBRARY}")
 else()
-    message(STATUS "mGBA core not found; native mGBA backend disabled")
+    message(STATUS "Native mGBA runtime support disabled")
+endif()
+
+if (GBEMU_BUILD_EXPERIMENTAL_GBA)
+    add_library(gbgba_experimental ${GBEMU_EXPERIMENTAL_GBA_SOURCES})
+    target_include_directories(gbgba_experimental PUBLIC include)
 endif()
 
 add_executable(gbemu ${GBEMU_APP_SOURCES})
-target_link_libraries(gbemu PRIVATE gbcore)
+target_link_libraries(gbemu PRIVATE gbcore gbgba_mgba)
 if (WIN32 AND MSVC)
     target_link_options(gbemu PRIVATE /STACK:8388608)
 endif()
@@ -175,10 +194,18 @@ endif()
 
 if (MSVC)
     target_compile_options(gbcore PRIVATE /W4 /EHsc)
+    target_compile_options(gbgba_mgba PRIVATE /W4 /EHsc)
     target_compile_options(gbemu PRIVATE /W4 /EHsc)
+    if (TARGET gbgba_experimental)
+        target_compile_options(gbgba_experimental PRIVATE /W4 /EHsc)
+    endif()
 else()
     target_compile_options(gbcore PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(gbgba_mgba PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(gbemu PRIVATE -Wall -Wextra -Wpedantic)
+    if (TARGET gbgba_experimental)
+        target_compile_options(gbgba_experimental PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
 endif()
 
 include(CTest)
@@ -192,6 +219,11 @@ if (BUILD_TESTING)
         ${GBEMU_TEST_SOURCES}
     )
     target_link_libraries(gbemu_tests PRIVATE gbcore)
+    if (GBEMU_BUILD_EXPERIMENTAL_GBA)
+        target_sources(gbemu_tests PRIVATE tests/gba_phase2_tests.cpp)
+        target_link_libraries(gbemu_tests PRIVATE gbgba_experimental)
+        target_compile_definitions(gbemu_tests PRIVATE GBEMU_BUILD_EXPERIMENTAL_GBA=1)
+    endif()
     if (SDL2_FOUND)
         target_sources(gbemu_tests PRIVATE
             src/app/frontend/debug_ui.cpp

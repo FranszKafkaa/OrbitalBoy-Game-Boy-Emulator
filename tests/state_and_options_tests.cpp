@@ -9,7 +9,9 @@
 #include "gb/app/app_options.hpp"
 #include "gb/app/rom_suite_runner.hpp"
 #include "gb/core/gameboy.hpp"
+#ifdef GBEMU_BUILD_EXPERIMENTAL_GBA
 #include "gb/core/gba/system.hpp"
+#endif
 
 #include "test_framework.hpp"
 #include "test_utils.hpp"
@@ -32,6 +34,7 @@ void loadRomOrThrow(gb::GameBoy& gb, const tests::RomSpec& spec, tests::ScopedPa
     T_REQUIRE(gb.loadRom(romPath.string()));
 }
 
+#ifdef GBEMU_BUILD_EXPERIMENTAL_GBA
 std::vector<gb::u8> buildGbaTestRomImage(const std::string& title, const std::string& gameCode, const std::string& makerCode) {
     std::vector<gb::u8> rom(0x200, 0x00);
     const std::array<gb::u8, 156> logo = {
@@ -75,6 +78,7 @@ std::vector<gb::u8> buildGbaTestRomImage(const std::string& title, const std::st
     rom[0xBD] = static_cast<gb::u8>(0U - static_cast<gb::u8>(0x19U + sum));
     return rom;
 }
+#endif
 
 } // namespace
 
@@ -612,6 +616,7 @@ TEST_CASE("state", "rom_suite_runner_executes_manifest_case") {
     T_EQ(rc, 0);
 }
 
+#ifdef GBEMU_BUILD_EXPERIMENTAL_GBA
 TEST_CASE("state", "gba_rom_parser_reads_metadata_and_checksum") {
     const auto romPath = tests::makeTempPath("gba_parser", ".gba");
     tests::ScopedPath cleanupRom(romPath);
@@ -638,3 +643,4 @@ TEST_CASE("state", "gba_rom_parser_rejects_too_small_file") {
     T_REQUIRE(!gba.loadRomFromFile(romPath.string()));
     T_REQUIRE(!gba.loaded());
 }
+#endif

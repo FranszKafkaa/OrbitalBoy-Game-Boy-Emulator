@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "gb/core/gba/debug.hpp"
-#include "gb/core/gba/system.hpp"
+#include "gb/core/gba/types.hpp"
 #include "gb/core/types.hpp"
 
 namespace gb::gba {

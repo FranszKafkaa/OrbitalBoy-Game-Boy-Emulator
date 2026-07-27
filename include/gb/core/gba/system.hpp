@@ -9,6 +9,7 @@
 #include "gb/core/gba/cpu.hpp"
 #include "gb/core/gba/memory.hpp"
 #include "gb/core/gba/ppu.hpp"
+#include "gb/core/gba/types.hpp"
 #include "gb/core/types.hpp"
 
 namespace gb::gba {
@@ -24,19 +25,6 @@ struct RomMetadata {
     u8 deviceType = 0;
     u8 softwareVersion = 0;
     u8 complementCheck = 0;
-};
-
-struct InputState {
-    bool a = false;
-    bool b = false;
-    bool select = false;
-    bool start = false;
-    bool right = false;
-    bool left = false;
-    bool up = false;
-    bool down = false;
-    bool r = false;
-    bool l = false;
 };
 
 struct CompatibilityProfile {
