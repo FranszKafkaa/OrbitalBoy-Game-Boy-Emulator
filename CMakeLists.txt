@@ -68,11 +68,8 @@ set(GBEMU_EXPERIMENTAL_GBA_SOURCES
 
 set(GBEMU_APP_SOURCES
     src/app/main.cpp
-    src/app/app_options.cpp
     src/app/cover_fetcher.cpp
     src/app/headless_runner.cpp
-    src/app/rom_suite_runner.cpp
-    src/app/runtime_paths.cpp
     src/app/sdl_frontend.cpp
 )
 
@@ -97,16 +94,13 @@ set(GBEMU_REALTIME_SUPPORT_SOURCES
 
 set(GBEMU_SDL_FRONTEND_SOURCES
     src/app/frontend/debug_ui.cpp
-    src/app/frontend/runlab.cpp
-    src/app/frontend/realtime_support.cpp
     src/app/frontend/realtime/audio_ring_buffer.cpp
-    ${GBEMU_REALTIME_SUPPORT_SOURCES}
     src/app/frontend/gba_realtime.cpp
     src/app/frontend/realtime.cpp
     src/app/frontend/rom_selector.cpp
 )
 
-set(GBEMU_TEST_SUPPORT_SOURCES
+set(GBEMU_FRONTEND_SUPPORT_SOURCES
     src/app/app_options.cpp
     src/app/runtime_paths.cpp
     src/app/rom_suite_runner.cpp
@@ -143,6 +137,10 @@ if (WIN32 AND GBEMU_USE_SDL2)
     list(REMOVE_DUPLICATES CMAKE_PREFIX_PATH)
 endif()
 
+if (GBEMU_USE_SDL2)
+    find_package(SDL2 CONFIG QUIET)
+endif()
+
 add_library(gbcore ${GBEMU_CORE_SOURCES})
 
 target_include_directories(gbcore PUBLIC include)
@@ -163,14 +161,21 @@ if (GBEMU_BUILD_EXPERIMENTAL_GBA)
     target_include_directories(gbgba_experimental PUBLIC include)
 endif()
 
+add_library(gbfrontend_support ${GBEMU_FRONTEND_SUPPORT_SOURCES})
+target_include_directories(gbfrontend_support PUBLIC include)
+target_link_libraries(gbfrontend_support PUBLIC gbcore)
+if (SDL2_FOUND)
+    target_link_libraries(gbfrontend_support PUBLIC SDL2::SDL2)
+    target_compile_definitions(gbfrontend_support PUBLIC GBEMU_USE_SDL2=1 SDL_MAIN_HANDLED=1)
+endif()
+
 add_executable(gbemu ${GBEMU_APP_SOURCES})
-target_link_libraries(gbemu PRIVATE gbcore gbgba_mgba)
+target_link_libraries(gbemu PRIVATE gbgba_mgba gbfrontend_support)
 if (WIN32 AND MSVC)
     target_link_options(gbemu PRIVATE /STACK:8388608)
 endif()
 
 if (GBEMU_USE_SDL2)
-    find_package(SDL2 CONFIG QUIET)
     if (SDL2_FOUND)
         target_sources(gbemu PRIVATE ${GBEMU_SDL_FRONTEND_SOURCES})
         target_link_libraries(gbemu PRIVATE SDL2::SDL2)
@@ -203,6 +208,7 @@ endif()
 if (MSVC)
     target_compile_options(gbcore PRIVATE /W4 /EHsc)
     target_compile_options(gbgba_mgba PRIVATE /W4 /EHsc)
+    target_compile_options(gbfrontend_support PRIVATE /W4 /EHsc)
     target_compile_options(gbemu PRIVATE /W4 /EHsc)
     if (TARGET gbgba_experimental)
         target_compile_options(gbgba_experimental PRIVATE /W4 /EHsc)
@@ -210,6 +216,7 @@ if (MSVC)
 else()
     target_compile_options(gbcore PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(gbgba_mgba PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(gbfrontend_support PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(gbemu PRIVATE -Wall -Wextra -Wpedantic)
     if (TARGET gbgba_experimental)
         target_compile_options(gbgba_experimental PRIVATE -Wall -Wextra -Wpedantic)
@@ -223,10 +230,9 @@ endif()
 
 if (BUILD_TESTING)
     add_executable(gbemu_tests
-        ${GBEMU_TEST_SUPPORT_SOURCES}
         ${GBEMU_TEST_SOURCES}
     )
-    target_link_libraries(gbemu_tests PRIVATE gbcore)
+    target_link_libraries(gbemu_tests PRIVATE gbfrontend_support)
     if (GBEMU_BUILD_EXPERIMENTAL_GBA)
         target_sources(gbemu_tests PRIVATE tests/gba_phase2_tests.cpp)
         target_link_libraries(gbemu_tests PRIVATE gbgba_experimental)
@@ -246,20 +252,4 @@ if (BUILD_TESTING)
         target_compile_options(gbemu_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME gbemu_tests COMMAND gbemu_tests)
-
-    set(GBEMU_TEST_SUITES
-        apu
-        bus
-        cartridge
-        cpu
-        joypad
-        options
-        ppu
-        state
-        timer
-    )
-    foreach(suite IN LISTS GBEMU_TEST_SUITES)
-        add_test(NAME gbemu_suite_${suite} COMMAND gbemu_tests --suite ${suite})
-        set_tests_properties(gbemu_suite_${suite} PROPERTIES LABELS "suite;${suite}")
-    endforeach()
 endif()

@@ -52,6 +52,7 @@ configure_case(
     -DBUILD_TESTING=OFF
 )
 assert_target("${gb_only_BUILD_DIR}" gbemu TRUE)
+assert_target("${gb_only_BUILD_DIR}" gbfrontend_support TRUE)
 assert_target("${gb_only_BUILD_DIR}" gbgba_experimental FALSE)
 
 configure_case(
