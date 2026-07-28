@@ -425,35 +425,8 @@ int runRealtimeFlow(gb::AppOptions& options) {
             return 1;
         }
 
-        const std::string batteryPath = gb::batteryRamPathForRom(options.romPath);
-        const std::string controlsPath = gb::controlsPathForRom(options.romPath);
-        const std::string cheatsPath = gb::cheatsPathForRom(options.romPath);
-        const std::string palettePath = gb::palettePathForRom(options.romPath);
-        const std::string rtcPath = gb::rtcPathForRom(options.romPath);
-        const std::string filtersPath = gb::filtersPathForRom(options.romPath);
-        const std::string captureDir = gb::captureDirForRom(options.romPath);
-        const int rc = gb::runRealtime(
-            gb,
-            options.scale,
-            options.audioBuffer,
-            gb::statePathForRom(options.romPath),
-            gb::legacyStatePathForRom(options.romPath),
-            batteryPath,
-            controlsPath,
-            cheatsPath,
-            palettePath,
-            rtcPath,
-            filtersPath,
-            captureDir,
-            options.linkConnect,
-            options.linkHostPort,
-            options.netplayConnect,
-            options.netplayHostPort,
-            options.netplayDelayFrames,
-            options.runLabControl,
-            options.runLabStatePath,
-            options.runLabCommandQueuePath
-        );
+        const auto realtimeOptions = gb::frontend::makeRealtimeOptions(options);
+        const int rc = gb::runRealtime(gb, realtimeOptions);
 
         if (rc == 2) {
             if (!openRomSelector(options)) {

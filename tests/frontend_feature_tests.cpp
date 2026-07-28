@@ -13,6 +13,7 @@
 #include "gb/app/frontend/realtime/save_slots.hpp"
 #include "gb/app/frontend/realtime/timing_policy.hpp"
 #include "gb/app/frontend/realtime/top_menu.hpp"
+#include "gb/app/frontend/realtime_options.hpp"
 #include "gb/app/frontend/realtime_support.hpp"
 #include "gb/app/frontend/runlab.hpp"
 #include "gb/core/gameboy.hpp"
@@ -108,6 +109,43 @@ TEST_CASE("frontend", "cheat_apply_writes_to_bus") {
 TEST_CASE("frontend", "pack_buttons_bit_layout") {
     const auto mask = gb::frontend::packButtons(true, false, true, false, true, false, true, false);
     T_EQ(mask, static_cast<std::uint8_t>(0x55));
+}
+
+TEST_CASE("frontend", "realtime_options_map_paths_and_network_fields") {
+    gb::AppOptions app{};
+    app.romPath = "/roms/known-game.gb";
+    app.scale = 5;
+    app.audioBuffer = 2048;
+    app.linkConnect = "link.example:7001";
+    app.linkHostPort = 7002;
+    app.netplayConnect = "net.example:8001";
+    app.netplayHostPort = 8002;
+    app.netplayDelayFrames = 4;
+    app.runLabControl = true;
+    app.runLabStatePath = "/runlab/state.json";
+    app.runLabCommandQueuePath = "/runlab/commands.jsonl";
+
+    const auto options = gb::frontend::makeRealtimeOptions(app);
+
+    T_EQ(options.scale, 5);
+    T_EQ(options.audioBufferSamples, 2048);
+    T_EQ(std::filesystem::path(options.paths.state).filename().string(), std::string("known-game.state"));
+    T_EQ(options.paths.legacyState, std::string("/roms/known-game.state"));
+    T_EQ(std::filesystem::path(options.paths.batteryRam).filename().string(), std::string("known-game.sav"));
+    T_EQ(std::filesystem::path(options.paths.controls).filename().string(), std::string("known-game.controls"));
+    T_EQ(std::filesystem::path(options.paths.cheats).filename().string(), std::string("known-game.cheats"));
+    T_EQ(std::filesystem::path(options.paths.palette).filename().string(), std::string("known-game.palette"));
+    T_EQ(std::filesystem::path(options.paths.rtc).filename().string(), std::string("known-game.rtc"));
+    T_EQ(std::filesystem::path(options.paths.filters).filename().string(), std::string("known-game.filters"));
+    T_EQ(std::filesystem::path(options.paths.captureDirectory).filename().string(), std::string("known-game"));
+    T_EQ(options.network.linkConnect, std::string("link.example:7001"));
+    T_EQ(options.network.linkHostPort, 7002);
+    T_EQ(options.network.netplayConnect, std::string("net.example:8001"));
+    T_EQ(options.network.netplayHostPort, 8002);
+    T_EQ(options.network.netplayDelayFrames, 4);
+    T_REQUIRE(options.runLab.enabled);
+    T_EQ(options.runLab.statePath, std::string("/runlab/state.json"));
+    T_EQ(options.runLab.commandQueuePath, std::string("/runlab/commands.jsonl"));
 }
 
 #ifdef GBEMU_USE_SDL2

@@ -2,6 +2,7 @@
 
 #include <string>
 
+#include "gb/app/frontend/realtime_options.hpp"
 #include "gb/core/gba/mgba_core.hpp"
 #include "gb/core/gameboy.hpp"
 
@@ -12,25 +13,7 @@ std::string chooseRomWithSdlDialog();
 
 int runRealtime(
     GameBoy& gb,
-    int scale,
-    int audioBuffer,
-    const std::string& statePath,
-    const std::string& legacyStatePath,
-    const std::string& batteryRamPath,
-    const std::string& controlsPath,
-    const std::string& cheatsPath,
-    const std::string& palettePath,
-    const std::string& rtcPath,
-    const std::string& filtersPath,
-    const std::string& captureDir,
-    const std::string& linkConnect,
-    int linkHostPort,
-    const std::string& netplayConnect,
-    int netplayHostPort,
-    int netplayDelayFrames,
-    bool runLabControl,
-    const std::string& runLabStatePath,
-    const std::string& runLabCommandQueuePath
+    const frontend::RealtimeOptions& options
 );
 
 int runGbaRealtime(

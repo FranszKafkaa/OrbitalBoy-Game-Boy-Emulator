@@ -45,26 +45,28 @@ namespace gb::frontend {
 #ifdef GBEMU_USE_SDL2
 int runRealtime(
     gb::GameBoy& gb,
-    int scale,
-    int audioBuffer,
-    const std::string& statePath,
-    const std::string& legacyStatePath,
-    const std::string& batteryRamPath,
-    const std::string& controlsPath,
-    const std::string& cheatsPath,
-    const std::string& palettePath,
-    const std::string& rtcPath,
-    const std::string& filtersPath,
-    const std::string& captureDir,
-    const std::string& linkConnect,
-    int linkHostPort,
-    const std::string& netplayConnect,
-    int netplayHostPort,
-    int netplayDelayFrames,
-    bool runLabControl,
-    const std::string& runLabStatePath,
-    const std::string& runLabCommandQueuePath
+    const RealtimeOptions& options
 ) {
+    const int scale = options.scale;
+    const int audioBuffer = options.audioBufferSamples;
+    const std::string& statePath = options.paths.state;
+    const std::string& legacyStatePath = options.paths.legacyState;
+    const std::string& batteryRamPath = options.paths.batteryRam;
+    const std::string& controlsPath = options.paths.controls;
+    const std::string& cheatsPath = options.paths.cheats;
+    const std::string& palettePath = options.paths.palette;
+    const std::string& rtcPath = options.paths.rtc;
+    const std::string& filtersPath = options.paths.filters;
+    const std::string& captureDir = options.paths.captureDirectory;
+    const std::string& linkConnect = options.network.linkConnect;
+    const int linkHostPort = options.network.linkHostPort;
+    const std::string& netplayConnect = options.network.netplayConnect;
+    const int netplayHostPort = options.network.netplayHostPort;
+    const int netplayDelayFrames = options.network.netplayDelayFrames;
+    const bool runLabControl = options.runLab.enabled;
+    const std::string& runLabStatePath = options.runLab.statePath;
+    const std::string& runLabCommandQueuePath = options.runLab.commandQueuePath;
+
     SDL_SetHint(SDL_HINT_RENDER_VSYNC, "1");
     SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {

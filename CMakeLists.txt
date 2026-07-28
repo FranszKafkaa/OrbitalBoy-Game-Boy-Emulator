@@ -77,6 +77,7 @@ set(GBEMU_APP_SOURCES
 )
 
 set(GBEMU_REALTIME_SUPPORT_SOURCES
+    src/app/frontend/realtime_options.cpp
     src/app/frontend/realtime/frame_timeline.cpp
     src/app/frontend/realtime/save_slots.cpp
     src/app/frontend/realtime/cheat_engine.cpp
@@ -100,6 +101,7 @@ set(GBEMU_SDL_FRONTEND_SOURCES
 
 set(GBEMU_TEST_SUPPORT_SOURCES
     src/app/app_options.cpp
+    src/app/runtime_paths.cpp
     src/app/rom_suite_runner.cpp
     src/app/frontend/runlab.cpp
     ${GBEMU_REALTIME_SUPPORT_SOURCES}
