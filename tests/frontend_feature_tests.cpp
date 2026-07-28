@@ -1,12 +1,15 @@
+#include <atomic>
 #include <filesystem>
 #include <deque>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "gb/app/frontend/realtime/cheat_engine.hpp"
 #include "gb/app/frontend/realtime/control_bindings.hpp"
 #include "gb/app/frontend/realtime/debug_session.hpp"
+#include "gb/app/frontend/realtime/emulation_worker.hpp"
 #include "gb/app/frontend/realtime/frame_timeline.hpp"
 #include "gb/app/frontend/realtime/link_transport.hpp"
 #include "gb/app/frontend/realtime/network_config.hpp"
@@ -245,6 +248,34 @@ TEST_CASE("frontend", "debug_session_owns_breakpoints_and_validates_queued_write
     T_EQ(write->address, static_cast<gb::u16>(0xC000));
     T_EQ(write->value, static_cast<gb::u8>(0x3A));
     T_REQUIRE(!session.takeQueuedWrite().has_value());
+}
+
+TEST_CASE("frontend", "emulation_worker_stop_is_idempotent_and_joins_all_threads") {
+    std::atomic<bool> running{true};
+    std::atomic<int> completed{0};
+    int stopCalls = 0;
+    gb::frontend::EmulationWorker workers([&]() {
+        ++stopCalls;
+        running.store(false);
+    });
+    workers.start([&]() {
+        while (running.load()) {
+            std::this_thread::yield();
+        }
+        completed.fetch_add(1);
+    });
+    workers.start([&]() {
+        while (running.load()) {
+            std::this_thread::yield();
+        }
+        completed.fetch_add(1);
+    });
+
+    workers.stop();
+    workers.stop();
+    T_EQ(stopCalls, 1);
+    T_EQ(completed.load(), 2);
+    T_REQUIRE(!workers.running());
 }
 
 #ifdef GBEMU_USE_SDL2

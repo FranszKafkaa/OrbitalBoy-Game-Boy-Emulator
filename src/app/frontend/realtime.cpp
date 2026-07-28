@@ -23,12 +23,15 @@
 #include "gb/app/frontend/debug_ui.hpp"
 #include "gb/app/frontend/realtime/audio_ring_buffer.hpp"
 #include "gb/app/frontend/realtime/dropping_queue.hpp"
+#include "gb/app/frontend/realtime/emulation_worker.hpp"
 #include "gb/app/frontend/realtime/frame_timeline.hpp"
 #include "gb/app/frontend/realtime/link_transport.hpp"
 #include "gb/app/frontend/realtime/network_config.hpp"
 #include "gb/app/frontend/realtime/netplay_session.hpp"
+#include "gb/app/frontend/realtime/realtime_session.hpp"
 #include "gb/app/frontend/realtime/runlab_control_queue.hpp"
 #include "gb/app/frontend/realtime/runlab_session.hpp"
+#include "gb/app/frontend/realtime/sdl_session_view.hpp"
 #include "gb/app/frontend/realtime/session_models.hpp"
 #include "gb/app/frontend/realtime/session_persistence.hpp"
 #include "gb/app/frontend/realtime/save_slots.hpp"
@@ -44,10 +47,9 @@
 namespace gb::frontend {
 
 #ifdef GBEMU_USE_SDL2
-int runRealtime(
-    gb::GameBoy& gb,
-    const RealtimeOptions& options
-) {
+int RealtimeSession::run() {
+    gb::GameBoy& gb = gameBoy_;
+    const RealtimeOptions& options = options_;
     const int scale = options.scale;
     const int audioBuffer = options.audioBufferSamples;
     const std::string& statePath = options.paths.state;
@@ -71,6 +73,8 @@ int runRealtime(
         std::cerr << "erro SDL_Init: " << SDL_GetError() << "\n";
         return 1;
     }
+    SdlSessionView sessionView;
+    sessionView.markSdlInitialized();
 
     const int width = gb::PPU::ScreenWidth;
     const int height = gb::PPU::ScreenHeight;
@@ -90,9 +94,9 @@ int runRealtime(
     );
     if (!window) {
         std::cerr << "erro SDL_CreateWindow: " << SDL_GetError() << "\n";
-        SDL_Quit();
         return 1;
     }
+    sessionView.ownWindow(window);
     SDL_SetWindowMinimumSize(window, width, height);
 
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
@@ -101,10 +105,9 @@ int runRealtime(
     }
     if (!renderer) {
         std::cerr << "erro SDL_CreateRenderer: " << SDL_GetError() << "\n";
-        SDL_DestroyWindow(window);
-        SDL_Quit();
         return 1;
     }
+    sessionView.ownRenderer(renderer);
 #if SDL_VERSION_ATLEAST(2, 0, 18)
     if (SDL_RenderSetVSync(renderer, 1) != 0) {
         std::cerr << "aviso: nao foi possivel forcar vsync: " << SDL_GetError() << "\n";
@@ -120,12 +123,11 @@ int runRealtime(
     SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING, width, height);
     if (!texture) {
         std::cerr << "erro SDL_CreateTexture: " << SDL_GetError() << "\n";
-        SDL_DestroyRenderer(renderer);
-        SDL_DestroyWindow(window);
-        SDL_Quit();
         return 1;
     }
+    sessionView.ownTexture(texture);
     SDL_Texture* sharpTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING, width, height);
+    sessionView.ownSharpTexture(sharpTexture);
 
     SDL_AudioSpec want{};
     want.freq = gb::APU::SampleRate;
@@ -136,6 +138,7 @@ int runRealtime(
 
     SDL_AudioSpec have{};
     SDL_AudioDeviceID audioDev = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+    sessionView.ownAudioDevice(audioDev);
     const bool audioEnabled = audioDev != 0;
     if (!audioEnabled) {
         std::cerr << "aviso: audio SDL indisponivel: " << SDL_GetError() << "\n";
@@ -151,6 +154,7 @@ int runRealtime(
         }
         gamepad = SDL_GameControllerOpen(i);
         if (gamepad) {
+            sessionView.ownGameController(gamepad);
             break;
         }
     }
@@ -988,7 +992,14 @@ int runRealtime(
 
     std::cout << "[MT] iniciando workers (emu/render/audio)\n";
 
-    std::thread renderThread([&]() {
+    EmulationWorker workers([&]() {
+        mtRunning.store(false, std::memory_order_relaxed);
+        rawFrameQueue.close();
+        rgbFrameQueue.close();
+        audioRing.close();
+    });
+
+    workers.start([&]() {
         std::cout << "[MT][REN] worker iniciado\n";
         std::size_t processed = 0;
         auto raw = std::make_unique<RawFramePacket>();
@@ -1039,9 +1050,8 @@ int runRealtime(
                   << " dropOut=" << rgbFrameQueue.droppedCount() << "\n";
     });
 
-    std::thread audioThread{};
     if (audioEnabled) {
-        audioThread = std::thread([&]() {
+        workers.start([&]() {
             std::cout << "[MT][AUD] worker iniciado\n";
             std::array<int16_t, 4096> chunk{};
             std::size_t underruns = 0;
@@ -1077,7 +1087,7 @@ int runRealtime(
         });
     }
 
-    std::thread emuThread([&]() {
+    workers.start([&]() {
         std::cout << "[MT][EMU] worker iniciado\n";
         std::mt19937 emuRng(std::random_device{}());
         std::uniform_int_distribution<int> emuRandByte(0, 255);
@@ -2020,12 +2030,13 @@ int runRealtime(
             if (ev.type == SDL_CONTROLLERDEVICEADDED && !gamepad) {
                 if (SDL_IsGameController(ev.cdevice.which)) {
                     gamepad = SDL_GameControllerOpen(ev.cdevice.which);
+                    sessionView.ownGameController(gamepad);
                 }
             }
             if (ev.type == SDL_CONTROLLERDEVICEREMOVED && gamepad) {
                 const SDL_JoystickID id = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gamepad));
                 if (id == ev.cdevice.which) {
-                    SDL_GameControllerClose(gamepad);
+                    sessionView.closeGameController();
                     gamepad = nullptr;
                 }
             }
@@ -3264,35 +3275,13 @@ int runRealtime(
 
     }
 
-    mtRunning.store(false, std::memory_order_relaxed);
     pausedAtomic.store(true, std::memory_order_relaxed);
     audioGateAtomic.store(false, std::memory_order_relaxed);
-    rawFrameQueue.close();
-    rgbFrameQueue.close();
-    audioRing.close();
-    if (emuThread.joinable()) {
-        emuThread.join();
-    }
-    if (renderThread.joinable()) {
-        renderThread.join();
-    }
-    if (audioThread.joinable()) {
-        audioThread.join();
-    }
+    workers.stop();
     std::cout << "[MT] workers encerrados\n";
 
-    SDL_DestroyTexture(texture);
-    if (sharpTexture) {
-        SDL_DestroyTexture(sharpTexture);
-    }
     SDL_StopTextInput();
-    if (audioEnabled) {
-        SDL_ClearQueuedAudio(audioDev);
-        SDL_CloseAudioDevice(audioDev);
-    }
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
-    SDL_Quit();
+    sessionView.reset();
 
     if (gb.saveBatteryRamToFile(batteryRamPath)) {
         std::cout << "save interno gravado: " << batteryRamPath << "\n";
@@ -3305,6 +3294,11 @@ int runRealtime(
     (void)persistNetworkConfig();
 
     return backToMenu ? 2 : 0;
+}
+
+int runRealtime(gb::GameBoy& gb, const RealtimeOptions& options) {
+    RealtimeSession session(gb, options);
+    return session.run();
 }
 #endif
 
