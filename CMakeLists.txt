@@ -90,6 +90,7 @@ set(GBEMU_REALTIME_SUPPORT_SOURCES
     src/app/frontend/realtime/link_transport.cpp
     src/app/frontend/realtime/network_config.cpp
     src/app/frontend/realtime/top_menu.cpp
+    src/app/frontend/realtime/ui_message_queue.cpp
 )
 
 set(GBEMU_SDL_FRONTEND_SOURCES
@@ -233,11 +234,6 @@ if (BUILD_TESTING)
         ${GBEMU_TEST_SOURCES}
     )
     target_link_libraries(gbemu_tests PRIVATE gbfrontend_support)
-    if (GBEMU_BUILD_EXPERIMENTAL_GBA)
-        target_sources(gbemu_tests PRIVATE tests/gba_phase2_tests.cpp)
-        target_link_libraries(gbemu_tests PRIVATE gbgba_experimental)
-        target_compile_definitions(gbemu_tests PRIVATE GBEMU_BUILD_EXPERIMENTAL_GBA=1)
-    endif()
     if (SDL2_FOUND)
         target_sources(gbemu_tests PRIVATE
             src/app/frontend/debug_ui.cpp
@@ -252,4 +248,19 @@ if (BUILD_TESTING)
         target_compile_options(gbemu_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME gbemu_tests COMMAND gbemu_tests)
+
+    if (GBEMU_BUILD_EXPERIMENTAL_GBA)
+        add_executable(gbgba_experimental_tests
+            tests/test_main.cpp
+            tests/gba_phase2_tests.cpp
+        )
+        target_link_libraries(gbgba_experimental_tests PRIVATE gbgba_experimental)
+        if (MSVC)
+            target_compile_options(gbgba_experimental_tests PRIVATE /W4 /EHsc)
+        else()
+            target_compile_options(gbgba_experimental_tests PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+        add_test(NAME gbgba_experimental_tests COMMAND gbgba_experimental_tests)
+        set_tests_properties(gbgba_experimental_tests PROPERTIES LABELS "experimental;gba")
+    endif()
 endif()

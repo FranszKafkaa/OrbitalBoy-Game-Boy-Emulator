@@ -20,6 +20,7 @@
 #include "gb/app/frontend/realtime/session_persistence.hpp"
 #include "gb/app/frontend/realtime/timing_policy.hpp"
 #include "gb/app/frontend/realtime/top_menu.hpp"
+#include "gb/app/frontend/realtime/ui_message_queue.hpp"
 #include "gb/app/frontend/realtime_options.hpp"
 #include "gb/app/frontend/realtime_support.hpp"
 #include "gb/app/frontend/runlab.hpp"
@@ -276,6 +277,61 @@ TEST_CASE("frontend", "emulation_worker_stop_is_idempotent_and_joins_all_threads
     T_EQ(stopCalls, 1);
     T_EQ(completed.load(), 2);
     T_REQUIRE(!workers.running());
+}
+
+TEST_CASE("frontend", "worker_ui_messages_cross_threads_without_shared_string_access") {
+    gb::frontend::UiMessageQueue messages;
+    std::thread producer([&]() {
+        messages.post("NETPLAY ROLLBACK", 90);
+    });
+    producer.join();
+
+    const auto message = messages.takeLatest();
+    T_REQUIRE(message.has_value());
+    T_EQ(message->text, std::string("NETPLAY ROLLBACK"));
+    T_EQ(message->frames, 90);
+    T_REQUIRE(!messages.takeLatest().has_value());
+}
+
+TEST_CASE("frontend", "netplay_consecutive_rollbacks_refresh_intermediate_pre_state") {
+    gb::GameBoy gameBoy;
+    tests::ScopedPath cleanup;
+    loadBlankRom(gameBoy, cleanup);
+
+    gb::frontend::NetplaySession session(0, 4);
+    gameBoy.bus().write(0xC000, 1);
+    gb::frontend::NetplayFrameRecord first{};
+    first.frame = 10;
+    first.preState = gameBoy.saveState();
+    first.predicted = true;
+    session.recordFrame(std::move(first));
+
+    gameBoy.bus().write(0xC000, 50);
+    gb::frontend::NetplayFrameRecord second{};
+    second.frame = 11;
+    second.preState = gameBoy.saveState();
+    second.predicted = true;
+    session.recordFrame(std::move(second));
+
+    (void)session.acceptAuthoritativeInput(10, 0x01);
+    T_REQUIRE(session.resimulateFrom(
+        10,
+        gameBoy,
+        [](std::uint8_t) {},
+        [&]() { gameBoy.bus().write(0xC000, static_cast<gb::u8>(gameBoy.bus().peek(0xC000) + 1)); },
+        [](std::uint64_t) {}
+    ));
+
+    gameBoy.bus().write(0xC000, 99);
+    (void)session.acceptAuthoritativeInput(11, 0x02);
+    T_REQUIRE(session.resimulateFrom(
+        11,
+        gameBoy,
+        [](std::uint8_t) {},
+        [&]() { gameBoy.bus().write(0xC000, static_cast<gb::u8>(gameBoy.bus().peek(0xC000) + 1)); },
+        [](std::uint64_t) {}
+    ));
+    T_EQ(gameBoy.bus().peek(0xC000), static_cast<gb::u8>(3));
 }
 
 #ifdef GBEMU_USE_SDL2

@@ -38,7 +38,7 @@ CMake configuration must fail with an actionable message when GBA support is req
 The build options will be:
 
 - `GBEMU_ENABLE_GBA=ON`: enables native mGBA runtime support.
-- `GBEMU_BUILD_EXPERIMENTAL_GBA=OFF`: builds the in-house experimental GBA core and its tests.
+- `GBEMU_BUILD_EXPERIMENTAL_GBA=ON`: builds the in-house experimental GBA core and its tests.
 
 ### Experimental In-House GBA Core
 

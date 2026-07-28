@@ -37,6 +37,7 @@
 #include "gb/app/frontend/realtime/save_slots.hpp"
 #include "gb/app/frontend/realtime/timing_policy.hpp"
 #include "gb/app/frontend/realtime/top_menu.hpp"
+#include "gb/app/frontend/realtime/ui_message_queue.hpp"
 #include "gb/app/frontend/realtime.hpp"
 #include "gb/app/frontend/realtime_support.hpp"
 
@@ -287,6 +288,7 @@ int RealtimeSession::run() {
     std::atomic<std::uint64_t> emulatedFrameCounter{0};
     std::string uiMessage;
     int uiMessageFrames = 0;
+    UiMessageQueue workerUiMessages;
     if (runLabControlStartupMessage) {
         uiMessage = "RUNLAB MCP CONTROL ON";
         uiMessageFrames = 180;
@@ -1117,8 +1119,7 @@ int RealtimeSession::run() {
                 pendingMcpStepFrames.fetch_add(tick.stepFrames, std::memory_order_relaxed);
             }
             if (tick.consumedCommand && !tick.message.empty()) {
-                uiMessage = tick.message;
-                uiMessageFrames = 45;
+                workerUiMessages.post(tick.message, 45);
             }
         };
 
@@ -1281,8 +1282,7 @@ int RealtimeSession::run() {
                                     pendingPauseAddr.store(gb.cpu().regs().pc, std::memory_order_relaxed);
                                     pendingPauseReason.store(3, std::memory_order_relaxed);
                                     forceTitleRefresh.store(true, std::memory_order_relaxed);
-                                    uiMessage = "NETPLAY DESYNC";
-                                    uiMessageFrames = 180;
+                                    workerUiMessages.post("NETPLAY DESYNC", 180);
                                 }
                             }
                         }
@@ -1296,43 +1296,30 @@ int RealtimeSession::run() {
                         }
 
                         if (rollbackFrom.has_value()) {
-                            auto& netplayHistory = netplaySession.history();
-                            std::size_t startIndex = 0;
-                            bool foundStart = false;
-                            for (std::size_t idx = 0; idx < netplayHistory.size(); ++idx) {
-                                if (netplayHistory[idx].frame == rollbackFrom.value()) {
-                                    startIndex = idx;
-                                    foundStart = true;
-                                    break;
-                                }
-                            }
-                            if (foundStart) {
-                                gb.loadState(netplayHistory[startIndex].preState);
-                                for (std::size_t idx = startIndex; idx < netplayHistory.size(); ++idx) {
-                                    auto& rec = netplayHistory[idx];
-                                    const auto& authoritativeInputs = netplaySession.authoritativeInputs();
-                                    const auto it = authoritativeInputs.find(rec.frame);
-                                    if (it != authoritativeInputs.end()) {
-                                        rec.remoteInput = it->second;
-                                        rec.predicted = false;
-                                    }
-                                    applyJoypadMask(gb.joypad(), static_cast<std::uint8_t>(rec.localInput | rec.remoteInput));
-                                    runOneFrameLocked();
+                            const bool rolledBack = netplaySession.resimulateFrom(
+                                *rollbackFrom,
+                                gb,
+                                [&](std::uint8_t input) {
+                                    applyJoypadMask(gb.joypad(), input);
+                                },
+                                runOneFrameLocked,
+                                [&](std::uint64_t frame) {
                                     if (cheatsEnabledAtomic.load(std::memory_order_relaxed) && !cheats.empty()) {
                                         applyCheats(cheats, gb.bus());
                                     }
                                     const std::uint32_t replayChecksum = frameChecksum(gb);
-                                    netplaySession.recordChecksum(rec.frame, replayChecksum);
-                                    (void)netplayTransport.sendNetplayChecksum(rec.frame, replayChecksum);
+                                    netplaySession.recordChecksum(frame, replayChecksum);
+                                    (void)netplayTransport.sendNetplayChecksum(frame, replayChecksum);
                                 }
+                            );
+                            if (rolledBack) {
                                 (void)gb.apu().takeSamples();
                                 audioRing.clear();
                                 if (audioEnabled) {
                                     SDL_ClearQueuedAudio(audioDev);
                                 }
                                 netplaySession.noteRollback();
-                                uiMessage = "NETPLAY ROLLBACK";
-                                uiMessageFrames = 90;
+                                workerUiMessages.post("NETPLAY ROLLBACK", 90);
                             }
                         }
                     }
@@ -1981,6 +1968,10 @@ int RealtimeSession::run() {
     };
 
     while (running) {
+        if (const auto workerMessage = workerUiMessages.takeLatest(); workerMessage.has_value()) {
+            uiMessage = workerMessage->text;
+            uiMessageFrames = workerMessage->frames;
+        }
         if (paused != pausedAtomic.load(std::memory_order_relaxed)) {
             paused = pausedAtomic.load(std::memory_order_relaxed);
             if (paused) {

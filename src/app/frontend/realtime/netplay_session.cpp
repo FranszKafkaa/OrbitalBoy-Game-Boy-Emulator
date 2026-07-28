@@ -62,6 +62,39 @@ std::optional<std::uint8_t> NetplaySession::takeAuthoritativeInput(std::uint64_t
     return input;
 }
 
+bool NetplaySession::resimulateFrom(
+    std::uint64_t frame,
+    gb::GameBoy& gameBoy,
+    const std::function<void(std::uint8_t)>& applyInput,
+    const std::function<void()>& runFrame,
+    const std::function<void(std::uint64_t)>& afterFrame
+) {
+    auto start = history_.end();
+    for (auto it = history_.begin(); it != history_.end(); ++it) {
+        if (it->frame == frame) {
+            start = it;
+            break;
+        }
+    }
+    if (start == history_.end()) {
+        return false;
+    }
+
+    gameBoy.loadState(start->preState);
+    for (auto it = start; it != history_.end(); ++it) {
+        it->preState = gameBoy.saveState();
+        const auto authoritative = authoritativeInputs_.find(it->frame);
+        if (authoritative != authoritativeInputs_.end()) {
+            it->remoteInput = authoritative->second;
+            it->predicted = false;
+        }
+        applyInput(static_cast<std::uint8_t>(it->localInput | it->remoteInput));
+        runFrame();
+        afterFrame(it->frame);
+    }
+    return true;
+}
+
 void NetplaySession::recordChecksum(std::uint64_t frame, std::uint32_t checksumValue) {
     checksums_[frame] = checksumValue;
     trimChecksums();

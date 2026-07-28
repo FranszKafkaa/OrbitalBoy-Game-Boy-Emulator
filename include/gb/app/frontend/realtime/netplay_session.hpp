@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <optional>
 #include <unordered_map>
 
@@ -29,6 +30,13 @@ public:
         std::uint8_t input
     );
     std::optional<std::uint8_t> takeAuthoritativeInput(std::uint64_t frame);
+    bool resimulateFrom(
+        std::uint64_t frame,
+        gb::GameBoy& gameBoy,
+        const std::function<void(std::uint8_t)>& applyInput,
+        const std::function<void()>& runFrame,
+        const std::function<void(std::uint64_t)>& afterFrame
+    );
 
     void recordChecksum(std::uint64_t frame, std::uint32_t checksum);
     [[nodiscard]] std::optional<std::uint32_t> checksum(std::uint64_t frame) const;

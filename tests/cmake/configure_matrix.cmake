@@ -54,6 +54,7 @@ configure_case(
 assert_target("${gb_only_BUILD_DIR}" gbemu TRUE)
 assert_target("${gb_only_BUILD_DIR}" gbfrontend_support TRUE)
 assert_target("${gb_only_BUILD_DIR}" gbgba_experimental FALSE)
+assert_target("${gb_only_BUILD_DIR}" gbgba_experimental_tests FALSE)
 
 configure_case(
     experimental
@@ -63,5 +64,6 @@ configure_case(
     -DBUILD_TESTING=ON
 )
 assert_target("${experimental_BUILD_DIR}" gbgba_experimental TRUE)
+assert_target("${experimental_BUILD_DIR}" gbgba_experimental_tests TRUE)
 
 message(STATUS "OrbitalBoy CMake configuration matrix passed")
