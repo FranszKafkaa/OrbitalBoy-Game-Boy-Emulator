@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <string>
 
-#include "gb/app/frontend/debug_ui.hpp"
+#include "gb/app/frontend/realtime/debug_models.hpp"
 #include "gb/app/frontend/realtime_support.hpp"
 #include "gb/core/ppu.hpp"
 #include "gb/core/types.hpp"

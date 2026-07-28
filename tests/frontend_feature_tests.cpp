@@ -6,9 +6,11 @@
 
 #include "gb/app/frontend/realtime/cheat_engine.hpp"
 #include "gb/app/frontend/realtime/control_bindings.hpp"
+#include "gb/app/frontend/realtime/debug_session.hpp"
 #include "gb/app/frontend/realtime/frame_timeline.hpp"
 #include "gb/app/frontend/realtime/link_transport.hpp"
 #include "gb/app/frontend/realtime/network_config.hpp"
+#include "gb/app/frontend/realtime/netplay_session.hpp"
 #include "gb/app/frontend/realtime/runlab_control_queue.hpp"
 #include "gb/app/frontend/realtime/runlab_session.hpp"
 #include "gb/app/frontend/realtime/save_slots.hpp"
@@ -190,6 +192,59 @@ TEST_CASE("frontend", "runlab_session_throttles_state_exports") {
     T_REQUIRE(!session.exportDue(15, start + std::chrono::milliseconds(249)));
     T_REQUIRE(!session.exportDue(16, start + std::chrono::milliseconds(249)));
     T_REQUIRE(session.exportDue(16, start + std::chrono::milliseconds(250)));
+}
+
+TEST_CASE("frontend", "netplay_session_delays_input_and_detects_prediction_replacement") {
+    gb::frontend::NetplaySession session(2, 2);
+    T_EQ(session.delayLocalInput(0x01, 2), static_cast<std::uint8_t>(0));
+    T_EQ(session.delayLocalInput(0x02, 2), static_cast<std::uint8_t>(0));
+    T_EQ(session.delayLocalInput(0x04, 2), static_cast<std::uint8_t>(0x01));
+
+    gb::frontend::NetplayFrameRecord first{};
+    first.frame = 10;
+    first.remoteInput = 0x20;
+    first.predicted = true;
+    session.recordFrame(std::move(first));
+    T_EQ(session.acceptAuthoritativeInput(10, 0x40).value(), static_cast<std::uint64_t>(10));
+
+    gb::frontend::NetplayFrameRecord second{};
+    second.frame = 11;
+    session.recordFrame(std::move(second));
+    gb::frontend::NetplayFrameRecord third{};
+    third.frame = 12;
+    session.recordFrame(std::move(third));
+    T_EQ(session.history().size(), static_cast<std::size_t>(2));
+    T_EQ(session.history().front().frame, static_cast<std::uint64_t>(11));
+}
+
+TEST_CASE("frontend", "debug_session_owns_breakpoints_and_validates_queued_writes") {
+    gb::frontend::DebugSession session(2);
+    T_EQ(
+        static_cast<int>(session.toggleBreakpoint(0x0200)),
+        static_cast<int>(gb::frontend::BreakpointToggleResult::Added)
+    );
+    T_EQ(
+        static_cast<int>(session.toggleBreakpoint(0x0100)),
+        static_cast<int>(gb::frontend::BreakpointToggleResult::Added)
+    );
+    T_REQUIRE(session.hasBreakpoint(0x0100));
+    T_EQ(session.breakpoints().front(), static_cast<gb::u16>(0x0100));
+    T_EQ(
+        static_cast<int>(session.toggleBreakpoint(0x0300)),
+        static_cast<int>(gb::frontend::BreakpointToggleResult::LimitReached)
+    );
+    T_EQ(
+        static_cast<int>(session.toggleBreakpoint(0x0100)),
+        static_cast<int>(gb::frontend::BreakpointToggleResult::Removed)
+    );
+
+    T_REQUIRE(!session.queueMemoryWrite(0x0001, 0x99, "ROM"));
+    T_REQUIRE(session.queueMemoryWrite(0xC000, 0x3A, "TEST"));
+    const auto write = session.takeQueuedWrite();
+    T_REQUIRE(write.has_value());
+    T_EQ(write->address, static_cast<gb::u16>(0xC000));
+    T_EQ(write->value, static_cast<gb::u8>(0x3A));
+    T_REQUIRE(!session.takeQueuedWrite().has_value());
 }
 
 #ifdef GBEMU_USE_SDL2

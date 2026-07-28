@@ -6,28 +6,27 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <random>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 #include "gb/app/frontend/realtime/cheat_engine.hpp"
 #include "gb/app/frontend/realtime/control_bindings.hpp"
+#include "gb/app/frontend/realtime/debug_session.hpp"
 #include "gb/app/frontend/debug_ui.hpp"
 #include "gb/app/frontend/realtime/audio_ring_buffer.hpp"
 #include "gb/app/frontend/realtime/dropping_queue.hpp"
 #include "gb/app/frontend/realtime/frame_timeline.hpp"
 #include "gb/app/frontend/realtime/link_transport.hpp"
 #include "gb/app/frontend/realtime/network_config.hpp"
+#include "gb/app/frontend/realtime/netplay_session.hpp"
 #include "gb/app/frontend/realtime/runlab_control_queue.hpp"
 #include "gb/app/frontend/realtime/runlab_session.hpp"
 #include "gb/app/frontend/realtime/session_models.hpp"
@@ -228,14 +227,6 @@ int runRealtime(
             netplayEnabled = netplayTransport.openClient(ep->host, ep->port);
         }
     }
-    struct NetplayFrameRecord {
-        std::uint64_t frame = 0;
-        gb::GameBoy::SaveState preState{};
-        std::uint8_t localInput = 0;
-        std::uint8_t remoteInput = 0;
-        bool predicted = false;
-    };
-    constexpr std::size_t kNetplayHistoryLimit = 180;
     const std::string networkConfigPath = (std::filesystem::path("states") / "global.network").string();
     int configuredNetplayDelay = std::clamp(netplayDelayFrames, 0, 10);
     const auto savedNetwork = loadNetworkFrontendConfig(networkConfigPath);
@@ -243,16 +234,7 @@ int runRealtime(
         configuredNetplayDelay = std::clamp(savedNetwork->netplayDelayFrames, 0, 10);
     }
     std::atomic<int> netplayDelayAtomic{configuredNetplayDelay};
-    std::deque<std::uint8_t> localInputDelayQueue{};
-    for (int i = 0; i < configuredNetplayDelay; ++i) {
-        localInputDelayQueue.push_back(0);
-    }
-    std::deque<NetplayFrameRecord> netplayHistory{};
-    std::unordered_map<std::uint64_t, std::uint8_t> netplayAuthoritativeInputs{};
-    std::unordered_map<std::uint64_t, std::uint32_t> localFrameChecksums{};
-    std::uint64_t netplayRollbackCount = 0;
-    std::uint64_t netplayDesyncCount = 0;
-    std::uint64_t netplayPredictedCount = 0;
+    NetplaySession netplaySession(configuredNetplayDelay);
     if (socketLinkAvailable) {
         linkCableMode = LinkCableMode::Socket;
     }
@@ -270,17 +252,15 @@ int runRealtime(
     }
     int paletteMenuIndex = static_cast<int>(paletteMode);
     FrameTimeline timeline(gb);
-    std::vector<gb::u16> breakpoints{};
-    breakpoints.reserve(16);
+    DebugSession debugSession{};
     BreakpointEditState breakpointEdit{};
-    auto memorySearchStorage = std::make_unique<MemorySearchState>();
-    MemorySearchState& memorySearch = *memorySearchStorage;
+    MemorySearchState& memorySearch = debugSession.memorySearch();
     std::optional<gb::u16> selectedSpriteAddr;
     int spriteScrollRows = 0;
     std::optional<TopMenuSection> openTopMenuSection;
     std::optional<TopMenuSection> hoveredTopMenuSection;
     int hoveredTopMenuItem = -1;
-    MemoryWatch memoryWatch{};
+    MemoryWatch& memoryWatch = debugSession.memoryWatch();
     MemoryEditState memoryEdit{};
     MemoryWriteUiState memoryWriteUi{};
     runlab::State runLabState{};
@@ -300,7 +280,6 @@ int runRealtime(
             std::chrono::system_clock::now().time_since_epoch()
         ).count() % 1000000000
     );
-    QueuedMemoryWrite queuedWrite{};
     std::atomic<std::uint64_t> emulatedFrameCounter{0};
     std::string uiMessage;
     int uiMessageFrames = 0;
@@ -414,10 +393,11 @@ int runRealtime(
     const auto queueMemoryWrite = [&](gb::u16 address, gb::u8 value, const char* source) {
         if (!likelyWritableAddress(address)) {
             std::lock_guard<std::mutex> writeLock(queuedWriteMutex);
-            if (queuedWrite.active) {
+            const auto& pendingWrite = debugSession.pendingWrite();
+            if (pendingWrite.active) {
                 memoryWriteUi.pending = true;
-                memoryWriteUi.pendingAddress = queuedWrite.address;
-                memoryWriteUi.pendingValue = queuedWrite.value;
+                memoryWriteUi.pendingAddress = pendingWrite.address;
+                memoryWriteUi.pendingValue = pendingWrite.value;
             } else {
                 memoryWriteUi.pending = false;
             }
@@ -433,10 +413,7 @@ int runRealtime(
         }
         {
             std::lock_guard<std::mutex> writeLock(queuedWriteMutex);
-            queuedWrite.active = true;
-            queuedWrite.address = address;
-            queuedWrite.value = value;
-            queuedWrite.source = source;
+            (void)debugSession.queueMemoryWrite(address, value, source);
         }
         memoryWriteUi.pending = true;
         memoryWriteUi.pendingAddress = address;
@@ -532,22 +509,19 @@ int runRealtime(
 
     const auto toggleBreakpoint = [&](gb::u16 address) {
         std::lock_guard<std::mutex> bpLock(breakpointsMutex);
-        const auto it = std::find(breakpoints.begin(), breakpoints.end(), address);
-        if (it != breakpoints.end()) {
-            breakpoints.erase(it);
+        const auto result = debugSession.toggleBreakpoint(address);
+        if (result == BreakpointToggleResult::Removed) {
             char msg[40];
             std::snprintf(msg, sizeof(msg), "BP DEL %04X", address);
             uiMessage = msg;
             uiMessageFrames = 120;
             return;
         }
-        if (breakpoints.size() >= 16) {
+        if (result == BreakpointToggleResult::LimitReached) {
             uiMessage = "BP LIMIT 16";
             uiMessageFrames = 120;
             return;
         }
-        breakpoints.push_back(address);
-        std::sort(breakpoints.begin(), breakpoints.end());
         char msg[40];
         std::snprintf(msg, sizeof(msg), "BP ADD %04X", address);
         uiMessage = msg;
@@ -1233,28 +1207,14 @@ int runRealtime(
                             0,
                             10
                         );
-                        while (static_cast<int>(localInputDelayQueue.size()) < desiredDelay) {
-                            localInputDelayQueue.push_back(0);
-                        }
-                        while (static_cast<int>(localInputDelayQueue.size()) > desiredDelay) {
-                            localInputDelayQueue.pop_front();
-                        }
-
-                        if (desiredDelay > 0) {
-                            localInputDelayQueue.push_back(localInputMask);
-                            localAppliedMask = localInputDelayQueue.front();
-                            localInputDelayQueue.pop_front();
-                        } else {
-                            localAppliedMask = localInputMask;
-                        }
+                        localAppliedMask = netplaySession.delayLocalInput(localInputMask, desiredDelay);
 
                         std::uint8_t remoteMask = 0;
                         bool predicted = false;
-                        const auto authIt = netplayAuthoritativeInputs.find(frameId);
-                        if (authIt != netplayAuthoritativeInputs.end()) {
-                            remoteMask = authIt->second;
+                        if (const auto authoritative = netplaySession.takeAuthoritativeInput(frameId);
+                            authoritative.has_value()) {
+                            remoteMask = *authoritative;
                             predicted = false;
-                            netplayAuthoritativeInputs.erase(authIt);
                             std::uint8_t ignoredRemote = 0;
                             bool ignoredPredicted = false;
                             (void)netplayTransport.exchangeNetplayInput(
@@ -1267,7 +1227,7 @@ int runRealtime(
                             (void)netplayTransport.exchangeNetplayInput(frameId, localAppliedMask, remoteMask, predicted);
                         }
                         if (predicted) {
-                            ++netplayPredictedCount;
+                            netplaySession.notePrediction();
                         }
                         netplayFrameRecord = std::make_unique<NetplayFrameRecord>(NetplayFrameRecord{
                             frameId,
@@ -1290,39 +1250,22 @@ int runRealtime(
 
                     if (netplayEnabled) {
                         const std::uint32_t checksum = frameChecksum(gb);
-                        localFrameChecksums[frameId] = checksum;
-                        while (localFrameChecksums.size() > kNetplayHistoryLimit) {
-                            std::uint64_t minFrame = std::numeric_limits<std::uint64_t>::max();
-                            for (const auto& entry : localFrameChecksums) {
-                                if (entry.first < minFrame) {
-                                    minFrame = entry.first;
-                                }
-                            }
-                            if (minFrame == std::numeric_limits<std::uint64_t>::max()) {
-                                break;
-                            }
-                            localFrameChecksums.erase(minFrame);
-                        }
+                        netplaySession.recordChecksum(frameId, checksum);
                         (void)netplayTransport.sendNetplayChecksum(frameId, checksum);
                     }
 
                     if (netplayEnabled) {
                         if (netplayFrameRecord) {
-                            netplayHistory.push_back(std::move(*netplayFrameRecord));
-                            while (netplayHistory.size() > kNetplayHistoryLimit) {
-                                const std::uint64_t oldFrame = netplayHistory.front().frame;
-                                netplayHistory.pop_front();
-                                netplayAuthoritativeInputs.erase(oldFrame);
-                            }
+                            netplaySession.recordFrame(std::move(*netplayFrameRecord));
                         }
 
                         netplayTransport.pump();
                         const auto lateInputs = netplayTransport.takeAllNetplayInputs();
-                        for (const auto& local : localFrameChecksums) {
+                        for (const auto& local : netplaySession.checksums()) {
                             std::uint32_t remoteChecksum = 0;
                             if (netplayTransport.takeNetplayChecksum(local.first, remoteChecksum)) {
                                 if (remoteChecksum != local.second) {
-                                    ++netplayDesyncCount;
+                                    netplaySession.noteDesync();
                                     pausedAtomic.store(true, std::memory_order_relaxed);
                                     fastForwardAtomic.store(false, std::memory_order_relaxed);
                                     pendingPauseAddr.store(gb.cpu().regs().pc, std::memory_order_relaxed);
@@ -1335,21 +1278,15 @@ int runRealtime(
                         }
                         std::optional<std::uint64_t> rollbackFrom{};
                         for (const auto& late : lateInputs) {
-                            netplayAuthoritativeInputs[late.first] = late.second;
-                            for (const auto& rec : netplayHistory) {
-                                if (rec.frame != late.first) {
-                                    continue;
-                                }
-                                if (rec.predicted && rec.remoteInput != late.second) {
-                                    if (!rollbackFrom.has_value() || late.first < rollbackFrom.value()) {
-                                        rollbackFrom = late.first;
-                                    }
-                                }
-                                break;
+                            const auto candidate = netplaySession.acceptAuthoritativeInput(late.first, late.second);
+                            if (candidate.has_value()
+                                && (!rollbackFrom.has_value() || *candidate < *rollbackFrom)) {
+                                rollbackFrom = candidate;
                             }
                         }
 
                         if (rollbackFrom.has_value()) {
+                            auto& netplayHistory = netplaySession.history();
                             std::size_t startIndex = 0;
                             bool foundStart = false;
                             for (std::size_t idx = 0; idx < netplayHistory.size(); ++idx) {
@@ -1363,8 +1300,9 @@ int runRealtime(
                                 gb.loadState(netplayHistory[startIndex].preState);
                                 for (std::size_t idx = startIndex; idx < netplayHistory.size(); ++idx) {
                                     auto& rec = netplayHistory[idx];
-                                    const auto it = netplayAuthoritativeInputs.find(rec.frame);
-                                    if (it != netplayAuthoritativeInputs.end()) {
+                                    const auto& authoritativeInputs = netplaySession.authoritativeInputs();
+                                    const auto it = authoritativeInputs.find(rec.frame);
+                                    if (it != authoritativeInputs.end()) {
                                         rec.remoteInput = it->second;
                                         rec.predicted = false;
                                     }
@@ -1374,7 +1312,7 @@ int runRealtime(
                                         applyCheats(cheats, gb.bus());
                                     }
                                     const std::uint32_t replayChecksum = frameChecksum(gb);
-                                    localFrameChecksums[rec.frame] = replayChecksum;
+                                    netplaySession.recordChecksum(rec.frame, replayChecksum);
                                     (void)netplayTransport.sendNetplayChecksum(rec.frame, replayChecksum);
                                 }
                                 (void)gb.apu().takeSamples();
@@ -1382,7 +1320,7 @@ int runRealtime(
                                 if (audioEnabled) {
                                     SDL_ClearQueuedAudio(audioDev);
                                 }
-                                ++netplayRollbackCount;
+                                netplaySession.noteRollback();
                                 uiMessage = "NETPLAY ROLLBACK";
                                 uiMessageFrames = 90;
                             }
@@ -1430,7 +1368,7 @@ int runRealtime(
                 bool breakpointHit = false;
                 {
                     std::lock_guard<std::mutex> bpLock(breakpointsMutex);
-                    breakpointHit = std::find(breakpoints.begin(), breakpoints.end(), pc) != breakpoints.end();
+                    breakpointHit = debugSession.hasBreakpoint(pc);
                 }
                 if (breakpointHit) {
                     pausedAtomic.store(true, std::memory_order_relaxed);
@@ -2940,9 +2878,10 @@ int runRealtime(
                                 const int row = (my - kBreakpointListStartY) / kBreakpointListLineHeight;
                                 {
                                     std::lock_guard<std::mutex> bpLock(breakpointsMutex);
+                                    const auto& breakpoints = debugSession.breakpoints();
                                     if (row >= 0 && row < static_cast<int>(breakpoints.size())) {
                                         const gb::u16 addr = breakpoints[static_cast<std::size_t>(row)];
-                                        breakpoints.erase(breakpoints.begin() + row);
+                                        (void)debugSession.removeBreakpointAt(static_cast<std::size_t>(row));
                                         char msg[40];
                                         std::snprintf(msg, sizeof(msg), "BP DEL %04X", addr);
                                         uiMessage = msg;
@@ -3044,9 +2983,8 @@ int runRealtime(
         QueuedMemoryWrite writeToApply{};
         {
             std::lock_guard<std::mutex> writeLock(queuedWriteMutex);
-            if (queuedWrite.active) {
-                writeToApply = queuedWrite;
-                queuedWrite.active = false;
+            if (const auto pendingWrite = debugSession.takeQueuedWrite(); pendingWrite.has_value()) {
+                writeToApply = *pendingWrite;
             }
         }
         if (writeToApply.active) {
@@ -3208,9 +3146,9 @@ int runRealtime(
                 linkCableUiName(linkCableMode),
                 filterUiName(filterMode),
                 std::clamp(netplayDelayAtomic.load(std::memory_order_relaxed), 0, 10),
-                static_cast<unsigned long long>(netplayPredictedCount),
-                static_cast<unsigned long long>(netplayRollbackCount),
-                static_cast<unsigned long long>(netplayDesyncCount),
+                static_cast<unsigned long long>(netplaySession.predictedCount()),
+                static_cast<unsigned long long>(netplaySession.rollbackCount()),
+                static_cast<unsigned long long>(netplaySession.desyncCount()),
                 watchpointEnabled ? " WP" : "",
                 fastForward ? " FF" : ""
             );
@@ -3237,7 +3175,7 @@ int runRealtime(
             std::vector<gb::u16> breakpointsSnapshot;
             {
                 std::lock_guard<std::mutex> bpLock(breakpointsMutex);
-                breakpointsSnapshot = breakpoints;
+                breakpointsSnapshot = debugSession.breakpoints();
             }
             {
                 std::lock_guard<std::mutex> gbLock(gbMutex);

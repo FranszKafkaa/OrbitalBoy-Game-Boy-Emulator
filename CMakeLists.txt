@@ -78,6 +78,8 @@ set(GBEMU_APP_SOURCES
 
 set(GBEMU_REALTIME_SUPPORT_SOURCES
     src/app/frontend/realtime_options.cpp
+    src/app/frontend/realtime/debug_session.cpp
+    src/app/frontend/realtime/netplay_session.cpp
     src/app/frontend/realtime/runlab_session.cpp
     src/app/frontend/realtime/session_persistence.cpp
     src/app/frontend/realtime/frame_timeline.cpp

@@ -12,6 +12,8 @@
 
 namespace gb::frontend {
 
+using RgbFrame = std::array<unsigned char, gb::PPU::ScreenWidth * gb::PPU::ScreenHeight * 3>;
+
 std::uint8_t packButtons(
     bool right,
     bool left,
@@ -54,8 +56,6 @@ enum class VideoFilterMode {
     Scanline = 1,
     Lcd = 2,
 };
-
-using RgbFrame = std::array<unsigned char, gb::PPU::ScreenWidth * gb::PPU::ScreenHeight * 3>;
 
 struct BlitLayout {
     SDL_Rect contentDst{};
