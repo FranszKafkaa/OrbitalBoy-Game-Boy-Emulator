@@ -29,7 +29,9 @@
 #include "gb/app/frontend/realtime/link_transport.hpp"
 #include "gb/app/frontend/realtime/network_config.hpp"
 #include "gb/app/frontend/realtime/runlab_control_queue.hpp"
+#include "gb/app/frontend/realtime/runlab_session.hpp"
 #include "gb/app/frontend/realtime/session_models.hpp"
+#include "gb/app/frontend/realtime/session_persistence.hpp"
 #include "gb/app/frontend/realtime/save_slots.hpp"
 #include "gb/app/frontend/realtime/timing_policy.hpp"
 #include "gb/app/frontend/realtime/top_menu.hpp"
@@ -52,11 +54,8 @@ int runRealtime(
     const std::string& statePath = options.paths.state;
     const std::string& legacyStatePath = options.paths.legacyState;
     const std::string& batteryRamPath = options.paths.batteryRam;
-    const std::string& controlsPath = options.paths.controls;
     const std::string& cheatsPath = options.paths.cheats;
-    const std::string& palettePath = options.paths.palette;
     const std::string& rtcPath = options.paths.rtc;
-    const std::string& filtersPath = options.paths.filters;
     const std::string& captureDir = options.paths.captureDirectory;
     const std::string& linkConnect = options.network.linkConnect;
     const int linkHostPort = options.network.linkHostPort;
@@ -178,20 +177,20 @@ int runRealtime(
     bool controlsEditPad = false;
     int activeSaveSlot = 0;
     bool cheatsEnabled = true;
+    SessionPersistence persistence(options.paths);
     DisplayPaletteMode paletteMode = DisplayPaletteMode::GameBoyClassic;
     const bool cgbPaletteAvailable = gb.cartridge().cgbSupported();
-    if (const auto saved = loadPalettePreference(palettePath); saved.has_value()) {
+    if (const auto saved = persistence.loadPalette(); saved.has_value()) {
         paletteMode = saved.value();
     }
     if (!cgbPaletteAvailable && paletteMode == DisplayPaletteMode::GameBoyColor) {
         paletteMode = DisplayPaletteMode::GameBoyClassic;
     }
-    if (const auto savedFilter = loadFilterPreference(filtersPath); savedFilter.has_value()) {
+    if (const auto savedFilter = persistence.loadFilter(); savedFilter.has_value()) {
         filterMode = savedFilter.value();
     }
     ControlBindings controls = defaultControlBindings();
-    const std::string globalControlsPath = (std::filesystem::path("states") / "global.controls").string();
-    (void)loadControlBindingsWithFallback(controlsPath, globalControlsPath, controls);
+    (void)persistence.loadControls(controls);
     RunLabControlQueue runLabControlQueue{};
     runLabControlQueue.configure(runLabCommandQueuePath, runLabControl);
     bool runLabControlStartupMessage = false;
@@ -203,7 +202,7 @@ int runRealtime(
         runLabControlStartupMessage = true;
         std::cerr << "RunLab MCP control queue enabled: " << runLabCommandQueuePath << "\n";
     }
-    auto cheatsLoad = loadCheatsFromFile(cheatsPath);
+    auto cheatsLoad = persistence.loadCheats();
     std::vector<CheatCode> cheats = std::move(cheatsLoad.cheats);
     if (!cheatsLoad.errors.empty()) {
         std::cerr << "aviso: erros ao carregar cheats (" << cheatsPath << ")\n";
@@ -285,15 +284,7 @@ int runRealtime(
     MemoryEditState memoryEdit{};
     MemoryWriteUiState memoryWriteUi{};
     runlab::State runLabState{};
-    const std::filesystem::path runLabStateFilePath(runLabStatePath.empty() ? ".runlab/current-state.json" : runLabStatePath);
-    const std::filesystem::path runLabDirectory = runLabStateFilePath.has_parent_path()
-        ? runLabStateFilePath.parent_path()
-        : std::filesystem::path(".runlab");
-    const std::string runLabScreenshotPath = (runLabDirectory / "current-screen.ppm").string();
-    const std::string runLabPromptQueuePath = (runLabDirectory / "prompts.jsonl").string();
-    const std::string runLabFeedbackQueuePath = (runLabDirectory / "feedback.jsonl").string();
-    std::uint64_t lastRunLabStateExportFrame = std::numeric_limits<std::uint64_t>::max();
-    auto lastRunLabStateExportTime = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    RunLabSession runLabSession(runLabStatePath);
     std::string lastRunLabStateExportError{};
     bool showRunLabCandidateList = false;
     bool showRunLabRecognitionList = false;
@@ -309,8 +300,6 @@ int runRealtime(
             std::chrono::system_clock::now().time_since_epoch()
         ).count() % 1000000000
     );
-    std::uintmax_t runLabFeedbackOffset = 0;
-    bool runLabFeedbackInitialized = false;
     QueuedMemoryWrite queuedWrite{};
     std::atomic<std::uint64_t> emulatedFrameCounter{0};
     std::string uiMessage;
@@ -514,40 +503,15 @@ int runRealtime(
         }
     };
 
-    const auto escapeRunLabPromptJson = [](const std::string& text) {
-        std::string out;
-        out.reserve(text.size() + 8);
-        for (const char ch : text) {
-            if (ch == '\\') out += "\\\\";
-            else if (ch == '"') out += "\\\"";
-            else if (ch == '\n') out += "\\n";
-            else if (ch == '\r') out += "\\r";
-            else out.push_back(ch);
-        }
-        return out;
-    };
-
     const auto submitRunLabPrompt = [&]() {
         if (runLabPromptInput.text.empty()) {
             uiMessage = "RUNLAB PROMPT EMPTY";
             uiMessageFrames = 90;
             return;
         }
-        std::error_code ec;
-        std::filesystem::create_directories(runLabDirectory, ec);
-        std::ofstream out(runLabPromptQueuePath, std::ios::app);
-        if (!out) {
-            uiMessage = "RUNLAB PROMPT FAIL";
-            uiMessageFrames = 120;
-            return;
-        }
         const std::uint64_t id = runLabPromptInput.nextId++;
         const std::uint64_t frame = emulatedFrameCounter.load(std::memory_order_relaxed);
-        out << "{\"id\":" << id
-            << ",\"frame\":" << frame
-            << ",\"status\":\"pending\""
-            << ",\"prompt\":\"" << escapeRunLabPromptJson(runLabPromptInput.text) << "\"}\n";
-        if (!out) {
+        if (!runLabSession.submitPrompt(runLabPromptInput.text, id, frame)) {
             uiMessage = "RUNLAB PROMPT FAIL";
             uiMessageFrames = 120;
             return;
@@ -559,61 +523,9 @@ int runRealtime(
         uiMessageFrames = 150;
     };
 
-    const auto promptJsonString = [](const std::string& line, const std::string& key) -> std::optional<std::string> {
-        const std::string needle = "\"" + key + "\"";
-        std::size_t pos = line.find(needle);
-        if (pos == std::string::npos) return std::nullopt;
-        pos = line.find(':', pos + needle.size());
-        if (pos == std::string::npos) return std::nullopt;
-        pos = line.find('"', pos + 1);
-        if (pos == std::string::npos) return std::nullopt;
-        std::string out;
-        bool escaped = false;
-        for (++pos; pos < line.size(); ++pos) {
-            const char ch = line[pos];
-            if (escaped) {
-                out.push_back(ch);
-                escaped = false;
-                continue;
-            }
-            if (ch == '\\') {
-                escaped = true;
-                continue;
-            }
-            if (ch == '"') return out;
-            out.push_back(ch);
-        }
-        return std::nullopt;
-    };
-
     const auto pollRunLabFeedback = [&]() {
-        std::error_code ec;
-        const std::filesystem::path path(runLabFeedbackQueuePath);
-        const auto size = std::filesystem::exists(path, ec) ? std::filesystem::file_size(path, ec) : 0;
-        if (ec) return;
-        if (!runLabFeedbackInitialized) {
-            runLabFeedbackInitialized = true;
-            runLabFeedbackOffset = size;
-            return;
-        }
-        if (size < runLabFeedbackOffset) {
-            runLabFeedbackOffset = 0;
-        }
-        if (size == runLabFeedbackOffset) {
-            return;
-        }
-        std::ifstream in(path, std::ios::binary);
-        if (!in) return;
-        in.seekg(static_cast<std::streamoff>(runLabFeedbackOffset));
-        std::string line;
-        std::string latest;
-        while (std::getline(in, line)) {
-            if (line.empty()) continue;
-            latest = promptJsonString(line, "message").value_or("");
-        }
-        runLabFeedbackOffset = static_cast<std::uintmax_t>(in.tellg() >= 0 ? in.tellg() : static_cast<std::streampos>(size));
-        if (!latest.empty()) {
-            uiMessage = latest;
+        if (const auto latest = runLabSession.pollFeedback(); latest.has_value()) {
+            uiMessage = *latest;
             uiMessageFrames = 180;
         }
     };
@@ -1618,7 +1530,7 @@ int runRealtime(
         return sanitizeUiText(raw);
     };
     const auto persistControlsWithMessage = [&](const std::string& okMessage) {
-        if (saveControlBindingsWithMirror(controlsPath, globalControlsPath, controls)) {
+        if (persistence.saveControls(controls)) {
             uiMessage = okMessage;
         } else {
             uiMessage = "CTRL SAVE FAIL";
@@ -1749,7 +1661,7 @@ int runRealtime(
             } else {
                 filterMode = VideoFilterMode::None;
             }
-            saveFilterPreference(filtersPath, filterMode);
+            persistence.saveFilter(filterMode);
             uiMessage = filterUiName(filterMode);
             uiMessageFrames = 120;
             break;
@@ -2569,7 +2481,7 @@ int runRealtime(
                         paletteMenuIndex = 2;
                     } else if (ev.key.keysym.sym == SDLK_RETURN || ev.key.keysym.sym == SDLK_KP_ENTER) {
                         paletteMode = static_cast<DisplayPaletteMode>(paletteMenuIndex);
-                        savePalettePreference(palettePath, paletteMode);
+                        persistence.savePalette(paletteMode);
                         showPaletteMenu = false;
                         uiMessage = std::string("PALETA ") + displayPaletteUiName(paletteMode);
                         uiMessageFrames = 120;
@@ -2598,7 +2510,7 @@ int runRealtime(
                     } else {
                         filterMode = VideoFilterMode::None;
                     }
-                    saveFilterPreference(filtersPath, filterMode);
+                    persistence.saveFilter(filterMode);
                     uiMessage = filterUiName(filterMode);
                     uiMessageFrames = 120;
                 } else if (ev.key.keysym.sym == SDLK_F9) {
@@ -3152,12 +3064,10 @@ int runRealtime(
         }
         const std::uint64_t runLabExportFrame = emulatedFrameCounter.load(std::memory_order_relaxed);
         const auto runLabExportNow = std::chrono::steady_clock::now();
-        const bool runLabFrameExportDue = runLabExportFrame != lastRunLabStateExportFrame && (runLabExportFrame % 15u) == 0u;
-        const bool runLabTimeExportDue = runLabExportNow - lastRunLabStateExportTime >= std::chrono::milliseconds(250);
-        if (runLabFrameExportDue || runLabTimeExportDue) {
+        if (runLabSession.exportDue(runLabExportFrame, runLabExportNow)) {
             std::error_code runLabDirEc;
-            std::filesystem::create_directories(runLabDirectory, runLabDirEc);
-            const bool screenSaved = saveRgb24Ppm(runLabScreenshotPath, pixels);
+            std::filesystem::create_directories(runLabSession.directory(), runLabDirEc);
+            const bool screenSaved = saveRgb24Ppm(runLabSession.screenshotPath(), pixels);
             const auto escapeStateJson = [](const std::string& text) {
                 std::string out;
                 out.reserve(text.size() + 8);
@@ -3176,8 +3086,8 @@ int runRealtime(
                 control << "{\n";
                 control << "    \"enabled\": " << (runLabControlQueue.enabled() ? "true" : "false") << ",\n";
                 control << "    \"queue_path\": \"" << escapeStateJson(runLabControlQueue.path().string()) << "\",\n";
-                control << "    \"prompt_queue_path\": \"" << escapeStateJson(runLabPromptQueuePath) << "\",\n";
-                control << "    \"feedback_queue_path\": \"" << escapeStateJson(runLabFeedbackQueuePath) << "\",\n";
+                control << "    \"prompt_queue_path\": \"" << escapeStateJson(runLabSession.promptQueuePath()) << "\",\n";
+                control << "    \"feedback_queue_path\": \"" << escapeStateJson(runLabSession.feedbackQueuePath()) << "\",\n";
                 control << "    \"pending_count\": " << runLabControlQueue.pendingCount() << ",\n";
                 control << "    \"client_recently_seen\": " << (runLabControlQueue.clientRecentlySeen() ? "true" : "false") << ",\n";
                 control << "    \"frames_since_client_heartbeat\": " << runLabControlQueue.framesSinceClientHeartbeat() << ",\n";
@@ -3194,17 +3104,16 @@ int runRealtime(
                     runLabExportFrame,
                     paused,
                     running,
-                    runLabStatePath,
+                    runLabSession.statePath(),
                     runLabState.lastExportPath,
-                    screenSaved ? runLabScreenshotPath : std::string{},
+                    screenSaved ? runLabSession.screenshotPath() : std::string{},
                     controlStatusJson
                 )) {
-                lastRunLabStateExportFrame = runLabExportFrame;
-                lastRunLabStateExportTime = runLabExportNow;
+                runLabSession.markExported(runLabExportFrame, runLabExportNow);
                 lastRunLabStateExportError.clear();
-            } else if (lastRunLabStateExportError != runLabStatePath) {
-                lastRunLabStateExportError = runLabStatePath;
-                std::cerr << "falha ao exportar RunLab state: " << runLabStatePath << "\n";
+            } else if (lastRunLabStateExportError != runLabSession.statePath()) {
+                lastRunLabStateExportError = runLabSession.statePath();
+                std::cerr << "falha ao exportar RunLab state: " << runLabSession.statePath() << "\n";
             }
         }
 
@@ -3453,8 +3362,8 @@ int runRealtime(
     if (gb.saveRtcToFile(rtcPath)) {
         std::cout << "rtc gravado: " << rtcPath << "\n";
     }
-    savePalettePreference(palettePath, paletteMode);
-    saveFilterPreference(filtersPath, filterMode);
+    persistence.savePalette(paletteMode);
+    persistence.saveFilter(filterMode);
     (void)persistNetworkConfig();
 
     return backToMenu ? 2 : 0;

@@ -11,6 +11,28 @@
 
 namespace gb::frontend {
 
+std::uint8_t packButtons(
+    bool right,
+    bool left,
+    bool up,
+    bool down,
+    bool a,
+    bool b,
+    bool select,
+    bool start
+) {
+    std::uint8_t mask = 0;
+    if (right) mask |= 1u << 0;
+    if (left) mask |= 1u << 1;
+    if (up) mask |= 1u << 2;
+    if (down) mask |= 1u << 3;
+    if (a) mask |= 1u << 4;
+    if (b) mask |= 1u << 5;
+    if (select) mask |= 1u << 6;
+    if (start) mask |= 1u << 7;
+    return mask;
+}
+
 #ifdef GBEMU_USE_SDL2
 void updateWindowTitle(SDL_Window* window, const std::string& title, bool paused, bool muted) {
     std::string full = "GB Emulator - " + title + " - ";
@@ -50,28 +72,6 @@ const char* filterUiName(VideoFilterMode mode) {
     case VideoFilterMode::Scanline: return "FILTER SCANLINE";
     default: return "FILTER LCD";
     }
-}
-
-std::uint8_t packButtons(
-    bool right,
-    bool left,
-    bool up,
-    bool down,
-    bool a,
-    bool b,
-    bool select,
-    bool start
-) {
-    std::uint8_t mask = 0;
-    if (right) mask |= 1u << 0;
-    if (left) mask |= 1u << 1;
-    if (up) mask |= 1u << 2;
-    if (down) mask |= 1u << 3;
-    if (a) mask |= 1u << 4;
-    if (b) mask |= 1u << 5;
-    if (select) mask |= 1u << 6;
-    if (start) mask |= 1u << 7;
-    return mask;
 }
 
 void applySharpenRgb24(const RgbFrame& in, RgbFrame& out) {

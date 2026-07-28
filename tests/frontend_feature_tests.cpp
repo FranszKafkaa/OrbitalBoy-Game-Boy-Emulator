@@ -10,7 +10,9 @@
 #include "gb/app/frontend/realtime/link_transport.hpp"
 #include "gb/app/frontend/realtime/network_config.hpp"
 #include "gb/app/frontend/realtime/runlab_control_queue.hpp"
+#include "gb/app/frontend/realtime/runlab_session.hpp"
 #include "gb/app/frontend/realtime/save_slots.hpp"
+#include "gb/app/frontend/realtime/session_persistence.hpp"
 #include "gb/app/frontend/realtime/timing_policy.hpp"
 #include "gb/app/frontend/realtime/top_menu.hpp"
 #include "gb/app/frontend/realtime_options.hpp"
@@ -147,6 +149,71 @@ TEST_CASE("frontend", "realtime_options_map_paths_and_network_fields") {
     T_EQ(options.runLab.statePath, std::string("/runlab/state.json"));
     T_EQ(options.runLab.commandQueuePath, std::string("/runlab/commands.jsonl"));
 }
+
+TEST_CASE("frontend", "runlab_session_persists_escaped_prompts_and_tails_feedback") {
+    const auto directory = tests::makeTempPath("runlab_session", "");
+    tests::ScopedPath cleanup(directory);
+    gb::frontend::RunLabSession session((directory / "current-state.json").string());
+
+    T_REQUIRE(session.submitPrompt("find \"boss\"\\next\nline", 41, 900));
+    std::ifstream prompts(session.promptQueuePath());
+    const std::string promptLine(
+        (std::istreambuf_iterator<char>(prompts)),
+        std::istreambuf_iterator<char>()
+    );
+    T_EQ(
+        promptLine,
+        std::string("{\"id\":41,\"frame\":900,\"status\":\"pending\",\"prompt\":\"find \\\"boss\\\"\\\\next\\nline\"}\n")
+    );
+
+    {
+        std::ofstream feedback(session.feedbackQueuePath());
+        feedback << "{\"message\":\"old\"}\n";
+    }
+    T_REQUIRE(!session.pollFeedback().has_value());
+    {
+        std::ofstream feedback(session.feedbackQueuePath(), std::ios::app);
+        feedback << "{\"message\":\"new message\"}\n";
+    }
+    const auto message = session.pollFeedback();
+    T_REQUIRE(message.has_value());
+    T_EQ(*message, std::string("new message"));
+}
+
+TEST_CASE("frontend", "runlab_session_throttles_state_exports") {
+    using Clock = gb::frontend::RunLabSession::Clock;
+    const auto start = Clock::time_point{};
+    gb::frontend::RunLabSession session("state.json", start);
+
+    T_REQUIRE(session.exportDue(15, start));
+    session.markExported(15, start);
+    T_REQUIRE(!session.exportDue(15, start + std::chrono::milliseconds(249)));
+    T_REQUIRE(!session.exportDue(16, start + std::chrono::milliseconds(249)));
+    T_REQUIRE(session.exportDue(16, start + std::chrono::milliseconds(250)));
+}
+
+#ifdef GBEMU_USE_SDL2
+TEST_CASE("frontend", "session_persistence_roundtrips_preferences") {
+    const auto directory = tests::makeTempPath("session_persistence", "");
+    tests::ScopedPath cleanup(directory);
+    gb::frontend::SessionPaths paths{};
+    paths.palette = (directory / "game.palette").string();
+    paths.filters = (directory / "game.filters").string();
+    gb::frontend::SessionPersistence persistence(paths);
+
+    persistence.savePalette(gb::frontend::DisplayPaletteMode::GameBoyPocket);
+    persistence.saveFilter(gb::frontend::VideoFilterMode::Lcd);
+
+    T_EQ(
+        static_cast<int>(persistence.loadPalette().value()),
+        static_cast<int>(gb::frontend::DisplayPaletteMode::GameBoyPocket)
+    );
+    T_EQ(
+        static_cast<int>(persistence.loadFilter().value()),
+        static_cast<int>(gb::frontend::VideoFilterMode::Lcd)
+    );
+}
+#endif
 
 #ifdef GBEMU_USE_SDL2
 TEST_CASE("frontend", "windowed_blit_fills_game_area_without_debug") {

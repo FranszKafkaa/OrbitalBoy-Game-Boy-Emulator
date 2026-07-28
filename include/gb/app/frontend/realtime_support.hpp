@@ -10,6 +10,21 @@
 #include "gb/core/ppu.hpp"
 #include "gb/core/types.hpp"
 
+namespace gb::frontend {
+
+std::uint8_t packButtons(
+    bool right,
+    bool left,
+    bool up,
+    bool down,
+    bool a,
+    bool b,
+    bool select,
+    bool start
+);
+
+} // namespace gb::frontend
+
 #ifdef GBEMU_USE_SDL2
 #include "gb/app/sdl_compat.hpp"
 
@@ -58,17 +73,6 @@ const char* displayPaletteUiName(DisplayPaletteMode mode);
 const char* scaleModeUiName(FullscreenScaleMode mode);
 const char* linkCableUiName(LinkCableMode mode);
 const char* filterUiName(VideoFilterMode mode);
-
-std::uint8_t packButtons(
-    bool right,
-    bool left,
-    bool up,
-    bool down,
-    bool a,
-    bool b,
-    bool select,
-    bool start
-);
 
 void applySharpenRgb24(const RgbFrame& in, RgbFrame& out);
 void applySharpenRgb24(const unsigned char* in, unsigned char* out, int width, int height);

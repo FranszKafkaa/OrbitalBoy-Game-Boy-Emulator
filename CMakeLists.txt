@@ -78,6 +78,8 @@ set(GBEMU_APP_SOURCES
 
 set(GBEMU_REALTIME_SUPPORT_SOURCES
     src/app/frontend/realtime_options.cpp
+    src/app/frontend/realtime/runlab_session.cpp
+    src/app/frontend/realtime/session_persistence.cpp
     src/app/frontend/realtime/frame_timeline.cpp
     src/app/frontend/realtime/save_slots.cpp
     src/app/frontend/realtime/cheat_engine.cpp
@@ -104,6 +106,7 @@ set(GBEMU_TEST_SUPPORT_SOURCES
     src/app/runtime_paths.cpp
     src/app/rom_suite_runner.cpp
     src/app/frontend/runlab.cpp
+    src/app/frontend/realtime_support.cpp
     ${GBEMU_REALTIME_SUPPORT_SOURCES}
 )
 
@@ -227,7 +230,6 @@ if (BUILD_TESTING)
     if (SDL2_FOUND)
         target_sources(gbemu_tests PRIVATE
             src/app/frontend/debug_ui.cpp
-            src/app/frontend/realtime_support.cpp
         )
         target_link_libraries(gbemu_tests PRIVATE SDL2::SDL2)
         target_compile_definitions(gbemu_tests PRIVATE GBEMU_USE_SDL2=1 SDL_MAIN_HANDLED=1)
