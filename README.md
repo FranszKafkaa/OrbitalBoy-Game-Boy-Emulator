@@ -7,7 +7,7 @@ OrbitalBoy e um emulador em C++17 com foco em **Game Boy**, **Game Boy Color** e
 ## Recursos
 
 - Game Boy DMG e Game Boy Color
-- Game Boy Advance com core mGBA nativo por padrao
+- Game Boy Advance com mGBA nativo como unico backend de runtime suportado
 - Frontend SDL2 com menu superior, fullscreen, filtros, escala e capturas
 - Save state e save interno por ROM
 - Painel de debug com memoria, breakpoints, watchpoints e disassembly
@@ -28,18 +28,41 @@ OrbitalBoy e um emulador em C++17 com foco em **Game Boy**, **Game Boy Color** e
 ### macOS/Linux
 
 ```bash
-cmake -S . -B build -DGBEMU_USE_SDL2=ON
+cmake -S . -B build \
+  -DGBEMU_ENABLE_GBA=ON \
+  -DGBEMU_USE_SDL2=ON
 cmake --build build -j
 ```
 
 ### Windows
 
 ```powershell
-cmake -S . -B build -G "Ninja" -DGBEMU_USE_SDL2=ON
+cmake -S . -B build -G "Ninja" -DGBEMU_ENABLE_GBA=OFF -DGBEMU_USE_SDL2=OFF
 cmake --build build --config Release
 ```
 
-Se SDL2 nao estiver disponivel, o projeto ainda pode ser compilado em modo headless.
+O build padrao exige a biblioteca nativa mGBA. Para compilar somente GB/GBC, sem
+essa dependencia:
+
+```bash
+cmake -S . -B build-gb \
+  -DGBEMU_ENABLE_GBA=OFF \
+  -DGBEMU_USE_SDL2=OFF
+cmake --build build-gb -j
+```
+
+O core GBA desenvolvido dentro do repositorio e apenas experimental. Ele nao e
+ligado ao executavel principal e pode ser compilado separadamente para pesquisa:
+
+```bash
+cmake -S . -B build-experimental \
+  -DGBEMU_ENABLE_GBA=OFF \
+  -DGBEMU_BUILD_EXPERIMENTAL_GBA=ON \
+  -DGBEMU_USE_SDL2=OFF \
+  -DBUILD_TESTING=ON
+cmake --build build-experimental -j
+ctest --test-dir build-experimental --output-on-failure
+```
 
 ## Como Rodar
 
@@ -146,7 +169,7 @@ Atalhos principais no GB:
 - `Ctrl+S`: salvar state
 - `F5` ou `Ctrl+L`: carregar state
 
-No GBA, save state usa o core mGBA nativo por padrao.
+No GBA, save state usa o backend mGBA nativo.
 
 ### Debug
 
@@ -190,7 +213,7 @@ Arquivos gerados ficam em `states/`:
 ## Testes
 
 ```bash
-cmake -S . -B build -DBUILD_TESTING=ON
+cmake -S . -B build -DGBEMU_ENABLE_GBA=OFF -DBUILD_TESTING=ON
 cmake --build build -j
 ./build/gbemu_tests
 ```

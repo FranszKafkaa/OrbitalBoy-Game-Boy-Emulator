@@ -1,1304 +1,224 @@
-# Guia Completo do Projeto GBEMU (explicado para leigos)
+# Guia de arquitetura do OrbitalBoy
 
-Atualizado em 2026-03-12.
+Este guia descreve o estado mantido do projeto. Mudancas historicas ficam em
+`CHANGELOG.md` e no historico do Git.
 
-Este documento foi escrito para voce entender o projeto inteiro com calma, incluindo:
+## Escopo
 
-- o que cada parte faz
-- como as pecas conversam entre si
-- quais teclas acionam cada funcionalidade
-- como os dados sao salvos no disco
-- como o modo debug funciona por dentro
-- como a arquitetura multithread foi montada
+OrbitalBoy oferece:
 
-## Nota de manutencao (2026-03-12)
+- emulacao de Game Boy e Game Boy Color pelo core proprio;
+- emulacao de Game Boy Advance pelo backend nativo mGBA;
+- frontend SDL2, modo headless e seletor de ROMs;
+- saves, RTC, save states, filtros, controles e capturas;
+- ferramentas de debug, netplay e integracao opcional RunLab/MCP.
 
-Foi aplicada uma correcao de compilacao em `src/core/gameboy.cpp` no metodo `loadBootRomFromFile`.
+O core GBA escrito neste repositorio e experimental. Ele nao participa do
+executavel principal e so e compilado quando
+`GBEMU_BUILD_EXPERIMENTAL_GBA=ON`.
 
-Detalhe tecnico:
+## Builds suportados
 
-- a leitura do Boot ROM usava inicializacao que podia cair no erro de parse ambiguo do C++ (most vexing parse)
-- agora o codigo separa iteradores `begin/end` e cria o `std::vector<u8>` sem ambiguidade
-- o fast forward (`Tab`) foi ajustado para modo com pacing (sem burst de 6 frames por ciclo)
-- o rewind interno foi otimizado para evitar travadas: saiu de `vector` com `erase(begin)` para fila com `pop_front` O(1)
-- `runFrame` em modo de timing preciso ganhou guarda de ciclos para evitar loop infinito quando LCD estiver desligado
-- tecla `F11` abre menu de remapeamento de controles (teclado e controle) com salvamento em arquivo
-- barra superior no SDL virou menu clicavel por secoes (`SESSAO`, `IMAGEM`, `DEBUG`, `CONTROLES`, `REDE`)
-- tecla `F3` agora mostra/oculta a barra superior
-- itens da barra ficaram dinamicos por disponibilidade e com highlight de hover no mouse
-- menus pop-up agora tem botao `X` clicavel para fechar (`Escala`, `Paleta`, `Controles`)
-- controles agora persistem automatico entre sessoes com perfil por ROM + fallback global
-- APU ganhou canal 4 (noise): registradores `FF20..FF23`, LFSR, envelope e roteamento em `NR51`
-- HDMA CGB no `FF55` foi ajustado: modo geral continua imediato, modo H-Blank agora transfere 16 bytes por H-Blank
-- linha de comando ganhou `--hardware auto|dmg|cgb` para ROM dual-mode
-- `GameBoy` agora permite alternar o hardware emulado (DMG/CGB) em tempo de carga da ROM
-- RTC de MBC3/HuC3 agora usa relogio real (`system_clock`) e compensa tempo offline ao reabrir
-- serial/link agora respeita tempo de transferencia por byte (normal e fast mode CGB)
-- netplay ganhou `--netplay-delay` e rollback simples quando input remoto atrasado diverge da previsao
-- netplay passou a trocar checksum por frame para detectar dessync real
-- ao detectar checksum divergente, a emulacao pausa com aviso `NETPLAY DESYNC`
-- preferencias de rede (`link mode` + `netplay delay`) agora ficam em `states/global.network`
-- mapper MMM01 ganhou implementacao dedicada (nao e mais alias de MBC1)
-- mapper HuC3 ganhou camada dedicada sobre MBC3 com estado estendido persistente
-- evoluiu base de Game Boy Advance (GBA) para fase 3 com parser de header + CPU ARM minima + memoria basica + PPU inicial
-- linha de comando ganhou `--system auto|gb|gba` para rotear entre frontends
-- GBA CPU recebeu estabilizacao de fluxo para reduzir tela preta apos menu:
-- `BX` em ARM agora realinha PC corretamente para estado ARM/THUMB
-- `SWI 0x04/0x05` (`IntrWait`/`VBlankIntrWait`) agora espera mascara de IRQ de forma consistente
-- guardas de escrita/leitura de PC foram reforcadas para evitar execucao em regioes invalidas
-- execucao de BIOS nao mapeada foi bloqueada no caminho de fetch (sem depender de BIOS externo)
-- `BX` com alvo invalido tenta fallback seguro para `LR` quando possivel
-- decode de `BL` em THUMB foi reforcado com prefixo explicito e eliminacao de shift assinado indefinido
-- suite de testes GBA ganhou casos para `BX` ARM alinhado, `VBlankIntrWait` e fluxo `BL` THUMB
-
-Impacto:
-
-- remove erro de build em compiladores mais estritos
-- nao muda comportamento funcional da emulacao
-- reduz sensacao de "pulo de frame" no fast forward
-- reduz travadas no fast forward em sessoes longas (historico cheio de rewind)
-- melhora usabilidade da interface com descoberta de atalhos na propria tela
-- adiciona navegacao por menu de janela com dropdown clicavel
-- reduz ambiguidade visual com feedback imediato de hover em secoes/itens
-- melhora fechamento de overlays sem depender so de teclado
-- evita perder remapeamento de controles ao fechar e abrir o emulador
-- melhora fidelidade de audio em jogos que usam ruido/percussao (canal 4)
-- melhora compatibilidade CGB em jogos que dependem de HDMA por H-Blank
-- permite testar ROM dual-mode em DMG real sem precisar trocar de build
-- melhora confiabilidade de eventos dependentes de relogio em jogos com RTC
-- melhora compatibilidade de jogos que esperam interrupcao serial em janela temporal mais fiel
-- reduz dessync visual em netplay sob jitter com re-simulacao automatica
-- reduz risco de partidas seguirem divergidas em silencio (detecao de dessync por checksum)
-- evita reconfigurar delay/mode de rede a cada abertura do emulador
-- melhora compatibilidade com cartuchos MMM01/HuC3
-- cria base separada `core/gba` para evolucao incremental do emulador de GBA
-- reduz risco de travamento em tela preta no fluxo GBA por saltos para enderecos invalidos
-
-## 0. Como ler este guia
-
-Para ficar didatico, cada secao segue este formato:
-
-- O que e: resumo simples da parte
-- Onde esta: arquivos principais
-- Como funciona: ordem real de execucao
-- O que voce pode mexer com seguranca: pontos comuns de manutencao
-
-Assim voce consegue ligar cada linha do comportamento que ve na tela com um ponto do codigo.
-
-## RunLab MCP read-only
-
-O RunLab tambem tem um adaptador MCP C++ opcional em `tools/orbitalboy-mcp-cpp`.
-
-- Ele fala JSON-RPC por stdio.
-- Ele le `.runlab/current-state.json` e, opcionalmente, um profile exportado.
-- Ele expoe status, entidades, labels de memoria, eventos recentes, objetivo ativo e splits.
-- Ele nao escreve memoria, nao abre socket e nao tenta resolver rota.
-- Controle de input existe somente quando o emulador e iniciado com `--runlab-control`; nesse modo o MCP apenas adiciona comandos de joypad em `.runlab/commands.jsonl`.
-- O emulador tambem grava `.runlab/current-screen.ppm`; uma IA com visao pode usar `runlab_get_visual_context` e `runlab_visual_annotate` para marcar player, inimigos e cenario como caixas temporarias na tela.
-- Com o painel de debug aberto, `Ctrl+T` abre uma caixa de prompt; `Enter` grava em `.runlab/prompts.jsonl` para o cliente MCP ler com `runlab_get_pending_prompt` ou o prompt `handle_prompt_box`.
-
-Guia especifico: `docs/runlab-mcp-cpp.md`.
-
-## 1. Objetivo do emulador
-
-O GBEMU imita o hardware de um Game Boy classico no computador.
-
-Isso significa que ele tenta reproduzir:
-
-- CPU (processador)
-- Bus/MMU (roteamento de memoria)
-- PPU (video)
-- APU (audio)
-- Timer
-- Joypad
-- Cartridge e mappers (MBC)
-
-Quando esses blocos trabalham juntos, o jogo roda como se estivesse no console real.
-
-Observacao sobre GBA:
-
-- agora existe uma trilha inicial de GBA em fase 3 (ainda experimental).
-- nessa fase, o projeto ja executa CPU ARM + Thumb essencial, com SWI HLE basica.
-- memoria/timing ja inclui timers, IRQ regs, DMA imediata/VBlank/HBlank e keypad IRQ.
-- o CPU agora trata `HALT` basico e despacho de IRQ em HLE usando vetor em `0x03007FFC`.
-- a PPU inicial ja renderiza modo 0 com BG0..BG3 (text) e OBJ basico, alem de modos 3/4/5.
-- audio e perifericos avancados de hardware GBA ainda nao estao implementados.
-
-## 2. Estrutura de pastas (visao de manutencao)
-
-```text
-include/gb/core/                        # interfaces do nucleo
-include/gb/app/                         # interfaces da aplicacao
-include/gb/app/frontend/                # interfaces SDL/debug
-include/gb/app/frontend/realtime/       # modulos internos do loop realtime
-
-src/core/                               # implementacao do nucleo
-src/core/gba/                           # base do sistema GBA (fase 3)
-src/core/cartridge/mappers/             # mappers separados por arquivo
-src/app/                                # inicializacao e modos de execucao
-src/app/frontend/                       # janela, renderizacao, debug e seletor
-src/app/frontend/realtime/              # classes auxiliares do realtime
-
-tests/                                  # testes automatizados
-docs/                                   # documentacao (este guia)
-rom/ e roms/                            # biblioteca de jogos
-states/                                 # saves persistentes
-captures/                               # screenshots PPM
-```
-
-Regra pratica:
-
-- `core` = emulacao
-- `app` = fluxo de execucao
-- `frontend` = interface SDL e ferramentas de debug
-
-## 3. Fluxo completo do programa (passo a passo real)
-
-### 3.1 Entrada principal
-
-Onde esta:
-
-- `src/app/main.cpp`
-
-Ordem:
-
-1. `main()` chama `parseAppOptions(...)` para ler argumentos.
-2. Se vier `--rom-suite`, executa suite automatica e termina.
-3. Se nao veio ROM, SDL esta habilitado e o sistema alvo e GB, abre seletor grafico de ROM.
-4. Se ainda nao tiver ROM, encerra com erro amigavel.
-5. Se for modo SDL normal, chama `runRealtimeFlow(...)`.
-6. Se for headless, roda `runHeadless(...)`.
-
-### 3.2 Carregamento da ROM
-
-`loadGame(...)` faz:
-
-1. `gb.loadRom(romPath)`.
-2. Loga titulo da ROM.
-3. Resolve o hardware emulado (auto/DMG/CGB) e aplica no `GameBoy`.
-4. Tenta carregar save interno (`.sav`).
-5. Tenta carregar RTC (`.rtc`) quando aplicavel.
-
-### 3.3 Volta para o menu sem fechar app
-
-No realtime, se o usuario apertar `L` (sem Ctrl), o frontend retorna codigo `2`.
-
-`runRealtimeFlow(...)` interpreta `2` como:
-
-- abrir seletor de ROM novamente
-- carregar novo jogo
-- iniciar nova sessao
-
-Isso permite trocar de jogo sem fechar o programa inteiro.
-
-## 4. Linha de comando
-
-Onde esta:
-
-- `include/gb/app/app_options.hpp`
-- `src/app/app_options.cpp`
-
-Opcoes:
-
-- `--rom <arquivo>`: define ROM.
-- `--choose-rom`: forca abrir seletor SDL.
-- `--headless [frames]`: roda sem janela.
-- `--rom-suite <manifesto>`: executa suite de compatibilidade.
-- `--scale <n>`: escala base da janela no modo janela.
-- `--audio-buffer <256..8192>`: buffer solicitado para SDL audio.
-- `--hardware <auto|dmg|cgb>`: seleciona o hardware emulado para ROM dual-mode.
-- `--netplay-delay <0..10>`: atraso de entrada para netplay com rollback simples.
-- `--system <auto|gb|gba>`: seleciona o sistema alvo (GBA em fase 3 experimental).
-
-Detalhe de runtime:
-
-- durante netplay, cada lado envia checksum de frame para detectar divergencia.
-- em divergencia, o frontend pausa e mostra `NETPLAY DESYNC`.
-
-Tambem aceita ROM como argumento posicional:
+Runtime completo com SDL2 e mGBA nativo:
 
 ```bash
-./build/gbemu ./roms/Mario/mario.gb
-```
-
-## 5. Persistencia em disco (o que fica salvo)
-
-Onde esta:
-
-- `include/gb/app/runtime_paths.hpp`
-- `src/app/runtime_paths.cpp`
-
-Para cada ROM, o projeto usa um nome base (`stem`) e grava em `states/`:
-
-- `.state`: save state completo do emulador
-- `.sav`: save interno do cartucho (bateria)
-- `.rtc`: estado de relogio (MBC3/HuC3) + timestamp real para compensar tempo offline
-- `.palette`: preferencia da paleta visual
-- `.filters`: preferencia de filtro visual
-- `.controls`, `.cheats`, `.replay`: reservados
-- `global.network`: preferencias globais de netplay (delay + modo do link)
-
-Capturas vao para:
-
-- `captures/<nome-da-rom>/frame_YYYYMMDD_HHMMSS_mmm.ppm`
-
-Observacao importante:
-
-- Save state e diferente de save interno do jogo.
-- O emulador salva os dois (quando aplicavel).
-
-## 6. Seletor de ROM SDL (sem terminal)
-
-Onde esta:
-
-- `src/app/frontend/rom_selector.cpp`
-
-### 6.1 Estrutura esperada de pasta
-
-O seletor procura em `./rom` e `./roms`.
-
-Cada jogo deve estar em uma subpasta:
-
-```text
-roms/
-  Pokemon Yellow/
-    pokemon_yellow.gb
-    capa.jpg
-```
-
-Regras:
-
-- usa o nome da subpasta como label
-- pega o primeiro `.gb`, `.gbc` ou `.gba`
-- pega a primeira imagem `.jpg/.jpeg` (se existir)
-- se nao tiver imagem, mostra placeholder `NO IMG`
-
-### 6.2 Grade responsiva
-
-A grade calcula colunas com base na largura atual da janela:
-
-- numero de colunas e dinamico
-- gap horizontal e recalculado por linha
-- cards ficam centralizados
-- scroll vertical por linha
-
-Isso evita desalinhamento quando redimensiona.
-
-### 6.3 Controles do seletor
-
-- Setas: navegar entre cards
-- `PageUp/PageDown`: salto maior
-- `Home/End`: inicio/fim
-- `Enter`: abrir ROM selecionada
-- Clique: seleciona
-- Duplo clique: abre
-- `Esc`: cancelar
-
-## 7. Frontend SDL realtime (sessao de jogo)
-
-Onde esta:
-
-- `src/app/frontend/realtime.cpp`
-
-Esse e o arquivo central da experiencia em tempo real.
-
-### 7.1 Inicializacao grafica e anti-tearing
-
-Passos principais no comeco da funcao `runRealtime(...)`:
-
-1. Define hints SDL de VSync.
-2. Inicializa `SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO`.
-3. Cria janela.
-4. Cria renderer com `SDL_RENDERER_PRESENTVSYNC`.
-5. Tenta forcar vsync com `SDL_RenderSetVSync` (quando disponivel).
-6. Loga aviso se renderer sem flag de vsync.
-7. Cria textura principal RGB24 (160x144).
-
-Efeito pratico:
-
-- reduz tearing
-- mantem sincronismo visual mais estavel
-
-Limite:
-
-- se o driver/plataforma nao respeitar vsync, ainda pode ocorrer tearing.
-
-### 7.2 Inicializacao de audio
-
-- Pede dispositivo com taxa da APU (`gb::APU::SampleRate`), 2 canais, S16.
-- Se abrir, inicia audio.
-- Se falhar, roda sem audio e mostra aviso.
-
-### 7.3 Estados de sessao (flags)
-
-Logo apos inicializar, o codigo cria flags principais:
-
-- `paused`, `muted`, `fastForward`
-- `showPanel` (debug panel)
-- `showBreakpointMenu`
-- `showScaleMenu`
-- `showPaletteMenu`
-- `fullscreen`
-- `watchpointEnabled`
-- `backToMenu`
-
-Valores default relevantes:
-
-- painel debug oculto (`showPanel=false`)
-- menu BP/WP oculto (`showBreakpointMenu=false`)
-- fullscreen desligado
-
-### 7.4 Estado de debug e edicao de memoria
-
-Estruturas importantes em runtime:
-
-- `MemoryWatch`: endereco observado + historico + lock por frame
-- `MemoryEditState`: editor de endereco/valor em hex
-- `MemoryWriteUiState`: feedback de escrita pendente/ultima escrita
-- `MemorySearchState`: snapshot de 64KB + resultados da busca
-- `BreakpointEditState`: input de endereco para breakpoint
-
-### 7.5 Pipeline multithread
-
-O realtime usa 3 workers:
-
-1. Thread EMU
-2. Thread RENDER
-3. Thread AUDIO
-
-Comunicacao entre threads:
-
-- `DroppingQueue<RawFramePacket, 3>` para frames brutos
-- `DroppingQueue<RgbFramePacket, 3>` para frames convertidos
-- `AudioRingBuffer` para samples de audio
-
-Sincronizacao:
-
-- `std::atomic` para flags rapidas
-- `std::mutex` para secoes criticas do `GameBoy`
-
-Logs de diagnostico no terminal:
-
-- `[MT][EMU] ...`
-- `[MT][REN] ...`
-- `[MT][AUD] ...`
-
-### 7.6 O que cada thread faz
-
-#### Thread EMU
-
-- roda `gb.runFrame()`
-- incrementa contador de frames
-- captura timeline (rewind)
-- coleta samples da APU e empurra no ring buffer
-- aplica lock de memoria por frame quando ativo
-- detecta watchpoint e breakpoint
-- usa politica de timing:
-  - normal: ~59.7 fps (`16742 us`)
-  - fast forward: ~3x com pacing, sem burst por ciclo
-
-#### Thread RENDER
-
-- recebe frame bruto (mono + color)
-- escolhe pipeline de paleta:
-  - CGB real (quando suportado e selecionado)
-  - paleta mono (Classic/Pocket)
-- aplica filtro visual (None/Scanline/LCD)
-- envia frame RGB para a fila de saida
-
-#### Thread AUDIO
-
-- consome samples do `AudioRingBuffer`
-- envia para `SDL_QueueAudio`
-- zera fila quando pausado/mudo/fast-forward
-- loga underruns e samples descartados
-
-### 7.7 Loop principal de eventos
-
-No loop principal (thread de UI), o codigo:
-
-1. sincroniza estado com atomics
-2. calcula FPS de debug
-3. processa eventos SDL (teclado, mouse, texto, scroll)
-4. aplica escritas de memoria pendentes
-5. atualiza watch history
-6. renderiza frame do jogo
-7. desenha overlays e painel debug
-8. apresenta frame (`SDL_RenderPresent`)
-
-### 7.8 Encerramento seguro
-
-Ao sair:
-
-1. sinaliza `mtRunning=false`
-2. fecha filas (`close()`)
-3. espera `join()` das threads
-4. libera texturas/renderer/janela/audio
-5. grava `sav`, `rtc`, `palette`, `filters`
-
-## 8. Modos de escala, fullscreen e nitidez
-
-Onde esta:
-
-- `include/gb/app/frontend/realtime_support.hpp`
-- `src/app/frontend/realtime_support.cpp`
-
-### 8.1 Modos
-
-Enum `FullscreenScaleMode`:
-
-- `CrispFit`: preserva proporcao, barras quando necessario
-- `FullStretch`: ocupa tudo, sem preservar proporcao
-- `FullStretchSharp`: ocupa tudo + filtro de sharpen
-
-`computeGameBlitLayout(...)` calcula retangulo final do jogo conforme:
-
-- resolucao de saida
-- se painel debug esta visivel
-- fullscreen on/off
-- modo de escala escolhido
-
-Tela sempre limpa com preto antes do draw:
-
-- evita fundos coloridos indesejados nas barras
-
-### 8.2 Menu de escala
-
-- `N` abre menu de escala (somente em fullscreen)
-- selecao por `Up/Down`, `1/2/3`, `Enter`
-
-## 9. Paletas e filtros visuais
-
-Onde esta:
-
-- `realtime_support.cpp`
-
-Paletas (`V`):
-
-- Game Boy Classico (verde)
-- Game Boy Pocket (cinza/branco)
-- Game Boy Color (so quando ROM suporta CGB)
-
-Filtros (`H`):
-
-- None
-- Scanline
-- LCD
-
-Persistencia:
-
-- escolhas salvas por ROM em `.palette` e `.filters`
-
-## 10. Debug UI (painel lateral)
-
-Onde esta:
-
-- `include/gb/app/frontend/debug_ui.hpp`
-- `src/app/frontend/debug_ui.cpp`
-
-O painel foi ajustado para layout responsivo e evitar sobreposicao.
-
-### 10.1 Informacoes mostradas no topo
-
-- status RUNNING/PAUSED
-- status AUDIO-ON/MUTED
-- FPS em tempo real
-- PC/OP executado
-- next PC/OP
-- mini janela de bytes (disasm)
-
-### 10.2 Box WATCH
-
-Mostra:
-
-- endereco observado
-- valor atual em hex e decimal
-- lock ON/OFF
-- ultima escrita (ok/erro)
-- grafico historico (janela circular)
-
-### 10.3 Leituras de memoria recentes
-
-- lista de acessos recentes vindos do `Bus`
-- marcador colorido por regiao de memoria
-- clique em linha move WATCH para aquele endereco
-
-### 10.4 Secao de sprite selecionado
-
-- endereco OAM do sprite
-- Y/X bruto e convertido
-- tile e atributos
-- preview do sprite abaixo da tabela
-- destaque visual do sprite no jogo (retangulo + cruz)
-
-### 10.5 Lista de sprites (OAM)
-
-- lista com scroll
-- mostra papel/flags (ON/OFF, BG/TOP, flip, paleta)
-- clique seleciona sprite
-
-### 10.6 Menu BP/WP (oculto por padrao)
-
-- tecla `D` mostra/oculta
-- watchpoint ON/OFF
-- adicionar/remover breakpoints
-- lista de breakpoints ativos (limite 16)
-
-### 10.7 Busca de memoria
-
-- `S` abre/fecha overlay de busca (com painel aberto)
-- modos: Exact, Greater, Less, Changed, Unchanged
-- snapshot manual (`R`) para comparacao changed/unchanged
-- editar valor alvo (`E`)
-- executar busca (`Enter`)
-- limpar resultados (`C`)
-- selecionar resultado com clique (vira endereco WATCH)
-
-Detalhes internos:
-
-- snapshot cobre 0x0000..0xFFFF (64KB)
-- guarda ate 4096 matches para UI
-- tambem contabiliza total real de matches
-
-## 11. Editor de memoria confiavel
-
-### 11.1 Entrada manual
-
-- `M` abre editor
-- campo endereco (4 hex)
-- campo valor (2 hex)
-- `Tab` alterna campo
-- `Enter` aplica
-- `Esc` cancela
-
-### 11.2 Escrita segura com fila
-
-As escritas vao para uma fila (`QueuedMemoryWrite`) antes de aplicar.
-
-Beneficios:
-
-- evita corrida com thread de emulacao
-- gera feedback visual claro
-- permite bloquear escrita em regioes readonly
-
-### 11.3 Regioes consideradas gravaveis
-
-`likelyWritableAddress(...)` considera gravavel:
-
-- `A000-BFFF` (RAM de cartucho, quando habilitada)
-- `C000-FDFF` (WRAM/echo)
-- `FE00-FE9F` (OAM)
-- `FF00-FFFF` (IO/HRAM/IE)
-
-Bloqueia por padrao:
-
-- `0000-7FFF` (ROM/control banks)
-
-### 11.4 Atalhos de edicao rapida
-
-Com painel aberto:
-
-- `[` e `]`: endereco WATCH -1 / +1
-- `=`: incrementa byte do WATCH
-- `-`: decrementa byte do WATCH
-- `0`: zera byte do WATCH
-- `K`: liga/desliga lock por frame
-
-## 12. Rewind e frame stepping
-
-Onde esta:
-
-- `include/gb/app/frontend/realtime/frame_timeline.hpp`
-- `src/app/frontend/realtime/frame_timeline.cpp`
-
-`FrameTimeline` guarda historico de estados:
-
-- capacidade maxima: 900 frames
-- `stepBack`: volta 1 frame
-- `stepForward`: avanca 1 frame
-- `captureCurrent`: salva estado atual
-
-Atalhos (somente pausado):
-
-- seta `Left`: voltar frame
-- seta `Right`: avancar frame
-
-## 13. Save state, save interno e RTC
-
-### 13.1 Save state
-
-- `Ctrl+S`: salva em `states/<rom>.state`
-- `F5` ou `Ctrl+L`: carrega `states/<rom>.state`
-- fallback de leitura: `legacyStatePath` (mesma pasta da ROM)
-
-### 13.2 Save interno do jogo
-
-- carregado no inicio (`.sav`)
-- salvo ao fechar sessao
-
-### 13.3 RTC
-
-- carregado no inicio (`.rtc`)
-- salvo ao fechar sessao
-- usado para cartuchos com relogio (MBC3/HuC3)
-
-## 14. Atalhos completos (mapa rapido)
-
-### 14.1 Controles de jogo (joypad)
-
-- `Setas`: D-pad
-- `Z`: botao A
-- `X`: botao B
-- `Enter`: Start
-- `Backspace`: Select
-
-### 14.2 Controles globais
-
-- `Esc`: sair
-- `Space`: pausar/continuar
-- `P`: mute/unmute
-- `Tab` (segurar): fast forward
-- `F11`: menu de remapeamento de controles
-- `F3`: mostrar/ocultar barra superior
-- `F`: fullscreen on/off
-- `N`: menu de escala (em fullscreen)
-- `V`: menu de paleta
-- `H`: ciclo de filtro visual
-- `J`: ciclo de link cable (Off/Loop/Noise)
-- `F9`: captura screenshot PPM
-- `L` (sem Ctrl): voltar ao menu de ROM
-
-### 14.3 Saves
-
-- `Ctrl+S`: salvar state
-- `F5` ou `Ctrl+L`: carregar state
-
-### 14.4 Debug
-
-- `I`: mostrar/ocultar painel debug
-- `D`: mostrar/ocultar menu BP/WP
-- `M`: abrir editor de memoria
-- `S`: mostrar/ocultar busca de memoria (com painel aberto)
-- `W`: watchpoint on/off
-- `B`: toggle breakpoint no PC atual
-- `[`/`]`: endereco WATCH -/+ 1
-- `K`: lock por frame
-- `=`/`-`/`0`: ++/--/zero no endereco WATCH
-- `Left/Right` pausado: rewind/forward de frame
-
-### 14.5 RunLab Semantic Inspector
-
-RunLab e a primeira camada semantica do OrbitalBoy para speedrun/TAS tooling. Ele fica dentro do painel de debug existente e reaproveita selecao OAM, watch de memoria, busca/diff de RAM e leituras do `Bus`; nao cria um debugger paralelo.
-
-- `Y`: cria/seleciona entidade a partir do sprite OAM selecionado.
-- `T`: alterna tipo da entidade (`Unknown`, `Player`, `Enemy`, `Item`, `Boss`).
-- `U`: cria um label semantico para o endereco WATCH atual.
-- `F6`: snapshot RAM before.
-- `F7`: diff da RAM atual contra o snapshot.
-- `F8`: promove o primeiro endereco alterado do diff para label.
-- `E` ou menu `DEBUG > RUNLAB EXPORT`: exporta `profiles/<titulo_da_rom>.runlab.json`.
-- `C`: roda Correlation Scan, troca a lista de leituras recentes pelos enderecos RAM candidatos e mostra os candidatos OAM em vermelho por cerca de 240 frames.
-- Clique em um candidato RunLab: fixa o `WATCH` naquele endereco, apaga os demais candidatos vermelhos e mantem somente a entidade selecionada em vermelho forte ate `Q`.
-- `M`: abre o reconhecimento RunLab no lugar da lista de memoria, com player/itens/inimigos/cenario e enderecos relevantes.
-- Clique em uma linha do reconhecimento: fixa o `WATCH` no endereco principal daquela linha e seleciona o sprite quando existir OAM associado.
-- `Ctrl+M`: abre o editor manual de memoria antigo.
-- `Ctrl+T`: abre a caixa de prompt RunLab MCP; `Enter` envia para `.runlab/prompts.jsonl` e `Esc` cancela.
-- `1`/`2`/`3`/`4`: promove o melhor candidato atual como X, Y, camera_x ou state.
-- `G`: cria/inicia objetivo padrao e captura baseline.
-- `R`: recaptura baseline do objetivo ativo.
-- `Q`: limpa eventos da timeline RunLab e volta a lista de leituras recentes no lugar dos candidatos/reconhecimento.
-
-Event Detection roda sobre os `MemoryLabel`s cadastrados. Toda mudanca gera `memory_changed`; aumentos e quedas geram `value_increased`/`value_decreased`; labels como `lives`, `hp`, `health` ou `player.hp` diminuindo geram `damage_candidate`; chegando a zero geram `death_candidate`; `level_id`, `stage`, `room` ou `map` mudando geram `level_change_candidate` e `split_candidate`; flags como `goal_flag`, `clear_flag` e `finish_flag` ativando geram `goal_reached_candidate`.
-
-Goals e splits usam condicoes estruturadas:
-
-- `changed`
-- `changed_from_initial`
-- `==`, `!=`, `>`, `>=`, `<`, `<=`
-- `decreased`
-- `increased`
-- `changed_to_nonzero`
-
-Quando um objetivo inicia, RunLab captura uma baseline dos labels usados. `changed_from_initial`, `decreased` e `increased` comparam o valor atual contra essa baseline. Splits usam a mesma baseline e disparam uma unica vez.
-
-Correlation Scan e uma heuristica deterministica. Ele observa as ultimas 120 amostras da entidade selecionada, compara deltas de posicao OAM contra deltas de WRAM `0xC000-0xDFFF`, avalia candidatos `u8` e `u16_le`, e mostra sugestoes para `player.x`, `player.y`, `camera_x` e estado/animacao. O score `0.0..1.0` indica apenas semelhanca observada.
-
-Fluxo recomendado:
-
-1. Selecione o sprite OAM no painel.
-2. Pressione `Y` para criar/selecionar entidade.
-3. Use `T` ate o tipo ficar `Player`.
-4. Mova o personagem por alguns segundos.
-5. Pressione `C` e confira as sugestoes.
-6. Use `1` para promover X e `2` para promover Y quando os candidatos fizerem sentido.
-7. Pressione `G` para iniciar um objetivo padrao quando labels como `level_id` e `lives` existirem.
-8. Exporte o perfil com `E`.
-
-O MVP e manual: o OrbitalBoy nao sabe sozinho qual sprite e o jogador, qual endereco e vida, nem qual mudanca representa morte. Labels precisam existir primeiro, e nomes como `level_id`, `lives`, `player.x` e `goal_flag` influenciam as regras padrao. Mudancas de alta frequencia como `player.x` sao resumidas no painel por padrao. Limitacoes conhecidas: posicao OAM pode nao ser a posicao logica; scroll de camera pode parecer movimento do jogador; entidades multi-sprite podem alterar o bbox; alguns jogos guardam coordenadas em bytes separados, subpixels ou estruturas maiores; confianca alta nao e prova. Isto ainda nao e TAS/autopilot.
-
-### 14.6 Menu de controles (`F11`)
-
-Quando abre o menu:
-
-- `Up/Down`: seleciona acao (RIGHT/LEFT/UP/DOWN/A/B/SELECT/START)
-- `Left/Right`: escolhe campo (`KEYBOARD` ou `CONTROLLER`)
-- `Enter`: entra em modo captura para redefinir o input
-- `Del`/`Backspace`: limpa binding selecionado
-- `R`: restaura padrao
-- `S`: salva bindings no arquivo de controles
-- `Esc` ou `F11`: fecha menu
-
-O menu mostra feedback visual do que esta selecionado e salva em disco para persistir entre execucoes.
-Tambem e possivel fechar pelo botao `X` no canto superior direito.
-
-### 14.6 Barra superior
-
-Durante a sessao SDL existe uma barra no topo com secoes clicaveis:
-
-- `SESSAO`: pausar, mutar, fast forward, save/load, voltar ao menu de ROM, sair
-- `IMAGEM`: fullscreen, escala, paleta, filtro, captura
-- `DEBUG`: debug panel, BP/WP, busca de memoria
-- `CONTROLES`: abrir menu de remapeamento
-- `REDE`: modo do link cable e ajuste de delay do netplay em tempo real
-
-Comportamento:
-
-- clique na secao abre/fecha dropdown
-- clique em item executa acao imediatamente
-- `Esc` fecha dropdown aberto
-- `F3` oculta/mostra a barra inteira
-- hover no mouse destaca secao e item
-- itens aparecem quando disponiveis no contexto atual (por exemplo, `MENU ESCALA` apenas em fullscreen)
-- alteracoes de `REDE` persistem em `states/global.network`
-
-### 14.7 Fechamento por `X`
-
-Os pop-ups de:
-
-- escala
-- paleta
-- controles
-
-possuem um `X` no topo para fechamento por mouse.
-Os atalhos antigos (`Esc`, `N`, `V`, `F11`) continuam valendo.
-
-### 14.8 Persistencia de controles
-
-Quando voce muda qualquer binding no menu `F11`, o projeto grava imediatamente:
-
-- `states/<rom>.controls`: configuracao da ROM atual
-- `states/global.controls`: configuracao global de fallback
-
-Carga ao iniciar:
-
-1. tenta `states/<rom>.controls`
-2. se nao existir, cai para `states/global.controls`
-
-Assim o remapeamento continua nas proximas sessoes sem precisar configurar de novo.
-
-## 15. Arquitetura de suporte multithread (novos modulos)
-
-### 15.1 `DroppingQueue<T, MaxDepth>`
-
-Arquivo:
-
-- `include/gb/app/frontend/realtime/dropping_queue.hpp`
-
-O que faz:
-
-- fila thread-safe com tamanho maximo
-- quando enche, descarta item mais antigo
-- conta quantos itens foram descartados
-
-Por que existe:
-
-- evita travar pipeline quando uma thread fica mais lenta
-
-### 15.2 `AudioRingBuffer`
-
-Arquivos:
-
-- `include/gb/app/frontend/realtime/audio_ring_buffer.hpp`
-- `src/app/frontend/realtime/audio_ring_buffer.cpp`
-
-O que faz:
-
-- buffer circular thread-safe de samples de audio
-- `push` escreve
-- `pop` le com timeout
-- `clear` limpa
-- `close` acorda esperas e encerra
-
-### 15.3 `FrameTimeline`
-
-Arquivos:
-
-- `include/gb/app/frontend/realtime/frame_timeline.hpp`
-- `src/app/frontend/realtime/frame_timeline.cpp`
-
-O que faz:
-
-- historico de save states para navegar frame a frame
-
-### 15.4 `session_models.hpp`
-
-Arquivo:
-
-- `include/gb/app/frontend/realtime/session_models.hpp`
-
-O que centraliza:
-
-- pacotes de frame bruto/RGB
-- estado de busca
-- estado de edicao de breakpoint
-- escrita de memoria enfileirada
-
-## 16. Nucleo de emulacao (core)
-
-## 16.1 `GameBoy`
-
-Arquivos:
-
-- `include/gb/core/gameboy.hpp`
-- `src/core/gameboy.cpp`
-- `src/core/gameboy_state_io.cpp`
-
-Papel:
-
-- ponto principal para rodar frame
-- organiza CPU, Bus e Cartridge
-- exporta/importa save state completo
-
-## 16.2 `Bus`
-
-Arquivos:
-
-- `include/gb/core/bus.hpp`
-- `src/core/bus.cpp`
-
-Papel:
-
-- roteamento de leitura/escrita por endereco
-- integracao com PPU/APU/Timer/Joypad/Cartridge
-- eventos de leitura para debug
-- controle de recursos CGB (VRAM bank, WRAM bank, HDMA, serial)
-
-## 16.3 `CPU`
-
-Arquivos:
-
-- `include/gb/core/cpu.hpp`
-- `src/core/cpu.cpp`
-- `src/core/cpu_alu.cpp`
-
-Papel:
-
-- executa instrucoes LR35902
-- gerencia registradores/flags/interrupcoes
-
-## 16.4 `PPU`
-
-Arquivos:
-
-- `include/gb/core/ppu.hpp`
-- `src/core/ppu.cpp`
-
-Papel:
-
-- gera framebuffer de 160x144
-- suporta caminho mono e caminho color (CGB)
-
-## 16.5 `APU`
-
-Arquivos:
-
-- `include/gb/core/apu.hpp`
-- `src/core/apu.cpp`
-
-Papel:
-
-- gera samples de audio da emulacao
-- inclui CH1, CH2, CH3 e CH4 (noise)
-- CH4 usa LFSR para ruido e envelope de volume
-
-## 16.6 `Timer` e `Joypad`
-
-Arquivos:
-
-- `include/gb/core/timer.hpp`, `src/core/timer.cpp`
-- `include/gb/core/joypad.hpp`, `src/core/joypad.cpp`
-
-Papel:
-
-- timer: DIV/TIMA/TMA/TAC e interrupcao
-- joypad: traduz teclado para registrador FF00
-
-## 17. Cartridge e mappers (refatoracao recente)
-
-Agora os mappers foram separados por arquivo para melhorar manutencao.
-
-Arquivos principais:
-
-- `src/core/cartridge.cpp` (orquestracao da classe `Cartridge`)
-- `src/core/cartridge/mappers/factory.hpp`
-- `src/core/cartridge/mappers/common.hpp`
-- `src/core/cartridge/mappers/no_mbc.cpp`
-- `src/core/cartridge/mappers/mbc1.cpp`
-- `src/core/cartridge/mappers/mbc2.cpp`
-- `src/core/cartridge/mappers/mbc3.cpp`
-- `src/core/cartridge/mappers/mbc5.cpp`
-- `src/core/cartridge/mappers/mmm01.cpp`
-- `src/core/cartridge/mappers/huc3.cpp`
-
-### 17.1 O que ficou em `cartridge.cpp`
-
-- abrir ROM
-- detectar tipo de cartucho
-- escolher mapper via factory
-- salvar/carregar RAM
-- salvar/carregar RTC
-- expor metadados (titulo, CGB support, etc)
-
-### 17.2 O que ficou em cada mapper
-
-Cada arquivo de mapper implementa:
-
-- leitura de ROM/RAM conforme regras do banco
-- escrita de controle de banco
-- serializacao de estado interno do mapper
-
-Casos novos:
-
-- `MMM01`: fase de mapeamento inicial + lock de mapeamento + banking dedicado
-- `HuC3`: comandos virtuais em janela RAM e estado extra salvo no save state
-
-Beneficio tecnico:
-
-- arquivos menores
-- menos classes no mesmo arquivo
-- manutencao mais previsivel
-
-## 18. CGB (Game Boy Color) e paletas
-
-Comportamento atual:
-
-- se ROM suporta CGB, existe modo de paleta colorida
-- se nao suporta, usuario joga com paletas mono (Classic/Pocket)
-- mudanca de paleta e em tempo real via menu `V`
-- modo de hardware pode ser escolhido via CLI em ROM dual-mode (`--hardware`)
-  - `auto`: preferencia CGB quando disponivel
-  - `dmg`: forca comportamento de hardware DMG
-  - `cgb`: forca comportamento CGB quando suportado
-- HDMA (`FF55`) em CGB:
-  - bit7=0: transferencia geral imediata
-  - bit7=1: transferencia por H-Blank (16 bytes por entrada em H-Blank)
-
-Observacao:
-
-- modo CGB no projeto e funcional para varios casos, mas ainda experimental em termos de compatibilidade absoluta com toda biblioteca.
-
-## 18.1 GBA (fase 3)
-
-Onde esta:
-
-- `include/gb/core/gba/system.hpp`
-- `src/core/gba/system.cpp`
-- `include/gb/core/gba/ppu.hpp`
-- `src/core/gba/ppu.cpp`
-- `include/gb/app/frontend/gba_realtime.hpp`
-- `src/app/frontend/gba_realtime.cpp`
-
-O que ja existe:
-
-- parser de ROM `.gba` com leitura de metadados do header (title, game code, maker code)
-- validacao de logo Nintendo, fixed byte e checksum de header
-- CPU ARM7TDMI com cobertura incremental (ARM + Thumb essencial):
-  - data processing, multiply, block transfer, branch (`B`) e branch exchange (`BX`)
-  - load/store de byte/halfword/word em formatos ARM e Thumb principais
-  - SWI HLE basica (Div/DivArm/CpuSet/CpuFastSet + chamadas de espera simplificadas)
-  - correcoes de estabilidade para evitar tela preta:
-    - `CpuFastSet` usando contagem correta em words (nao 8x maior)
-    - leitura de `PC` em ARM data-processing com semantica de pipeline (`+8`)
-    - `BX` em Thumb com `r15` usando `current+4` e alinhamento correto ao trocar ARM/Thumb
-- memoria/timing com mapa principal:
-  - ROM (`0x08000000+`)
-  - EWRAM (`0x02000000`)
-  - IWRAM (`0x03000000`)
-  - Palette RAM (`0x05000000`)
-  - VRAM (`0x06000000`)
-  - OAM (`0x07000000`)
-  - IO (`0x04000000`, incluindo `KEYINPUT/KEYCNT/IE/IF/IME`)
-- timers e interrupcoes basicas:
-  - timers 0..3 com prescaler/cascade/reload/IRQ
-  - IRQ flags de keypad, timer, DMA e PPU quando habilitadas
-  - DMA canal 0..3 com transferencia 16/32-bit (start imediato, VBlank e HBlank)
-  - despacho de IRQ em HLE com vetor em `0x03007FFC`
-  - `SWI Halt` e waits basicos para reduzir busy-loop em ROMs
-- PPU separada em modulo proprio:
-  - timing de scanline (`VCOUNT`) e flags de blank (`DISPSTAT`)
-  - renderizacao modo 0 com BG0..BG3 (text) e composicao por prioridade
-  - renderizacao modo 1 (BG0/BG1 text + BG2 affine) e modo 2 (BG2/BG3 affine) em versao inicial
-  - renderizacao de OBJ/sprites basicos no modo 0 e overlay em modos 3/4/5
-  - OBJ com melhorias de compatibilidade:
-    - ignora OBJ desabilitado no modo nao-afim (bit9 em `attr0`)
-    - ajuste de indexacao de tile para OBJ 2D em 8bpp
-    - primeira versao de transformacao afim de OBJ (matriz `PA/PB/PC/PD`)
-  - renderizacao modo 3, modo 4 e modo 5
-  - base de OBJ corrigida por modo de video (0x10000 nos modos 0-2 e 0x14000 nos modos 3-5)
-  - indexacao de tile OBJ 8bpp em unidades de 32 bytes (comportamento real de OAM)
-- loop SDL basico em 240x160 (resolucao nativa do GBA)
-- selecao por CLI: `--system gba`
-- memoria/bus com ajustes de fidelidade que reduzem artefatos:
-  - espelhamento correto da VRAM em `0x06018000-0x0601FFFF`
-  - leitura `read32` com rotacao para enderecos desalinhados e alinhamento em `read16/write16/write32`
-  - em PRAM/VRAM, escrita de 8-bit replica o byte nos dois bytes do halfword (comportamento de barramento 16-bit)
-  - em OAM, escrita de 8-bit e ignorada (comportamento real do hardware)
-- pipeline de cor corrigido:
-  - conversao de paleta/framebuffer usa ordenacao real do GBA (`RGB555` em memoria) para `RGB565` no SDL
-- CPU ARM com mais fidelidade de operandos:
-  - `Operand2` com shift por registrador (LSL/LSR/ASR/ROR)
-
-O que ainda nao existe:
-
-- compatibilidade Thumb/ARM completa (ainda faltam grupos e edge-cases de ISA)
-- pipeline grafico completo (affine/rotacao, janelas, blending e efeitos por pixel)
-- audio de hardware GBA
-- save types de cartucho GBA
-
-Objetivo dessa fase:
-
-- estabelecer arquitetura separada (`core/gba`) com base executavel para evoluir sem poluir o core de GB.
-- sair do framebuffer de placeholder e entrar em caminho real de renderizacao do GBA.
-- destravar titulos que dependem de Thumb, DMA/timers e composicao BG+OBJ.
-
-## 19. Captura de tela
-
-- tecla `F9`
-- salva como PPM RGB24
-- caminho: `captures/<rom>/...`
-
-## 20. Testes automatizados
-
-Comandos:
-
-```bash
-cmake -S . -B build -DBUILD_TESTING=ON
+cmake -S . -B build \
+  -DGBEMU_ENABLE_GBA=ON \
+  -DGBEMU_BUILD_EXPERIMENTAL_GBA=OFF \
+  -DGBEMU_USE_SDL2=ON \
+  -DBUILD_TESTING=ON
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-Estado atual esperado:
+Somente GB/GBC, sem SDL ou mGBA:
 
-- 1 executavel de testes (`gbemu_tests`)
-- suites por modulo (`gbemu_suite_cpu`, `gbemu_suite_ppu`, etc)
-- total de 10 testes registrados no CTest
+```bash
+cmake -S . -B build-gb \
+  -DGBEMU_ENABLE_GBA=OFF \
+  -DGBEMU_BUILD_EXPERIMENTAL_GBA=OFF \
+  -DGBEMU_USE_SDL2=OFF \
+  -DBUILD_TESTING=ON
+cmake --build build-gb -j
+ctest --test-dir build-gb --output-on-failure
+```
 
-## 21. Ordem sugerida para estudar o codigo (bem didatica)
+Core GBA experimental e seus testes:
 
-1. `src/app/main.cpp`
-2. `src/app/runtime_paths.cpp`
-3. `src/app/frontend/rom_selector.cpp`
-4. `src/app/frontend/realtime.cpp`
-5. `src/app/frontend/debug_ui.cpp`
-6. `src/app/frontend/realtime_support.cpp`
-7. `src/core/gameboy.cpp`
-8. `src/core/bus.cpp`
-9. `src/core/cpu.cpp` e `src/core/cpu_alu.cpp`
-10. `src/core/ppu.cpp`
-11. `src/core/apu.cpp`
-12. `src/core/cartridge.cpp` + `src/core/cartridge/mappers/*`
+```bash
+cmake -S . -B build-experimental \
+  -DGBEMU_ENABLE_GBA=OFF \
+  -DGBEMU_BUILD_EXPERIMENTAL_GBA=ON \
+  -DGBEMU_USE_SDL2=OFF \
+  -DBUILD_TESTING=ON
+cmake --build build-experimental -j
+ctest --test-dir build-experimental --output-on-failure
+```
 
-Se voce seguir nessa ordem, voce entende primeiro o "caminho do usuario" e depois aprofunda no hardware emulado.
+Quando `GBEMU_ENABLE_GBA=ON`, a configuracao falha com uma mensagem clara se
+headers ou biblioteca do mGBA nao estiverem instalados.
 
-## 22. Resumo final (em linguagem simples)
+## Organizacao do codigo
 
-Este projeto transforma seu PC em um Game Boy virtual com:
+```text
+include/gb/core/                  interfaces do core GB/GBC
+include/gb/core/gba/              mGBA e core GBA experimental
+include/gb/app/                   aplicacao e fronteiras do frontend
+include/gb/app/frontend/realtime/ modelos e sessoes do frontend
+src/core/                         implementacao GB/GBC
+src/core/gba/                     backends GBA
+src/app/                          CLI, caminhos e inicializacao
+src/app/frontend/                 SDL, seletor, debug e RunLab
+src/app/frontend/realtime/        sessoes internas e loop em tempo real
+tests/                            testes automatizados
+tools/orbitalboy-mcp-cpp/         adaptador RunLab/MCP opcional
+```
 
-- execucao realtime em SDL2
-- seletor grafico de ROM
-- debug avancado de memoria/sprites/breakpoints/watchpoints
-- rewind frame a frame
-- fast forward
-- fullscreen com modos de escala
-- paletas e filtros configuraveis
-- saves persistentes (`.state`, `.sav`, `.rtc`)
-- arquitetura multithread com logs
-- codigo modularizado para facilitar manutencao
+### Alvos CMake
 
-Se voce quiser evoluir o projeto, os melhores pontos de extensao hoje sao:
+- `gbcore`: core estavel de GB/GBC.
+- `gbgba_mgba`: adaptador do backend mGBA; usa uma implementacao indisponivel
+  controlada quando GBA esta desabilitado.
+- `gbgba_experimental`: core GBA proprio, criado apenas com a opcao experimental.
+- `gbfrontend_support`: opcoes, caminhos e modulos compartilhados pelo
+  executavel e pelos testes.
+- `gbemu`: aplicacao principal.
+- `gbemu_tests`: testes do runtime suportado e, quando habilitado, do core
+  experimental.
 
-- novos filtros visuais
-- melhorias no pipeline de audio
-- mais cobertura de testes de compatibilidade
-- expansao do suporte CGB por titulo
+## Fluxo da aplicacao
 
-## 23. Ajustes recentes de estabilidade no GBA
+1. `main.cpp` interpreta `AppOptions`.
+2. O sistema alvo e resolvido por opcao ou extensao da ROM.
+3. GB/GBC carrega `GameBoy`; GBA carrega `MgbaCore`.
+4. No modo grafico, o frontend recebe um unico `RealtimeOptions`.
+5. No modo headless, o core executa a quantidade solicitada de frames.
+6. Saves e RTC sao persistidos no encerramento.
 
-Melhorias aplicadas na CPU ARM7TDMI para reduzir travamentos com tela preta e corrupcao de fluxo em jogos GBA:
+Nao existe selecao dinamica de outro backend GBA. O runtime GBA sempre usa
+mGBA nativo.
 
-- Retorno de IRQ ficou mais robusto:
-  - snapshot de registradores ampliado para `r0..r14` (antes era parcial)
-  - restauracao de CPSR e PC de retorno de forma mais consistente
-  - suporte de trampolim de retorno (`0xFFFF0010`) em mais caminhos de `BX`
-- Foi adicionada cobertura de teste para esse caso:
-  - `gba_cpu_irq_thumb_pop_bx_trampoline_restores_sp`
-- `BX` invalido passou a usar fallback mais conservador:
-  - so retorna por `LR` quando o alvo parece um retorno plausivel
-  - evita auto-loop em caudas de funcao que causavam crescimento indevido do `SP`
+## Frontend em tempo real
 
-Observacao importante:
-- O fluxo GBA ainda e experimental e alguns titulos podem continuar exigindo ajustes finos de IRQ/PPU para compatibilidade total.
+`runRealtime` e uma fronteira pequena: constroi `RealtimeSession` e executa a
+sessao. As responsabilidades internas sao separadas:
 
-## 24. Correcao recente (IRQ stack leak no GBA)
+- `SessionPersistence`: preferencias, controles e cheats.
+- `RunLabSession`: caminhos, prompts, feedback e cadencia de exportacao.
+- `NetplaySession`: atraso local, previsoes, historico, checksums e contadores.
+- `DebugSession`: breakpoints, busca de memoria, watch e escrita pendente.
+- `EmulationWorker`: inicio, parada idempotente e join dos workers.
+- `SdlSessionView`: propriedade RAII de janela, renderer, texturas, audio e
+  controle.
 
-Foi corrigido um problema de compatibilidade que podia quebrar retornos de funcao (ex.: `POP {r0}; BX r0`) em jogos como Advance Wars:
+SDL continua sendo acessado no thread principal para eventos e desenho. Os
+workers cuidam de emulacao, conversao de frames e audio. As filas limitadas
+evitam crescimento de memoria quando um consumidor fica atrasado.
 
-- O dispatcher de IRQ voltou a colocar a marca de retorno na stack de IRQ (necessario para handlers THUMB).
-- Agora a CPU salva o `SP` original da bank IRQ (`irqEntrySp_`) e restaura esse valor no retorno do trampolim.
-- Com isso, a stack de IRQ nao fica descendo a cada interrupcao e nao sobrescreve stack de codigo comum.
-- Tambem foi mantido `r0 = 0x04000000` ao entrar no handler, seguindo a ABI esperada por varios handlers.
-- O core agora suporta IRQ aninhada com pilha de contextos (nao apenas 1 contexto global):
-  - cada entrada de IRQ salva `regs/cpsr/pc de retorno/sp da bank IRQ`
-  - cada retorno por trampolim desempilha exatamente 1 contexto
-  - isso evita perda de contexto quando uma IRQ ocorre durante outra IRQ
-- Decoder ARM corrigido para reduzir corrupcao silenciosa:
-  - suporte a `UMULL/UMLAL/SMULL/SMLAL`
-  - suporte a `SWP/SWPB`
-  - `halfword transfer` agora nao captura instrucoes de multiply/swap por engano
-  - instrucoes reservadas de halfword nao sao mais tratadas como sucesso falso
-- PPU melhorada para aproximar compatibilidade de jogos:
-  - suporte a `OBJ Window` (mascara via byte alto de `WINOUT`)
-  - geracao de mascara OBJWIN por pixel com base real em OAM/VRAM (sprites em mode2)
-  - aplicacao da mascara OBJWIN em BG/OBJ/color effects no pipeline de render
-  - novo teste de regressao: `gba_ppu_obj_window_uses_winout_upper_mask`
+## Linha de comando
 
-## 25. Correcao recente (glitch visual por SWI RLUnComp)
+Opcoes principais:
 
-Foi corrigido um bug na descompressao RLE da BIOS HLE (`SWI 0x14`/`SWI 0x15`) que podia gerar tiles/blocos corrompidos em jogos GBA:
+- `--rom <arquivo>`: abre uma ROM.
+- `--system <auto|gb|gba>`: seleciona o sistema.
+- `--hardware <auto|dmg|cgb>`: escolhe hardware para ROM GB dual-mode.
+- `--headless [frames]`: executa sem janela.
+- `--scale <n>`: escala inicial.
+- `--audio-buffer <256..8192>`: buffer de audio SDL.
+- `--rom-suite <manifesto>`: executa uma suite de ROMs.
+- `--netplay-delay <0..10>`: atraso local do netplay.
+- `--runlab-control`: habilita a fila opcional de controle RunLab.
 
-- Causa raiz:
-  - em blocos comprimidos do formato RL, o tamanho correto e `len = (controle & 0x7F) + 3`
-  - a implementacao estava usando `+1` tambem para blocos comprimidos
-- Efeito pratico:
-  - dados descomprimidos ficavam truncados/errados
-  - texturas e mapas podiam aparecer com artefatos em "mosaico" ou tiles embaralhados
-- Correcao aplicada:
-  - `runRlUnComp()` agora usa `+3` para blocos comprimidos e mantem `+1` para blocos literais
-- Cobertura de teste adicionada:
-  - `gba_swi_rluncomp_wram_uses_compressed_length_plus_three`
-  - `gba_swi_rluncomp_vram_packs_bytes_in_halfwords`
+Exemplos:
 
-## 26. Ajuste recente na PPU GBA (raster/affine por linha)
+```bash
+./build/gbemu --rom roms/jogo.gb
+./build/gbemu --system gba --rom roms/jogo.gba
+./build/gbemu --rom roms/teste.gb --headless 300
+```
 
-Para reduzir artefatos em cenas que alteram registradores affine durante o frame:
+## Persistencia
 
-- A PPU agora captura snapshots por scanline dos registradores affine de BG2/BG3:
-  - `PA/PB/PC/PD`
-  - `BGxX/BGxY` (com leitura em formato signed 28-bit, como no hardware)
-- Esses snapshots sao usados no `renderAffineBackground()` para montar coordenadas por linha, em vez de usar apenas um unico conjunto de registradores do fim do frame.
-- Isso melhora compatibilidade com efeitos tipo raster/HBlank em jogos GBA.
+Arquivos por ROM ficam em `states/`:
 
-## 27. Ajuste recente de sincronismo de frame no GBA
+- `.state`: save state;
+- `.sav`: RAM persistente do cartucho;
+- `.rtc`: relogio persistente;
+- `.palette`: paleta;
+- `.filters`: filtro;
+- `.controls`: controles;
+- `.cheats`: cheats.
 
-O loop de frame do `System` foi melhorado para ficar alinhado com a PPU:
+Tambem existem:
 
-- Antes:
-  - `runFrame()` executava um numero fixo de instrucoes (`70000`) e renderizava
-  - isso podia capturar estado de VRAM no meio de atualizacoes internas do jogo
-- Agora:
-  - `runFrame()` roda CPU/PPU ate detectar wrap de scanline (`LY` volta de `227` para `0`)
-  - a renderizacao ocorre em um ponto de frame mais estavel
-- Efeito esperado:
-  - menos artefato visual intermitente em cenas que atualizam BG/tiles com timing sensivel
+- `states/global.controls`;
+- `states/global.network`;
+- `captures/<rom>/` para capturas;
+- `.runlab/` para estado e filas do RunLab.
 
-Atualizacao de desempenho:
+Replay nao faz parte do runtime.
 
-- O modo padrao voltou para execucao por frame nominal (`70224` instrucoes), que e mais rapido.
-- O modo de sincronismo por wrap de scanline virou opcional via variavel de ambiente:
-  - `GBEMU_GBA_FRAME_SYNC_SCANLINE=1`
-  - use esse modo se precisar priorizar estabilidade visual em titulos especificos.
+## Controles essenciais
 
-## 28. Otimizacao recente no hot path da CPU GBA
+- Setas ou WASD: direcional.
+- Z/J/K/C: A.
+- X/U/I/V: B.
+- Enter ou Space: Start.
+- Backspace ou Shift direito: Select.
+- Q/E: L/R no GBA.
+- Space: pausa no GB/GBC.
+- Tab: fast-forward.
+- F: fullscreen.
+- F3: barra superior.
+- F9 ou F12: captura.
+- I ou F1: painel de debug.
+- Esc: sair.
 
-Foi aplicada uma melhoria de desempenho relevante no `CpuArm7tdmi`:
+Os menus visuais expõem save states, filtros, paleta, controles, rede e debug.
 
-- Antes: o loop de `step()` fazia varias chamadas `std::getenv(...)` por instrucao para checar logs.
-- Agora:
-  - as flags de log sao lidas uma vez no `reset()` (`refreshLogFlags()`)
-  - o hot path usa booleans em memoria (`logFlags_.*`)
-- Resultado:
-  - reduz custo por instrucao
-  - melhora FPS no modo GBA sem alterar comportamento funcional quando logs estao desligados.
+## Testes e verificacao
 
-## 29. Otimizacao recente na PPU GBA (window mask fast path)
+O comando padrao e:
 
-A PPU agora evita trabalho desnecessario quando janelas de hardware (WIN0/WIN1/OBJWIN) nao estao habilitadas:
+```bash
+ctest --test-dir build --output-on-failure
+```
 
-- Antes:
-  - chamadas de `windowMaskForPixel(x, y)` eram feitas para muitos pixels, mesmo sem janelas ativas
-- Agora:
-  - quando nao ha janelas ativas, usa mascara fixa `0x3F` direto
-  - evita funcoes e leituras extras no caminho quente de render
-- Efeito:
-  - ganho de desempenho no render GBA, principalmente em cenas comuns sem window effects.
+Para executar apenas uma suite durante desenvolvimento:
 
-## 30. Compatibilidade GBA: backend de backup (SRAM/FLASH/EEPROM)
+```bash
+./build/gbemu_tests --suite cpu
+./build/gbemu_tests --suite frontend
+```
 
-Foi implementado um backend de backup mais completo no core GBA, focado em destravar boot e saves de mais jogos:
+O script abaixo valida os contratos dos modos de build:
 
-- Deteccao automatica por assinatura na ROM:
-  - `SRAM_V*` / `SRAM_F_V*` -> SRAM
-  - `FLASH_V*` / `FLASH512_V*` -> Flash 64 KiB
-  - `FLASH1M_V*` -> Flash 128 KiB (banked)
-  - `EEPROM_V*` -> EEPROM serial
-- Mapeamento funcional de backup:
-  - SRAM/Flash em `0x0E000000`
-  - EEPROM serial em `0x0Dxxxxxx` (bitstream por halfword, como usado por DMA)
-- Flash com comandos principais:
-  - unlock (`AA 55`), `A0` (program), `90/F0` (ID on/off), `80` + sequencia de erase, `B0` (bank switch no 1M)
-- EEPROM com fluxo de comando:
-  - write/read por bits
-  - deteccao automatica de modo 6-bit/14-bit pelo tamanho do comando
-  - fila de retorno com 4 dummy bits + 64 bits de dados
-- Persistencia em arquivo para GBA:
-  - `main` agora carrega e grava automaticamente `states/<rom>.sav` tambem no fluxo GBA
-  - mensagens no terminal indicam tipo de backup e caminho do save
+```bash
+cmake -P tests/cmake/configure_matrix.cmake
+```
 
-Impacto pratico:
-- ROMs que travavam na inicializacao por falta de emulacao de backup (como `Super Mario Advance 2`) passam a avançar melhor.
-- Saves internos de jogos GBA agora persistem entre sessoes no mesmo formato `.sav` usado no projeto.
+A CI cobre Linux com runtime nativo, sanitizers e core experimental, macOS com
+mGBA/SDL2, e Windows em modo GB/GBC-only.
 
-## 31. Modo de compatibilidade automatica por ROM (game code)
+## RunLab/MCP
 
-Foi adicionado um perfil de compatibilidade automatico, aplicado no carregamento da ROM GBA:
+O adaptador C++ e opcional:
 
-- O `System` agora monta um `CompatibilityProfile` a partir do `game code` do header.
-- Esse perfil controla ajustes sem o usuario precisar configurar manualmente.
-- O frontend mostra no log:
-  - `perfil de compatibilidade: <nome>`
+```bash
+cmake -S . -B build-mcp \
+  -DGBEMU_ENABLE_GBA=OFF \
+  -DGBEMU_BUILD_MCP=ON \
+  -DBUILD_TESTING=ON
+cmake --build build-mcp --target orbitalboy-mcp
+```
 
-Perfis iniciais implementados:
+Detalhes ficam em `docs/runlab-mcp-cpp.md`.
 
-- `AA2E` (Super Mario Advance 2):
-  - usa estrategia dinamica de EEPROM (sem travar em 6/14 bits fixo)
-  - mantem parametros de timing em modo auto
-- `AWRE` (Advance Wars):
-  - ativa modo de compatibilidade de FLASH (backend simplificado 8-bit) para evitar travas em rotinas de init de save
+## Regras de manutencao
 
-Se nenhuma ROM casar com um perfil conhecido:
-- usa `default` (comportamento padrao do emulador)
-- `fallback` adaptativo pode ativar sincronismo por scanline automaticamente se o jogo ficar muitos frames sem configurar display no boot.
-
-## 32. Correcao do aviso \"Your saved data is corrupt\" no Mario Advance 2
-
-O aviso acontecia principalmente quando existia `.sav` legado com formato incompativel ou quando a largura de endereco EEPROM era inferida de forma errada.
-
-Ajustes aplicados:
-
-- O parser EEPROM passou a usar o tamanho real da transferencia DMA (`9/17/73/81`) para decidir 6-bit ou 14-bit de forma dinamica.
-- O carregamento de `.sav` EEPROM tambem usa heuristica por tamanho de arquivo (512 ou 8192 bytes), para migrar saves legados.
-- O save e persistido no tamanho coerente com o modo EEPROM efetivo da sessao.
-- Para jogos com FLASH sensiveis ao protocolo, foi adicionado modo de compatibilidade de escrita/leitura direta por byte no barramento de backup.
-
-Resultado:
-- reduz fortemente falsos positivos de save corrompido e melhora compatibilidade entre jogos EEPROM diferentes.
+- Nao ligar o core GBA experimental ao executavel principal.
+- Nao introduzir outro seletor de backend GBA.
+- Preservar formatos de save, RTC, state, controles e rede.
+- Manter logica sem SDL fora de blocos condicionais de SDL.
+- Adicionar testes de caracterizacao antes de extrair comportamento do loop.
+- Validar ao menos os modos nativo, GB-only e experimental antes de integrar.

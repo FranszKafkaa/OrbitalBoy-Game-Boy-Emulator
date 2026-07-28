@@ -5,13 +5,91 @@ on:
   pull_request:
 
 jobs:
-  build-and-test:
+  linux-native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libmgba-dev libsdl2-dev
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DGBEMU_ENABLE_GBA=ON
+          -DGBEMU_BUILD_EXPERIMENTAL_GBA=OFF
+          -DGBEMU_USE_SDL2=ON
+          -DGBEMU_BUILD_MCP=ON
+          -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build -j 2
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  linux-headless-sanitizers:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Configure
-        run: cmake -S . -B build -DGBEMU_USE_SDL2=OFF -DBUILD_TESTING=ON
+        env:
+          CXXFLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
+          LDFLAGS: -fsanitize=address,undefined
+        run: >
+          cmake -S . -B build
+          -DGBEMU_ENABLE_GBA=OFF
+          -DGBEMU_BUILD_EXPERIMENTAL_GBA=OFF
+          -DGBEMU_USE_SDL2=OFF
+          -DBUILD_TESTING=ON
+          -DCMAKE_BUILD_TYPE=Debug
       - name: Build
-        run: cmake --build build -j
+        run: cmake --build build -j 2
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  linux-experimental-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DGBEMU_ENABLE_GBA=OFF
+          -DGBEMU_BUILD_EXPERIMENTAL_GBA=ON
+          -DGBEMU_USE_SDL2=OFF
+          -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build -j 2
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  macos-native:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: brew install mgba sdl2
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DGBEMU_ENABLE_GBA=ON
+          -DGBEMU_BUILD_EXPERIMENTAL_GBA=OFF
+          -DGBEMU_USE_SDL2=ON
+          -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build -j 2
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  windows-gb-only:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DGBEMU_ENABLE_GBA=OFF
+          -DGBEMU_BUILD_EXPERIMENTAL_GBA=OFF
+          -DGBEMU_USE_SDL2=OFF
+          -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
