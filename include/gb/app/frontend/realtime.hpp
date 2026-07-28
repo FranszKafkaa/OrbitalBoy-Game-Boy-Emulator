@@ -18,7 +18,6 @@ int runRealtime(
     const std::string& cheatsPath,
     const std::string& palettePath,
     const std::string& rtcPath,
-    const std::string& replayPath,
     const std::string& filtersPath,
     const std::string& captureDir,
     const std::string& linkConnect,

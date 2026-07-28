@@ -26,11 +26,6 @@ std::filesystem::path writeToolState() {
     return path;
 }
 
-std::string toolText(const orbitalboy::mcp::Json& result) {
-    const auto& content = result.find("content")->asArray();
-    return content.front().find("text")->asString();
-}
-
 } // namespace
 
 void runToolTests() {

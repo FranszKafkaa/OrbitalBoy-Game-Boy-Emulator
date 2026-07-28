@@ -28,7 +28,6 @@
 #include "gb/app/frontend/realtime/frame_timeline.hpp"
 #include "gb/app/frontend/realtime/link_transport.hpp"
 #include "gb/app/frontend/realtime/network_config.hpp"
-#include "gb/app/frontend/realtime/replay_io.hpp"
 #include "gb/app/frontend/realtime/runlab_control_queue.hpp"
 #include "gb/app/frontend/realtime/session_models.hpp"
 #include "gb/app/frontend/realtime/save_slots.hpp"
@@ -55,7 +54,6 @@ int runRealtime(
     const std::string& cheatsPath,
     const std::string& palettePath,
     const std::string& rtcPath,
-    const std::string& replayPath,
     const std::string& filtersPath,
     const std::string& captureDir,
     const std::string& linkConnect,
@@ -67,7 +65,6 @@ int runRealtime(
     const std::string& runLabStatePath,
     const std::string& runLabCommandQueuePath
 ) {
-    (void)replayPath;
     SDL_SetHint(SDL_HINT_RENDER_VSYNC, "1");
     SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
@@ -179,9 +176,6 @@ int runRealtime(
     bool controlsEditPad = false;
     int activeSaveSlot = 0;
     bool cheatsEnabled = true;
-    bool replayRecording = false;
-    bool replayPlaying = false;
-    std::size_t replayCursor = 0;
     DisplayPaletteMode paletteMode = DisplayPaletteMode::GameBoyClassic;
     const bool cgbPaletteAvailable = gb.cartridge().cgbSupported();
     if (const auto saved = loadPalettePreference(palettePath); saved.has_value()) {
@@ -215,9 +209,6 @@ int runRealtime(
             std::cerr << "  - " << err << "\n";
         }
     }
-    ReplayData replayData{};
-    replayData.version = 1;
-    replayData.seed = 0;
     UdpLinkTransport linkTransport{};
     bool socketLinkAvailable = false;
     if (linkHostPort > 0) {
@@ -333,7 +324,6 @@ int runRealtime(
     std::mutex gbMutex{};
     std::mutex breakpointsMutex{};
     std::mutex queuedWriteMutex{};
-    std::mutex replayMutex{};
     std::mutex runLabControlMutex{};
     std::atomic<bool> mtRunning{true};
     std::atomic<bool> pausedAtomic{paused};
@@ -1322,21 +1312,8 @@ int runRealtime(
                         localInputMask = static_cast<std::uint8_t>(localInputMask | controlTick.buttonMask);
                         localAppliedMask = localInputMask;
                     }
-                    bool replayPlayingNow = false;
                     std::unique_ptr<NetplayFrameRecord> netplayFrameRecord;
-                    {
-                        std::lock_guard<std::mutex> replayLock(replayMutex);
-                        replayPlayingNow = replayPlaying;
-                        if (replayPlaying) {
-                            if (replayCursor < replayData.frameInputs.size()) {
-                                localInputMask = replayData.frameInputs[replayCursor++];
-                                applyJoypadMask(gb.joypad(), localInputMask);
-                            } else {
-                                replayPlaying = false;
-                            }
-                        }
-                    }
-                    if (netplayEnabled && !replayPlayingNow) {
+                    if (netplayEnabled) {
                         const int desiredDelay = std::clamp(
                             netplayDelayAtomic.load(std::memory_order_relaxed),
                             0,
@@ -1397,7 +1374,7 @@ int runRealtime(
                         applyCheats(cheats, gb.bus());
                     }
 
-                    if (netplayEnabled && !replayPlayingNow) {
+                    if (netplayEnabled) {
                         const std::uint32_t checksum = frameChecksum(gb);
                         localFrameChecksums[frameId] = checksum;
                         while (localFrameChecksums.size() > kNetplayHistoryLimit) {
@@ -1415,7 +1392,7 @@ int runRealtime(
                         (void)netplayTransport.sendNetplayChecksum(frameId, checksum);
                     }
 
-                    if (netplayEnabled && !replayPlayingNow) {
+                    if (netplayEnabled) {
                         if (netplayFrameRecord) {
                             netplayHistory.push_back(std::move(*netplayFrameRecord));
                             while (netplayHistory.size() > kNetplayHistoryLimit) {
@@ -1495,13 +1472,6 @@ int runRealtime(
                                 uiMessage = "NETPLAY ROLLBACK";
                                 uiMessageFrames = 90;
                             }
-                        }
-                    }
-
-                    {
-                        std::lock_guard<std::mutex> replayLock(replayMutex);
-                        if (replayRecording) {
-                            replayData.frameInputs.push_back(joypadMaskFromState(gb.joypad().state()));
                         }
                     }
 

@@ -22,7 +22,6 @@ int runRealtime(
     const std::string& cheatsPath,
     const std::string& palettePath,
     const std::string& rtcPath,
-    const std::string& replayPath,
     const std::string& filtersPath,
     const std::string& captureDir,
     const std::string& linkConnect,
@@ -45,7 +44,6 @@ int runRealtime(
         cheatsPath,
         palettePath,
         rtcPath,
-        replayPath,
         filtersPath,
         captureDir,
         linkConnect,
@@ -59,24 +57,14 @@ int runRealtime(
     );
 }
 
-int runGbaLibretroRealtime(
-    gba::LibretroCore& core,
-    int scale,
-    const std::string& statePath,
-    const std::string& batteryRamPath,
-    const std::string& captureDir
-) {
-    return frontend::runGbaLibretroRealtime(core, scale, statePath, batteryRamPath, captureDir);
-}
-
-int runGbaMgbaRealtime(
+int runGbaRealtime(
     gba::MgbaCore& core,
     int scale,
     const std::string& statePath,
     const std::string& batteryRamPath,
     const std::string& captureDir
 ) {
-    return frontend::runGbaMgbaRealtime(core, scale, statePath, batteryRamPath, captureDir);
+    return frontend::runGbaRealtime(core, scale, statePath, batteryRamPath, captureDir);
 }
 #endif
 

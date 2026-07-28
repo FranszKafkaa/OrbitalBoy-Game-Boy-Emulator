@@ -52,6 +52,28 @@ const char* filterUiName(VideoFilterMode mode) {
     }
 }
 
+std::uint8_t packButtons(
+    bool right,
+    bool left,
+    bool up,
+    bool down,
+    bool a,
+    bool b,
+    bool select,
+    bool start
+) {
+    std::uint8_t mask = 0;
+    if (right) mask |= 1u << 0;
+    if (left) mask |= 1u << 1;
+    if (up) mask |= 1u << 2;
+    if (down) mask |= 1u << 3;
+    if (a) mask |= 1u << 4;
+    if (b) mask |= 1u << 5;
+    if (select) mask |= 1u << 6;
+    if (start) mask |= 1u << 7;
+    return mask;
+}
+
 void applySharpenRgb24(const RgbFrame& in, RgbFrame& out) {
     out = in;
     applySharpenRgb24(in.data(), out.data(), gb::PPU::ScreenWidth, gb::PPU::ScreenHeight);

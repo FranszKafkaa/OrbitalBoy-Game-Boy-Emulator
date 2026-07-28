@@ -38,7 +38,6 @@ endif()
 set(GBEMU_CORE_SOURCES
     src/core/gameboy.cpp
     src/core/gameboy_state_io.cpp
-    src/core/gba/libretro_core.cpp
     src/core/cartridge.cpp
     src/core/cartridge/mappers/no_mbc.cpp
     src/core/cartridge/mappers/mbc1.cpp
@@ -81,7 +80,6 @@ set(GBEMU_REALTIME_SUPPORT_SOURCES
     src/app/frontend/realtime/frame_timeline.cpp
     src/app/frontend/realtime/save_slots.cpp
     src/app/frontend/realtime/cheat_engine.cpp
-    src/app/frontend/realtime/replay_io.cpp
     src/app/frontend/realtime/runlab_control_queue.cpp
     src/app/frontend/realtime/control_bindings.cpp
     src/app/frontend/realtime/link_transport.cpp

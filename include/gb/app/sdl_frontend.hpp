@@ -2,7 +2,6 @@
 
 #include <string>
 
-#include "gb/core/gba/libretro_core.hpp"
 #include "gb/core/gba/mgba_core.hpp"
 #include "gb/core/gameboy.hpp"
 
@@ -22,7 +21,6 @@ int runRealtime(
     const std::string& cheatsPath,
     const std::string& palettePath,
     const std::string& rtcPath,
-    const std::string& replayPath,
     const std::string& filtersPath,
     const std::string& captureDir,
     const std::string& linkConnect,
@@ -35,14 +33,7 @@ int runRealtime(
     const std::string& runLabCommandQueuePath
 );
 
-int runGbaLibretroRealtime(
-    gba::LibretroCore& core,
-    int scale,
-    const std::string& statePath,
-    const std::string& batteryRamPath,
-    const std::string& captureDir
-);
-int runGbaMgbaRealtime(
+int runGbaRealtime(
     gba::MgbaCore& core,
     int scale,
     const std::string& statePath,

@@ -18,7 +18,6 @@
 #include "gb/app/sdl_frontend.hpp"
 #include "gb/core/environment.hpp"
 #include "gb/core/gameboy.hpp"
-#include "gb/core/gba/libretro_core.hpp"
 #include "gb/core/gba/mgba_core.hpp"
 
 #ifdef GBEMU_USE_SDL2
@@ -231,54 +230,6 @@ void writeLittleEndian16(std::ofstream& out, std::uint16_t value) {
     out.write(reinterpret_cast<const char*>(bytes), sizeof(bytes));
 }
 
-void writeGbaFrameAsBmp(const std::string& path, const gb::gba::LibretroCore& core) {
-    std::ofstream out(path, std::ios::binary);
-    if (!out) {
-        return;
-    }
-
-    constexpr int width = gb::gba::LibretroCore::ScreenWidth;
-    constexpr int height = gb::gba::LibretroCore::ScreenHeight;
-    constexpr int bytesPerPixel = 3;
-    const std::uint32_t rowStride = static_cast<std::uint32_t>((width * bytesPerPixel + 3) & ~3);
-    const std::uint32_t pixelDataSize = rowStride * static_cast<std::uint32_t>(height);
-    const std::uint32_t fileSize = 14U + 40U + pixelDataSize;
-
-    out.put('B');
-    out.put('M');
-    writeLittleEndian32(out, fileSize);
-    writeLittleEndian16(out, 0U);
-    writeLittleEndian16(out, 0U);
-    writeLittleEndian32(out, 54U);
-    writeLittleEndian32(out, 40U);
-    writeLittleEndian32(out, static_cast<std::uint32_t>(width));
-    writeLittleEndian32(out, static_cast<std::uint32_t>(height));
-    writeLittleEndian16(out, 1U);
-    writeLittleEndian16(out, 24U);
-    writeLittleEndian32(out, 0U);
-    writeLittleEndian32(out, pixelDataSize);
-    writeLittleEndian32(out, 2835U);
-    writeLittleEndian32(out, 2835U);
-    writeLittleEndian32(out, 0U);
-    writeLittleEndian32(out, 0U);
-
-    const unsigned char padding[3] = {0U, 0U, 0U};
-    const auto& frame = core.framebuffer();
-    for (int y = height - 1; y >= 0; --y) {
-        const auto rowBase = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
-        for (int x = 0; x < width; ++x) {
-            const gb::u16 pixel = frame[rowBase + static_cast<std::size_t>(x)];
-            const unsigned char b = static_cast<unsigned char>((pixel & 0x1FU) * 255U / 31U);
-            const unsigned char g = static_cast<unsigned char>(((pixel >> 5U) & 0x3FU) * 255U / 63U);
-            const unsigned char r = static_cast<unsigned char>(((pixel >> 11U) & 0x1FU) * 255U / 31U);
-            out.write(reinterpret_cast<const char*>(&b), 1);
-            out.write(reinterpret_cast<const char*>(&g), 1);
-            out.write(reinterpret_cast<const char*>(&r), 1);
-        }
-        out.write(reinterpret_cast<const char*>(padding), rowStride - static_cast<std::uint32_t>(width * bytesPerPixel));
-    }
-}
-
 void writeGbaFrameAsBmp(const std::string& path, const gb::gba::MgbaCore& core) {
     std::ofstream out(path, std::ios::binary);
     if (!out) {
@@ -396,42 +347,6 @@ bool loadGame(gb::GameBoy& gb, const gb::AppOptions& options) {
     return true;
 }
 
-bool shouldUseLibretroGbaCore() {
-    if (gb::hasEnvironmentVariable("GBEMU_GBA_LIBRETRO_CORE")) {
-        return true;
-    }
-    const auto value = gb::readEnvironmentVariable("GBEMU_GBA_CORE");
-    return value.has_value() && toLowerAscii(*value) == "libretro";
-}
-
-bool loadLibretroGbaGame(gb::gba::LibretroCore& core, const gb::AppOptions& options) {
-    const std::string corePath = gb::gba::resolveLibretroGbaCorePath();
-    if (corePath.empty()) {
-        std::cerr << "core GBA libretro nao encontrado.\n"
-                  << "defina GBEMU_GBA_LIBRETRO_CORE=/caminho/para/mgba_libretro.dylib\n";
-        return false;
-    }
-    if (!core.loadCore(corePath)) {
-        return false;
-    }
-
-    const std::string resolvedRomPath = gb::resolveRomPathForRuntime(options.romPath);
-    if (!core.loadRomFromFile(resolvedRomPath)) {
-        return false;
-    }
-
-    std::cout << "ROM GBA carregada no core externo: "
-              << std::filesystem::path(resolvedRomPath).filename().string() << "\n";
-    std::cout << "core externo: " << core.coreName() << "\n";
-    std::cout << "core path: " << core.corePath() << "\n";
-
-    const std::string batteryPath = gb::batteryRamPathForRom(resolvedRomPath);
-    if (core.loadBackupFromFile(batteryPath)) {
-        std::cout << "save interno GBA carregado: " << batteryPath << "\n";
-    }
-    return true;
-}
-
 bool loadNativeMgbaGame(gb::gba::MgbaCore& core, const gb::AppOptions& options) {
 #ifndef GBEMU_HAVE_MGBA
     static_cast<void>(core);
@@ -485,27 +400,6 @@ int runRealtimeFlow(gb::AppOptions& options) {
     while (true) {
         const ResolvedTargetSystem targetSystem = resolveTargetSystem(options);
         if (targetSystem == ResolvedTargetSystem::Gba) {
-            if (shouldUseLibretroGbaCore()) {
-                gb::gba::LibretroCore core;
-                if (!loadLibretroGbaGame(core, options)) {
-                    return 1;
-                }
-                const std::string batteryPath = gb::batteryRamPathForRom(options.romPath);
-                const std::string statePath = gb::statePathForRom(options.romPath);
-                const std::string captureDir = gb::captureDirForRom(options.romPath);
-                const int rc = gb::runGbaLibretroRealtime(core, options.scale, statePath, batteryPath, captureDir);
-                if (core.saveBackupToFile(batteryPath)) {
-                    std::cout << "save interno GBA gravado: " << batteryPath << "\n";
-                }
-                if (rc == 2) {
-                    if (!openRomSelector(options)) {
-                        return 0;
-                    }
-                    continue;
-                }
-                return rc;
-            }
-
             gb::gba::MgbaCore core;
             if (!loadNativeMgbaGame(core, options)) {
                 return 1;
@@ -513,7 +407,7 @@ int runRealtimeFlow(gb::AppOptions& options) {
             const std::string batteryPath = gb::batteryRamPathForRom(options.romPath);
             const std::string statePath = gb::statePathForRom(options.romPath);
             const std::string captureDir = gb::captureDirForRom(options.romPath);
-            const int rc = gb::runGbaMgbaRealtime(core, options.scale, statePath, batteryPath, captureDir);
+            const int rc = gb::runGbaRealtime(core, options.scale, statePath, batteryPath, captureDir);
             if (core.saveBackupToFile(batteryPath)) {
                 std::cout << "save interno GBA gravado: " << batteryPath << "\n";
             }
@@ -536,7 +430,6 @@ int runRealtimeFlow(gb::AppOptions& options) {
         const std::string cheatsPath = gb::cheatsPathForRom(options.romPath);
         const std::string palettePath = gb::palettePathForRom(options.romPath);
         const std::string rtcPath = gb::rtcPathForRom(options.romPath);
-        const std::string replayPath = gb::replayPathForRom(options.romPath);
         const std::string filtersPath = gb::filtersPathForRom(options.romPath);
         const std::string captureDir = gb::captureDirForRom(options.romPath);
         const int rc = gb::runRealtime(
@@ -550,7 +443,6 @@ int runRealtimeFlow(gb::AppOptions& options) {
             cheatsPath,
             palettePath,
             rtcPath,
-            replayPath,
             filtersPath,
             captureDir,
             options.linkConnect,
@@ -650,65 +542,8 @@ int main(int argc, char** argv) {
             std::cerr << "aviso: --hardware so se aplica ao modo GB, ignorando para GBA\n";
         }
 
-        if (!shouldUseLibretroGbaCore()) {
-            gb::gba::MgbaCore core;
-            if (!loadNativeMgbaGame(core, options)) {
-                return 1;
-            }
-
-            std::vector<HeadlessGbaInputStep> headlessInputScript{};
-            const bool dumpAudio = gb::environmentVariableEnabled("GBEMU_GBA_HEADLESS_DUMP_AUDIO");
-            const std::string dumpAudioPath = gb::readEnvironmentVariable("GBEMU_GBA_HEADLESS_DUMP_AUDIO_PATH")
-                .value_or("frame_gba.wav");
-            std::vector<std::int16_t> capturedAudio{};
-            if (const auto inputScriptText = gb::readEnvironmentVariable("GBEMU_GBA_HEADLESS_INPUT_SCRIPT")) {
-                headlessInputScript = parseHeadlessGbaInputScript(*inputScriptText);
-                if (headlessInputScript.empty()) {
-                    std::cerr << "aviso: script invalido em GBEMU_GBA_HEADLESS_INPUT_SCRIPT, ignorando\n";
-                }
-            }
-
-            const int frames = std::max(1, options.frames);
-            for (int i = 0; i < frames; ++i) {
-                if (!headlessInputScript.empty()) {
-                    core.setInputState(headlessGbaInputForFrame(headlessInputScript, i));
-                }
-                core.runFrame();
-                if (dumpAudio) {
-                    auto frameSamples = core.takeSamples();
-                    if (!frameSamples.empty()) {
-                        capturedAudio.insert(capturedAudio.end(), frameSamples.begin(), frameSamples.end());
-                    }
-                }
-            }
-            if (!dumpAudio) {
-                (void)core.takeSamples();
-            }
-
-            const std::string batteryPath = gb::batteryRamPathForRom(options.romPath);
-            if (core.saveBackupToFile(batteryPath)) {
-                std::cout << "save interno GBA gravado: " << batteryPath << "\n";
-            }
-            if (dumpAudio) {
-                if (writeStereoPcm16Wav(dumpAudioPath, gb::gba::MgbaCore::SampleRate, capturedAudio)) {
-                    std::cout << "audio GBA salvo em " << dumpAudioPath
-                              << " (" << capturedAudio.size() / 2U << " amostras stereo)\n";
-                } else {
-                    std::cerr << "falha ao salvar audio GBA em " << dumpAudioPath << "\n";
-                }
-            }
-            if (gb::environmentVariableEnabled("GBEMU_GBA_HEADLESS_DUMP_FRAME")) {
-                const std::string dumpPath = gb::readEnvironmentVariable("GBEMU_GBA_HEADLESS_DUMP_PATH")
-                    .value_or("frame_gba.bmp");
-                writeGbaFrameAsBmp(dumpPath, core);
-                std::cout << "framebuffer GBA salvo em " << dumpPath << "\n";
-            }
-            std::cout << "execucao headless GBA mGBA finalizada (" << frames << " frames)\n";
-            return 0;
-        }
-
-        gb::gba::LibretroCore core;
-        if (!loadLibretroGbaGame(core, options)) {
+        gb::gba::MgbaCore core;
+        if (!loadNativeMgbaGame(core, options)) {
             return 1;
         }
 
@@ -746,7 +581,7 @@ int main(int argc, char** argv) {
             std::cout << "save interno GBA gravado: " << batteryPath << "\n";
         }
         if (dumpAudio) {
-            if (writeStereoPcm16Wav(dumpAudioPath, gb::gba::LibretroCore::SampleRate, capturedAudio)) {
+            if (writeStereoPcm16Wav(dumpAudioPath, gb::gba::MgbaCore::SampleRate, capturedAudio)) {
                 std::cout << "audio GBA salvo em " << dumpAudioPath
                           << " (" << capturedAudio.size() / 2U << " amostras stereo)\n";
             } else {
@@ -759,7 +594,7 @@ int main(int argc, char** argv) {
             writeGbaFrameAsBmp(dumpPath, core);
             std::cout << "framebuffer GBA salvo em " << dumpPath << "\n";
         }
-        std::cout << "execucao headless GBA libretro finalizada (" << frames << " frames)\n";
+        std::cout << "execucao headless GBA mGBA finalizada (" << frames << " frames)\n";
         return 0;
     }
 

@@ -1928,23 +1928,7 @@ int runGbaRealtimeCommon(
 
 } // namespace
 
-int runGbaLibretroRealtime(
-    gba::LibretroCore& core,
-    int scale,
-    const std::string& statePath,
-    const std::string& batteryRamPath,
-    const std::string& captureDir
-) {
-    (void)batteryRamPath;
-    std::string title = "GBA libretro";
-    if (!core.coreName().empty()) {
-        title += " - ";
-        title += core.coreName();
-    }
-    return runGbaRealtimeCommon(core, scale, title, statePath, captureDir);
-}
-
-int runGbaMgbaRealtime(
+int runGbaRealtime(
     gba::MgbaCore& core,
     int scale,
     const std::string& statePath,

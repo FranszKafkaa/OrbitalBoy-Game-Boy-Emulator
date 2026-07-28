@@ -198,10 +198,6 @@ std::string cheatsPathForRom(const std::string& romPath) {
     return buildStatesPath(romPath, ".cheats");
 }
 
-std::string replayPathForRom(const std::string& romPath) {
-    return buildStatesPath(romPath, ".replay");
-}
-
 std::string captureDirForRom(const std::string& romPath) {
     std::error_code ec;
     const std::filesystem::path root = runtimeDataRoot();

@@ -9,7 +9,6 @@
 #include "gb/app/frontend/realtime/frame_timeline.hpp"
 #include "gb/app/frontend/realtime/link_transport.hpp"
 #include "gb/app/frontend/realtime/network_config.hpp"
-#include "gb/app/frontend/realtime/replay_io.hpp"
 #include "gb/app/frontend/realtime/runlab_control_queue.hpp"
 #include "gb/app/frontend/realtime/save_slots.hpp"
 #include "gb/app/frontend/realtime/timing_policy.hpp"
@@ -104,24 +103,6 @@ TEST_CASE("frontend", "cheat_apply_writes_to_bus") {
     const std::size_t applied = gb::frontend::applyCheats(cheats, gb.bus());
     T_EQ(applied, static_cast<std::size_t>(1));
     T_EQ(gb.bus().peek(0xC000), 0x3A);
-}
-
-TEST_CASE("frontend", "replay_roundtrip_binary") {
-    gb::frontend::ReplayData data{};
-    data.version = 1;
-    data.seed = 42;
-    data.frameInputs = {0x01, 0x12, 0x34, 0xFF};
-
-    const auto path = tests::makeTempPath("replay", ".bin");
-    tests::ScopedPath cleanup(path);
-
-    T_REQUIRE(gb::frontend::saveReplayFile(path.string(), data));
-    const auto loaded = gb::frontend::loadReplayFile(path.string());
-    T_REQUIRE(loaded.has_value());
-    T_EQ(loaded->version, static_cast<std::uint32_t>(1));
-    T_EQ(loaded->seed, static_cast<std::uint32_t>(42));
-    T_EQ(loaded->frameInputs.size(), static_cast<std::size_t>(4));
-    T_EQ(loaded->frameInputs[2], static_cast<std::uint8_t>(0x34));
 }
 
 TEST_CASE("frontend", "pack_buttons_bit_layout") {
