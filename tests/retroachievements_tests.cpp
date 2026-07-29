@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iterator>
 #include <string>
 #include <thread>
@@ -246,7 +247,7 @@ TEST_CASE("retroachievements", "http_returns_completions_only_when_drained") {
         };
     });
 
-    transport.submit({42, gb::frontend::RaHttpChannel::Api, "https://example.invalid", {}});
+    T_REQUIRE(transport.submit({42, gb::frontend::RaHttpChannel::Api, "https://example.invalid", {}}));
     const auto responses = waitAndDrain(transport, gb::frontend::RaHttpChannel::Api);
 
     T_EQ(responses.size(), 1U);
@@ -265,8 +266,8 @@ TEST_CASE("retroachievements", "http_draining_image_preserves_api_completions") 
         };
     });
 
-    transport.submit({11, gb::frontend::RaHttpChannel::Api, "https://example.invalid/api", {}});
-    transport.submit({22, gb::frontend::RaHttpChannel::Image, "https://example.invalid/image", {}});
+    T_REQUIRE(transport.submit({11, gb::frontend::RaHttpChannel::Api, "https://example.invalid/api", {}}));
+    T_REQUIRE(transport.submit({22, gb::frontend::RaHttpChannel::Image, "https://example.invalid/image", {}}));
 
     const auto imageResponses = waitAndDrain(transport, gb::frontend::RaHttpChannel::Image);
     T_EQ(imageResponses.size(), 1U);
@@ -279,9 +280,9 @@ TEST_CASE("retroachievements", "http_draining_image_preserves_api_completions") 
 }
 
 TEST_CASE("retroachievements", "http_submit_executes_only_on_its_worker") {
-    const auto ownerThread = std::this_thread::get_id();
     std::atomic<bool> executorStarted{false};
     std::atomic<bool> releaseExecutor{false};
+    std::thread::id submitterThread;
     std::thread::id executorThread;
     gb::frontend::RaHttpTransport transport([&](const auto& request) {
         executorThread = std::this_thread::get_id();
@@ -294,15 +295,25 @@ TEST_CASE("retroachievements", "http_submit_executes_only_on_its_worker") {
         };
     });
 
-    transport.submit({7, gb::frontend::RaHttpChannel::Api, "https://example.invalid", {}});
+    auto submitFuture = std::async(std::launch::async, [&] {
+        submitterThread = std::this_thread::get_id();
+        return transport.submit(
+            {7, gb::frontend::RaHttpChannel::Api, "https://example.invalid", {}}
+        );
+    });
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (!executorStarted.load() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::yield();
     }
+    const bool submitReturnedWhileExecutorBlocked =
+        submitFuture.wait_for(std::chrono::milliseconds(250)) == std::future_status::ready;
     releaseExecutor.store(true);
+    const bool accepted = submitFuture.get();
 
     T_REQUIRE(executorStarted.load());
-    T_REQUIRE(executorThread != ownerThread);
+    T_REQUIRE(submitReturnedWhileExecutorBlocked);
+    T_REQUIRE(accepted);
+    T_REQUIRE(executorThread != submitterThread);
     T_EQ(waitAndDrain(transport, gb::frontend::RaHttpChannel::Api).size(), 1U);
     transport.shutdown();
 }
@@ -324,11 +335,92 @@ TEST_CASE("retroachievements", "http_uses_exactly_one_worker") {
     });
 
     for (std::uint64_t id = 1; id <= 8; ++id) {
-        transport.submit({id, gb::frontend::RaHttpChannel::Api, "https://example.invalid", {}});
+        T_REQUIRE(transport.submit({id, gb::frontend::RaHttpChannel::Api, "https://example.invalid", {}}));
     }
 
     T_EQ(waitAndDrain(transport, gb::frontend::RaHttpChannel::Api, 8).size(), 8U);
     T_EQ(maximumActiveExecutors.load(), 1);
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "http_limits_outstanding_requests_per_channel") {
+    std::atomic<bool> executorStarted{false};
+    std::atomic<bool> releaseExecutor{false};
+    gb::frontend::RaHttpTransport transport([&](const auto& request) {
+        if (request.id == 0) {
+            executorStarted.store(true);
+            while (!releaseExecutor.load()) {
+                std::this_thread::yield();
+            }
+        }
+        return gb::frontend::RaHttpResponse{
+            request.id, request.channel, 200, {'o', 'k'}, {}
+        };
+    });
+
+    bool allAccepted = transport.submit(
+        {0, gb::frontend::RaHttpChannel::Api, "https://example.invalid/api", {}}
+    );
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!executorStarted.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    const bool startedBeforeDeadline = executorStarted.load();
+
+    for (std::uint64_t id = 1; id < 64; ++id) {
+        const bool accepted = transport.submit(
+            {id, gb::frontend::RaHttpChannel::Api, "https://example.invalid/api", {}}
+        );
+        allAccepted = allAccepted && accepted;
+    }
+    const bool overflowRejected = !transport.submit(
+        {64, gb::frontend::RaHttpChannel::Api, "https://example.invalid/api", {}}
+    );
+    releaseExecutor.store(true);
+    transport.shutdown();
+
+    T_REQUIRE(startedBeforeDeadline);
+    T_REQUIRE(allAccepted);
+    T_REQUIRE(overflowRejected);
+}
+
+TEST_CASE("retroachievements", "http_completed_responses_hold_capacity_until_channel_drain") {
+    std::atomic<bool> imageExecutorStarted{false};
+    gb::frontend::RaHttpTransport transport([&](const auto& request) {
+        if (request.channel == gb::frontend::RaHttpChannel::Image) {
+            imageExecutorStarted.store(true);
+        }
+        return gb::frontend::RaHttpResponse{
+            request.id, request.channel, 200, {'o', 'k'}, {}
+        };
+    });
+
+    for (std::uint64_t id = 0; id < 64; ++id) {
+        T_REQUIRE(transport.submit(
+            {id, gb::frontend::RaHttpChannel::Api, "https://example.invalid/api", {}}
+        ));
+    }
+    T_REQUIRE(!transport.submit(
+        {64, gb::frontend::RaHttpChannel::Api, "https://example.invalid/api", {}}
+    ));
+    T_REQUIRE(transport.submit(
+        {65, gb::frontend::RaHttpChannel::Image, "https://example.invalid/image", {}}
+    ));
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!imageExecutorStarted.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    T_REQUIRE(imageExecutorStarted.load());
+    T_REQUIRE(!transport.submit(
+        {66, gb::frontend::RaHttpChannel::Api, "https://example.invalid/api", {}}
+    ));
+
+    T_EQ(transport.takeCompleted(gb::frontend::RaHttpChannel::Api).size(), 64U);
+    T_REQUIRE(transport.submit(
+        {67, gb::frontend::RaHttpChannel::Api, "https://example.invalid/api", {}}
+    ));
+    T_EQ(waitAndDrain(transport, gb::frontend::RaHttpChannel::Api).size(), 1U);
     transport.shutdown();
 }
 
@@ -343,7 +435,9 @@ TEST_CASE("retroachievements", "http_rejects_response_bodies_above_four_mib") {
         };
     });
 
-    transport.submit({99, gb::frontend::RaHttpChannel::Image, "https://example.invalid/large", {}});
+    T_REQUIRE(transport.submit(
+        {99, gb::frontend::RaHttpChannel::Image, "https://example.invalid/large", {}}
+    ));
     const auto responses = waitAndDrain(transport, gb::frontend::RaHttpChannel::Image);
 
     T_EQ(responses.size(), 1U);
@@ -364,7 +458,9 @@ TEST_CASE("retroachievements", "http_accepts_response_bodies_at_four_mib") {
         };
     });
 
-    transport.submit({100, gb::frontend::RaHttpChannel::Image, "https://example.invalid/boundary", {}});
+    T_REQUIRE(transport.submit(
+        {100, gb::frontend::RaHttpChannel::Image, "https://example.invalid/boundary", {}}
+    ));
     const auto responses = waitAndDrain(transport, gb::frontend::RaHttpChannel::Image);
 
     T_EQ(responses.size(), 1U);
@@ -382,8 +478,10 @@ TEST_CASE("retroachievements", "http_rejects_unsafe_urls_and_non_success_statuse
         };
     });
 
-    transport.submit({1, gb::frontend::RaHttpChannel::Api, "file:///tmp/private", {}});
-    transport.submit({2, gb::frontend::RaHttpChannel::Api, "https://example.invalid/unavailable", {}});
+    T_REQUIRE(transport.submit({1, gb::frontend::RaHttpChannel::Api, "file:///tmp/private", {}}));
+    T_REQUIRE(transport.submit(
+        {2, gb::frontend::RaHttpChannel::Api, "https://example.invalid/unavailable", {}}
+    ));
     const auto responses = waitAndDrain(transport, gb::frontend::RaHttpChannel::Api, 2);
 
     T_EQ(responses.size(), 2U);
@@ -396,27 +494,83 @@ TEST_CASE("retroachievements", "http_rejects_unsafe_urls_and_non_success_statuse
     transport.shutdown();
 }
 
-TEST_CASE("retroachievements", "http_shutdown_is_idempotent_and_finishes_pending_requests") {
+TEST_CASE("retroachievements", "http_shutdown_is_idempotent_and_cancels_pending_requests") {
     std::atomic<int> calls{0};
+    std::atomic<bool> executorStarted{false};
+    std::atomic<bool> releaseExecutor{false};
     gb::frontend::RaHttpTransport transport([&](const auto& request) {
         calls.fetch_add(1);
+        executorStarted.store(true);
+        while (!releaseExecutor.load()) {
+            std::this_thread::yield();
+        }
         return gb::frontend::RaHttpResponse{
             request.id, request.channel, 200, {'o', 'k'}, {}
         };
     });
 
-    transport.submit({1, gb::frontend::RaHttpChannel::Api, "https://example.invalid/one", {}});
-    transport.submit({2, gb::frontend::RaHttpChannel::Api, "https://example.invalid/two", {}});
-    transport.submit({3, gb::frontend::RaHttpChannel::Api, "https://example.invalid/three", {}});
-    transport.shutdown();
+    const bool firstAccepted =
+        transport.submit({1, gb::frontend::RaHttpChannel::Api, "https://example.invalid/one", {}});
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!executorStarted.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    const bool startedBeforeDeadline = executorStarted.load();
+    if (!startedBeforeDeadline) {
+        releaseExecutor.store(true);
+    }
+
+    const bool secondAccepted =
+        transport.submit({2, gb::frontend::RaHttpChannel::Api, "https://example.invalid/two", {}});
+    const bool thirdAccepted =
+        transport.submit({3, gb::frontend::RaHttpChannel::Api, "https://example.invalid/three", {}});
+
+    std::atomic<bool> shutdownCallStarted{false};
+    std::thread shutdownThread([&] {
+        shutdownCallStarted.store(true);
+        transport.shutdown();
+    });
+    const auto shutdownDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!shutdownCallStarted.load() && std::chrono::steady_clock::now() < shutdownDeadline) {
+        std::this_thread::yield();
+    }
+
+    bool stoppingObserved = false;
+    std::size_t acceptedImageProbes = 0;
+    while (acceptedImageProbes < 63 && std::chrono::steady_clock::now() < shutdownDeadline) {
+        const bool accepted = transport.submit(
+            {
+                100U + acceptedImageProbes,
+                gb::frontend::RaHttpChannel::Image,
+                "https://example.invalid/shutdown-probe",
+                {}
+            }
+        );
+        if (!accepted) {
+            stoppingObserved = true;
+            break;
+        }
+        ++acceptedImageProbes;
+        std::this_thread::yield();
+    }
+    releaseExecutor.store(true);
+    shutdownThread.join();
     transport.shutdown();
 
-    T_EQ(calls.load(), 3);
-    T_EQ(transport.takeCompleted(gb::frontend::RaHttpChannel::Api).size(), 3U);
+    T_REQUIRE(firstAccepted);
+    T_REQUIRE(startedBeforeDeadline);
+    T_REQUIRE(secondAccepted);
+    T_REQUIRE(thirdAccepted);
+    T_REQUIRE(shutdownCallStarted.load());
+    T_REQUIRE(stoppingObserved);
+    T_EQ(calls.load(), 1);
+    const auto completed = transport.takeCompleted(gb::frontend::RaHttpChannel::Api);
+    T_EQ(completed.size(), 1U);
+    T_EQ(completed.front().id, 1U);
 
-    transport.submit({4, gb::frontend::RaHttpChannel::Api, "https://example.invalid/four", {}});
+    T_REQUIRE(!transport.submit({4, gb::frontend::RaHttpChannel::Api, "https://example.invalid/four", {}}));
     const auto afterShutdown = transport.takeCompleted(gb::frontend::RaHttpChannel::Api);
-    T_EQ(calls.load(), 3);
-    T_EQ(afterShutdown.size(), 1U);
-    T_REQUIRE(!afterShutdown.front().error.empty());
+    T_EQ(calls.load(), 1);
+    T_REQUIRE(afterShutdown.empty());
+    T_REQUIRE(transport.takeCompleted(gb::frontend::RaHttpChannel::Image).empty());
 }

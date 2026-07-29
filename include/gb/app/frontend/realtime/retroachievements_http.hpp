@@ -41,7 +41,7 @@ public:
     RaHttpTransport(RaHttpTransport&&) = delete;
     RaHttpTransport& operator=(RaHttpTransport&&) = delete;
 
-    void submit(RaHttpRequest request);
+    [[nodiscard]] bool submit(RaHttpRequest request);
     [[nodiscard]] std::vector<RaHttpResponse> takeCompleted(RaHttpChannel channel);
     void shutdown();
 

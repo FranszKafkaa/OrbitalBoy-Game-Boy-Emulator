@@ -3,6 +3,7 @@
 #include <curl/curl.h>
 
 #include <algorithm>
+#include <array>
 #include <condition_variable>
 #include <cstddef>
 #include <deque>
@@ -15,11 +16,11 @@ namespace gb::frontend {
 namespace {
 
 constexpr std::size_t maximumResponseSize = 4U * 1024U * 1024U;
+constexpr std::size_t maximumOutstandingPerChannel = 64;
 constexpr const char* unsupportedUrlError = "Unsupported HTTP request URL.";
 constexpr const char* requestFailedError = "Unable to complete the HTTP request.";
 constexpr const char* responseTooLargeError = "HTTP response exceeded the 4 MiB limit.";
 constexpr const char* statusError = "HTTP request returned a non-success status.";
-constexpr const char* shutdownError = "HTTP transport is shut down.";
 
 bool startsWithIgnoringCase(const std::string& value, const char* prefix) {
     const std::size_t prefixLength = std::char_traits<char>::length(prefix);
@@ -40,6 +41,10 @@ bool startsWithIgnoringCase(const std::string& value, const char* prefix) {
 
 bool isSupportedUrl(const std::string& url) {
     return startsWithIgnoringCase(url, "http://") || startsWithIgnoringCase(url, "https://");
+}
+
+std::size_t channelIndex(RaHttpChannel channel) {
+    return channel == RaHttpChannel::Image ? 1U : 0U;
 }
 
 RaHttpResponse makeErrorResponse(const RaHttpRequest& request, const char* error) {
@@ -125,11 +130,6 @@ RaHttpResponse executeWithCurl(const RaHttpRequest& request) {
         && curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 5000L) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 15000L) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L) == CURLE_OK
-        && curl_easy_setopt(
-            curl,
-            CURLOPT_POSTREDIR,
-            static_cast<long>(CURL_REDIR_POST_ALL)
-        ) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L) == CURLE_OK
@@ -198,29 +198,31 @@ public:
         shutdown();
     }
 
-    void submit(RaHttpRequest request) {
+    bool submit(RaHttpRequest request) {
         {
             std::lock_guard<std::mutex> lock(queueMutex_);
-            if (stopping_) {
-                completed_.push_back(makeErrorResponse(request, shutdownError));
-                return;
+            const std::size_t index = channelIndex(request.channel);
+            if (stopping_ || outstandingByChannel_[index] >= maximumOutstandingPerChannel) {
+                return false;
             }
             pending_.push_back(std::move(request));
+            ++outstandingByChannel_[index];
         }
         pendingCondition_.notify_one();
+        return true;
     }
 
     std::vector<RaHttpResponse> takeCompleted(RaHttpChannel channel) {
         std::vector<RaHttpResponse> matching;
         std::lock_guard<std::mutex> lock(queueMutex_);
-        for (auto it = completed_.begin(); it != completed_.end();) {
-            if (it->channel == channel) {
-                matching.push_back(std::move(*it));
-                it = completed_.erase(it);
-            } else {
-                ++it;
-            }
+        const std::size_t index = channelIndex(channel);
+        auto& completed = completedByChannel_[index];
+        matching.reserve(completed.size());
+        while (!completed.empty()) {
+            matching.push_back(std::move(completed.front()));
+            completed.pop_front();
         }
+        outstandingByChannel_[index] -= matching.size();
         return matching;
     }
 
@@ -229,6 +231,10 @@ public:
         {
             std::lock_guard<std::mutex> queueLock(queueMutex_);
             stopping_ = true;
+            for (const auto& request : pending_) {
+                --outstandingByChannel_[channelIndex(request.channel)];
+            }
+            pending_.clear();
         }
         pendingCondition_.notify_one();
         if (worker_.joinable()) {
@@ -267,7 +273,7 @@ private:
             }
 
             std::lock_guard<std::mutex> lock(queueMutex_);
-            completed_.push_back(std::move(response));
+            completedByChannel_[channelIndex(response.channel)].push_back(std::move(response));
         }
     }
 
@@ -275,7 +281,8 @@ private:
     std::mutex queueMutex_;
     std::condition_variable pendingCondition_;
     std::deque<RaHttpRequest> pending_;
-    std::deque<RaHttpResponse> completed_;
+    std::array<std::deque<RaHttpResponse>, 2> completedByChannel_;
+    std::array<std::size_t, 2> outstandingByChannel_{};
     bool stopping_ = false;
     std::mutex shutdownMutex_;
     std::thread worker_;
@@ -291,8 +298,8 @@ RaHttpTransport::RaHttpTransport(RaHttpExecutor executor)
 
 RaHttpTransport::~RaHttpTransport() = default;
 
-void RaHttpTransport::submit(RaHttpRequest request) {
-    impl_->submit(std::move(request));
+bool RaHttpTransport::submit(RaHttpRequest request) {
+    return impl_->submit(std::move(request));
 }
 
 std::vector<RaHttpResponse> RaHttpTransport::takeCompleted(RaHttpChannel channel) {
