@@ -17,9 +17,10 @@ void callServer(const rc_api_request_t*, rc_client_server_callback_t, void*, rc_
 
 } // namespace
 
-TEST_CASE("retroachievements", "client_starts_in_hardcore_mode") {
+TEST_CASE("retroachievements", "client_can_remain_in_casual_mode") {
     rc_client_t* client = rc_client_create(readMemory, callServer);
     T_REQUIRE(client != nullptr);
-    T_REQUIRE(rc_client_get_hardcore_enabled(client));
+    rc_client_set_hardcore_enabled(client, 0);
+    T_REQUIRE(!rc_client_get_hardcore_enabled(client));
     rc_client_destroy(client);
 }
