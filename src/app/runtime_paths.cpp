@@ -79,6 +79,14 @@ std::string buildStateSlotPath(const std::string& romPath, int slot, const std::
     return p.string();
 }
 
+std::string buildGlobalStatesPath(const std::string& name) {
+    std::error_code ec;
+    const std::filesystem::path root = runtimeDataRoot();
+    const std::filesystem::path statesDir = root.empty() ? std::filesystem::path("states") : (root / "states");
+    std::filesystem::create_directories(statesDir, ec);
+    return (statesDir / name).string();
+}
+
 std::filesystem::path executableDirectory() {
 #if defined(_WIN32)
     std::vector<wchar_t> buffer(static_cast<std::size_t>(MAX_PATH), L'\0');
@@ -206,6 +214,17 @@ std::string captureDirForRom(const std::string& romPath) {
     const std::filesystem::path p = captureRoot / romStemOrDefault(romPath);
     std::filesystem::create_directories(p, ec);
     return p.string();
+}
+
+std::string retroAchievementsConfigPath() {
+    return buildGlobalStatesPath("global.retroachievements");
+}
+
+std::string retroAchievementsCacheDirectory() {
+    std::error_code ec;
+    const std::filesystem::path cacheDir(buildGlobalStatesPath("retroachievements-cache"));
+    std::filesystem::create_directories(cacheDir, ec);
+    return cacheDir.string();
 }
 
 std::vector<std::string> romSearchDirectoriesForRuntime() {

@@ -17,6 +17,8 @@ std::string controlsPathForRom(const std::string& romPath);
 std::string filtersPathForRom(const std::string& romPath);
 std::string cheatsPathForRom(const std::string& romPath);
 std::string captureDirForRom(const std::string& romPath);
+std::string retroAchievementsConfigPath();
+std::string retroAchievementsCacheDirectory();
 std::vector<std::string> romSearchDirectoriesForRuntime();
 std::string resolveRomPathForRuntime(const std::string& romPath);
 
