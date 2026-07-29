@@ -55,6 +55,35 @@ TEST_CASE("retroachievements", "config_round_trips_token_without_password") {
     T_REQUIRE(readTextFile(path).find("password") == std::string::npos);
 }
 
+TEST_CASE("retroachievements", "config_replaces_existing_content") {
+    const auto path = tests::makeTempPath("ra_config_replace", ".cfg");
+    tests::ScopedPath cleanup(path);
+
+    T_REQUIRE(gb::frontend::saveRetroAchievementsConfig(path.string(), {1, "first", "first-token", true, true}));
+    T_REQUIRE(gb::frontend::saveRetroAchievementsConfig(path.string(), {1, "second", "second-token", false, false}));
+
+    const auto actual = gb::frontend::loadRetroAchievementsConfig(path.string());
+    T_EQ(actual.username, std::string("second"));
+    T_EQ(actual.token, std::string("second-token"));
+    T_REQUIRE(!actual.autoLogin);
+    T_REQUIRE(!actual.showNotifications);
+}
+
+TEST_CASE("retroachievements", "config_uses_unique_temporary_file_without_clobbering_sibling") {
+    const auto directory = tests::makeTempPath("ra_config_temp", "");
+    tests::ScopedPath cleanup(directory);
+    std::filesystem::create_directories(directory);
+    const auto path = directory / "settings.cfg";
+    const auto predictableTemporary = directory / "settings.cfg.tmp";
+    {
+        std::ofstream out(predictableTemporary);
+        out << "keep this sibling untouched";
+    }
+
+    T_REQUIRE(gb::frontend::saveRetroAchievementsConfig(path.string(), {1, "Marcelo", "token-value", true, true}));
+    T_EQ(readTextFile(predictableTemporary), std::string("keep this sibling untouched"));
+}
+
 TEST_CASE("retroachievements", "config_missing_or_malformed_uses_safe_defaults") {
     const auto missingPath = tests::makeTempPath("ra_config_missing", ".cfg");
     tests::ScopedPath missingCleanup(missingPath);
@@ -100,6 +129,19 @@ TEST_CASE("retroachievements", "config_missing_or_malformed_uses_safe_defaults")
     T_EQ(invalidBoolean.token, std::string("token-value"));
     T_REQUIRE(invalidBoolean.autoLogin);
     T_REQUIRE(invalidBoolean.showNotifications);
+
+    const auto oversizedPath = tests::makeTempPath("ra_config_oversized_load", ".cfg");
+    tests::ScopedPath oversizedCleanup(oversizedPath);
+    {
+        std::ofstream out(oversizedPath);
+        out << "version=1\n";
+        out << "username=" << std::string(4097, 'u') << '\n';
+        out << "token=" << std::string(4097, 't') << '\n';
+    }
+
+    const auto oversized = gb::frontend::loadRetroAchievementsConfig(oversizedPath.string());
+    T_REQUIRE(oversized.username.empty());
+    T_REQUIRE(oversized.token.empty());
 }
 
 TEST_CASE("retroachievements", "config_rejects_control_characters_and_oversized_secrets") {
