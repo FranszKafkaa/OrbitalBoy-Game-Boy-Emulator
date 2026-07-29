@@ -177,6 +177,9 @@ if (GBEMU_ENABLE_RETROACHIEVEMENTS)
     enable_language(C)
     find_package(CURL REQUIRED)
     add_subdirectory(third_party/rcheevos EXCLUDE_FROM_ALL)
+    target_sources(gbfrontend_support PRIVATE
+        src/app/frontend/realtime/retroachievements_http.cpp
+    )
     target_link_libraries(gbfrontend_support PUBLIC rcheevos CURL::libcurl)
     if (WIN32)
         target_link_libraries(gbfrontend_support PRIVATE advapi32)
