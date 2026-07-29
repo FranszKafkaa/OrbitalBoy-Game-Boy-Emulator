@@ -1,12 +1,15 @@
 #include "rc_client.h"
 
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
 
 #include "gb/app/frontend/realtime/retroachievements_config.hpp"
+#include "gb/app/frontend/realtime/retroachievements_memory.hpp"
 #include "gb/app/frontend/realtime/retroachievements_models.hpp"
+#include "gb/core/gameboy.hpp"
 #include "gb/app/runtime_paths.hpp"
 
 #include "test_framework.hpp"
@@ -38,6 +41,28 @@ TEST_CASE("retroachievements", "client_can_remain_in_casual_mode") {
     rc_client_set_hardcore_enabled(client, 0);
     T_REQUIRE(!rc_client_get_hardcore_enabled(client));
     rc_client_destroy(client);
+}
+
+TEST_CASE("retroachievements", "memory_reader_rejects_invalid_ranges") {
+    gb::GameBoy gameBoy;
+    std::array<std::uint8_t, 4> out{};
+
+    T_EQ(gb::frontend::readRetroAchievementsMemory(gameBoy.bus(), 0xFFFF, out.data(), 2), 0U);
+    T_EQ(gb::frontend::readRetroAchievementsMemory(gameBoy.bus(), 0, nullptr, 1), 0U);
+    T_EQ(gb::frontend::readRetroAchievementsMemory(gameBoy.bus(), 0, out.data(), 0), 0U);
+}
+
+TEST_CASE("retroachievements", "memory_reader_reads_wram_in_address_order") {
+    gb::GameBoy gameBoy;
+    gameBoy.bus().write(0xC000, 0x3A);
+    gameBoy.bus().write(0xC001, 0x7F);
+    gameBoy.bus().write(0xC002, 0x05);
+    std::array<std::uint8_t, 3> out{};
+
+    T_EQ(gb::frontend::readRetroAchievementsMemory(gameBoy.bus(), 0xC000, out.data(), out.size()), 3U);
+    T_EQ(out[0], 0x3A);
+    T_EQ(out[1], 0x7F);
+    T_EQ(out[2], 0x05);
 }
 
 TEST_CASE("retroachievements", "config_round_trips_token_without_password") {
