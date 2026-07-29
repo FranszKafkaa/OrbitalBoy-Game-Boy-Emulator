@@ -10,6 +10,7 @@
 #include <optional>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -130,9 +131,100 @@ void removeTemporaryFile(const std::filesystem::path& temporary) {
 
 #if defined(_WIN32)
 
+class ScopedWindowsHandle {
+public:
+    explicit ScopedWindowsHandle(HANDLE handle)
+        : handle_(handle) {}
+
+    ScopedWindowsHandle(const ScopedWindowsHandle&) = delete;
+    ScopedWindowsHandle& operator=(const ScopedWindowsHandle&) = delete;
+
+    ~ScopedWindowsHandle() {
+        if (handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle_);
+        }
+    }
+
+    [[nodiscard]] HANDLE get() const {
+        return handle_;
+    }
+
+private:
+    HANDLE handle_ = nullptr;
+};
+
+class CurrentUserOnlySecurityAttributes {
+public:
+    CurrentUserOnlySecurityAttributes() {
+        valid_ = initialize();
+    }
+
+    [[nodiscard]] const SECURITY_ATTRIBUTES* get() const {
+        return valid_ ? &attributes_ : nullptr;
+    }
+
+private:
+    bool initialize() {
+        HANDLE rawToken = nullptr;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &rawToken)) {
+            return false;
+        }
+        const ScopedWindowsHandle token(rawToken);
+
+        DWORD tokenUserSize = 0;
+        if (GetTokenInformation(token.get(), TokenUser, nullptr, 0, &tokenUserSize)
+            || GetLastError() != ERROR_INSUFFICIENT_BUFFER
+            || tokenUserSize < sizeof(TOKEN_USER)) {
+            return false;
+        }
+
+        tokenUser_.resize(tokenUserSize);
+        if (!GetTokenInformation(token.get(), TokenUser, tokenUser_.data(), tokenUserSize, &tokenUserSize)) {
+            return false;
+        }
+
+        const auto* const user = reinterpret_cast<const TOKEN_USER*>(tokenUser_.data());
+        if (!IsValidSid(user->User.Sid)) {
+            return false;
+        }
+        const DWORD sidSize = GetLengthSid(user->User.Sid);
+        constexpr DWORD kAclOverhead = sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD);
+        if (sidSize == 0U || sidSize > MAXDWORD - kAclOverhead) {
+            return false;
+        }
+
+        acl_.resize(kAclOverhead + sidSize);
+        auto* const dacl = reinterpret_cast<ACL*>(acl_.data());
+        if (!InitializeAcl(dacl, static_cast<DWORD>(acl_.size()), ACL_REVISION)
+            || !AddAccessAllowedAce(dacl, ACL_REVISION, FILE_ALL_ACCESS, user->User.Sid)
+            || !InitializeSecurityDescriptor(&securityDescriptor_, SECURITY_DESCRIPTOR_REVISION)
+            || !SetSecurityDescriptorOwner(&securityDescriptor_, user->User.Sid, FALSE)
+            || !SetSecurityDescriptorDacl(&securityDescriptor_, TRUE, dacl, FALSE)
+            || !SetSecurityDescriptorControl(&securityDescriptor_, SE_DACL_PROTECTED, SE_DACL_PROTECTED)) {
+            return false;
+        }
+
+        attributes_.nLength = sizeof(attributes_);
+        attributes_.lpSecurityDescriptor = &securityDescriptor_;
+        attributes_.bInheritHandle = FALSE;
+        return true;
+    }
+
+    std::vector<BYTE> tokenUser_;
+    std::vector<BYTE> acl_;
+    SECURITY_DESCRIPTOR securityDescriptor_{};
+    SECURITY_ATTRIBUTES attributes_{};
+    bool valid_ = false;
+};
+
 bool writePrivateTemporaryFile(const std::filesystem::path& destination,
                                std::string_view contents,
                                std::filesystem::path& temporary) {
+    const CurrentUserOnlySecurityAttributes securityAttributes;
+    if (securityAttributes.get() == nullptr) {
+        return false;
+    }
+
     for (int attempt = 0; attempt < kTemporaryFileAttempts; ++attempt) {
         temporary = temporarySiblingPath(destination, attempt);
         const std::wstring temporaryPath = temporary.wstring();
@@ -140,7 +232,7 @@ bool writePrivateTemporaryFile(const std::filesystem::path& destination,
             temporaryPath.c_str(),
             GENERIC_WRITE,
             0,
-            nullptr,
+            securityAttributes.get(),
             CREATE_NEW,
             FILE_ATTRIBUTE_NORMAL,
             nullptr
