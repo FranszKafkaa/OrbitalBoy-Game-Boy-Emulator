@@ -106,6 +106,17 @@ int profileTabIndex(RaProfileTab tab) {
     return static_cast<int>(tab);
 }
 
+void securelyClearString(std::string& text) {
+    const std::size_t allocatedBytes = text.capacity();
+    text.resize(allocatedBytes, '\0');
+    volatile char* bytes = text.empty() ? nullptr : text.data();
+    for (std::size_t index = 0; index < allocatedBytes; ++index) {
+        bytes[index] = '\0';
+    }
+    std::string empty;
+    text.swap(empty);
+}
+
 #ifdef GBEMU_USE_SDL2
 
 std::string asciiUiText(std::string_view text, std::size_t maxChars = 80) {
@@ -339,6 +350,24 @@ RaUiSize raWindowedSize(int requestedW, int requestedH) {
     };
 }
 
+bool raOverlayConsumesGameplayEvent(RaOverlayGameplayEvent event) {
+    return event != RaOverlayGameplayEvent::KeyboardUp
+        && event != RaOverlayGameplayEvent::ControllerUp;
+}
+
+RaGameplayInputState neutralizeRaGameplayInput(
+    std::uint8_t joypadMask,
+    bool fastForward
+) {
+    (void)joypadMask;
+    (void)fastForward;
+    return RaGameplayInputState{};
+}
+
+bool raShouldStopTextInput(bool loginOpen, bool anotherEditorActive) {
+    return !loginOpen && !anotherEditorActive;
+}
+
 RaLoginModalLayout raLoginModalLayout(int outputW, int outputH) {
     const int safeW = std::max(1, outputW);
     const int safeH = std::max(1, outputH);
@@ -372,8 +401,7 @@ RaLoginModalLayout raLoginModalLayout(int outputW, int outputH) {
 }
 
 void openRaLoginModal(RaLoginModalState& state, std::string username) {
-    std::fill(state.password.begin(), state.password.end(), '\0');
-    state.password.clear();
+    securelyClearString(state.password);
     state.open = true;
     state.focusedField = RaLoginField::Username;
     state.username = std::move(username);
@@ -385,8 +413,7 @@ void closeRaLoginModal(RaLoginModalState& state) {
     state.open = false;
     state.requesting = false;
     state.errorText.clear();
-    std::fill(state.password.begin(), state.password.end(), '\0');
-    state.password.clear();
+    securelyClearString(state.password);
 }
 
 void appendRaLoginText(RaLoginModalState& state, std::string_view text) {
@@ -669,6 +696,34 @@ int raProfileContentHeight(
     return 0;
 }
 
+RaVisibleRowRange raVisibleProfileRows(
+    RaProfileTab tab,
+    std::size_t rowCount,
+    int scroll,
+    int viewportHeight
+) {
+    if (rowCount == 0 || viewportHeight <= 0 || tab == RaProfileTab::Summary) {
+        return {};
+    }
+
+    const std::int64_t headerHeight =
+        tab == RaProfileTab::CurrentGame ? 100 : 28;
+    const std::int64_t rowHeight =
+        tab == RaProfileTab::CurrentGame ? kAchievementRowHeight : kLibraryRowHeight;
+    const std::int64_t viewTop = std::max(0, scroll);
+    const std::int64_t viewBottom = viewTop + viewportHeight;
+    const std::int64_t first = viewTop <= headerHeight
+        ? 0
+        : (viewTop - headerHeight) / rowHeight;
+    const std::int64_t end = viewBottom <= headerHeight
+        ? 0
+        : (viewBottom - headerHeight + rowHeight - 1) / rowHeight;
+    return RaVisibleRowRange{
+        std::min(rowCount, static_cast<std::size_t>(first)),
+        std::min(rowCount, static_cast<std::size_t>(end)),
+    };
+}
+
 RaToastLayout raToastLayout(int outputW, int outputH) {
     const int safeW = std::max(1, outputW);
     const int safeH = std::max(1, outputH);
@@ -748,7 +803,8 @@ std::uint8_t raToastOpacity(const RaToastState& state, std::uint64_t nowMs) {
 
 #ifdef GBEMU_USE_SDL2
 
-RaImageTextureCache::RaImageTextureCache() {
+RaImageTextureCache::RaImageTextureCache(std::size_t capacity)
+    : capacity_(std::max<std::size_t>(1, capacity)) {
 #ifdef GBEMU_USE_SDL2_IMAGE
     imageSubsystemStarted_ = true;
     const int requested = IMG_INIT_JPG | IMG_INIT_PNG;
@@ -758,6 +814,13 @@ RaImageTextureCache::RaImageTextureCache() {
 
 RaImageTextureCache::~RaImageTextureCache() {
     shutdown();
+}
+
+void RaImageTextureCache::beginFrame() {
+    for (SDL_Texture* texture : retiredTextures_) {
+        SDL_DestroyTexture(texture);
+    }
+    retiredTextures_.clear();
 }
 
 SDL_Texture* RaImageTextureCache::texture(
@@ -770,9 +833,20 @@ SDL_Texture* RaImageTextureCache::texture(
     auto found = std::find_if(entries_.begin(), entries_.end(), [&](const Entry& entry) {
         return entry.path == localPath;
     });
-    if (found == entries_.end()) {
-        entries_.push_back(Entry{localPath, nullptr, false});
-        found = std::prev(entries_.end());
+    if (found != entries_.end()) {
+        entries_.splice(entries_.begin(), entries_, found);
+        found = entries_.begin();
+    } else {
+        while (entries_.size() >= capacity_) {
+            Entry& evicted = entries_.back();
+            if (evicted.texture != nullptr) {
+                retiredTextures_.push_back(evicted.texture);
+                evicted.texture = nullptr;
+            }
+            entries_.pop_back();
+        }
+        entries_.push_front(Entry{localPath, nullptr, false});
+        found = entries_.begin();
     }
     if (found->attempted) {
         return found->texture;
@@ -796,6 +870,24 @@ SDL_Texture* RaImageTextureCache::texture(
     return found->texture;
 }
 
+std::size_t RaImageTextureCache::entryCount() const {
+    return entries_.size();
+}
+
+std::size_t RaImageTextureCache::retiredCount() const {
+    return retiredTextures_.size();
+}
+
+std::size_t RaImageTextureCache::capacity() const {
+    return capacity_;
+}
+
+bool RaImageTextureCache::contains(const std::string& localPath) const {
+    return std::any_of(entries_.begin(), entries_.end(), [&](const Entry& entry) {
+        return entry.path == localPath;
+    });
+}
+
 void RaImageTextureCache::clear() {
     for (auto& entry : entries_) {
         if (entry.texture != nullptr) {
@@ -804,6 +896,7 @@ void RaImageTextureCache::clear() {
         }
     }
     entries_.clear();
+    beginFrame();
 }
 
 void RaImageTextureCache::shutdown() {
@@ -836,9 +929,6 @@ RaLoginModalAction handleRaLoginModalEvent(
             state,
             raUiKeyFromSdl(event.key.keysym.sym)
         );
-        if (action == RaLoginModalAction::Close) {
-            SDL_StopTextInput();
-        }
         return action;
     }
     if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
@@ -854,7 +944,6 @@ RaLoginModalAction handleRaLoginModalEvent(
         } else if (raUiRectContains(layout.closeButton, px, py)
             || raUiRectContains(layout.cancelButton, px, py)) {
             closeRaLoginModal(state);
-            SDL_StopTextInput();
             return RaLoginModalAction::Close;
         }
     }
@@ -1312,7 +1401,15 @@ void renderRaProfilePanel(
                 1
             );
         }
-        for (const auto& achievement : snapshot.currentAchievements) {
+        const RaVisibleRowRange visibleRows = raVisibleProfileRows(
+            state.tab,
+            snapshot.currentAchievements.size(),
+            state.scroll,
+            layout.content.h
+        );
+        y += static_cast<int>(visibleRows.begin) * kAchievementRowHeight;
+        for (std::size_t index = visibleRows.begin; index < visibleRows.end; ++index) {
+            const auto& achievement = snapshot.currentAchievements[index];
             const RaUiRect row{x + 2, y + 2, w - 4, kAchievementRowHeight - 6};
             fillRoundedStyleRect(
                 renderer,
@@ -1385,7 +1482,15 @@ void renderRaProfilePanel(
                 1
             );
         }
-        for (const auto& game : snapshot.profile.library) {
+        const RaVisibleRowRange visibleRows = raVisibleProfileRows(
+            state.tab,
+            snapshot.profile.library.size(),
+            state.scroll,
+            layout.content.h
+        );
+        y += static_cast<int>(visibleRows.begin) * kLibraryRowHeight;
+        for (std::size_t index = visibleRows.begin; index < visibleRows.end; ++index) {
+            const auto& game = snapshot.profile.library[index];
             const RaUiRect row{x + 2, y + 2, w - 4, kLibraryRowHeight - 6};
             fillRoundedStyleRect(
                 renderer,

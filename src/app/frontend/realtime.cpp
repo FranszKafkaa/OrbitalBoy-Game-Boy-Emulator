@@ -407,6 +407,21 @@ int RealtimeSession::run() {
         joypad.setButton(gb::Button::Select, (mask & (1u << 6)) != 0);
         joypad.setButton(gb::Button::Start, (mask & (1u << 7)) != 0);
     };
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    const auto neutralizeGameplayInputForRaOverlay = [&]() {
+        RaGameplayInputState neutralized{};
+        {
+            std::lock_guard<std::mutex> gbLock(gbMutex);
+            neutralized = neutralizeRaGameplayInput(
+                joypadMaskFromState(gb.joypad().state()),
+                fastForward
+            );
+            applyJoypadMask(gb.joypad(), neutralized.joypadMask);
+        }
+        fastForward = neutralized.fastForward;
+        fastForwardAtomic.store(neutralized.fastForward, std::memory_order_relaxed);
+    };
+#endif
     const auto frameChecksum = [](const gb::GameBoy& gameBoy) -> std::uint32_t {
         std::uint32_t hash = 2166136261u; // FNV-1a seed
         const auto& fb = gameBoy.ppu().framebuffer();
@@ -509,14 +524,16 @@ int RealtimeSession::run() {
     };
 
     const auto stopTextInputIfUnused = [&]() {
-        if (!memoryEdit.active
-            && !breakpointEdit.active
-            && !memorySearch.ui.editingValue
-            && !runLabPromptInput.active
+        const bool anotherEditorActive =
+            memoryEdit.active
+            || breakpointEdit.active
+            || memorySearch.ui.editingValue
+            || runLabPromptInput.active;
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
-            && !raLoginModal.open
+        if (raShouldStopTextInput(raLoginModal.open, anotherEditorActive)) {
+#else
+        if (!anotherEditorActive) {
 #endif
-        ) {
             SDL_StopTextInput();
         }
     };
@@ -1719,6 +1736,7 @@ int RealtimeSession::run() {
         }
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
         case TopMenuAction::RaLogin:
+            neutralizeGameplayInputForRaOverlay();
             openRaLoginModal(raLoginModal, raUiSnapshot.profile.user.username);
             closeRaProfilePanel(raProfilePanel);
             showScaleMenu = false;
@@ -1734,11 +1752,13 @@ int RealtimeSession::run() {
             uiMessageFrames = 90;
             break;
         case TopMenuAction::RaOpenProfile:
+            neutralizeGameplayInputForRaOverlay();
             closeRaLoginModal(raLoginModal);
             stopTextInputIfUnused();
             openRaProfilePanel(raProfilePanel, RaProfileTab::Summary);
             break;
         case TopMenuAction::RaOpenAchievements:
+            neutralizeGameplayInputForRaOverlay();
             closeRaLoginModal(raLoginModal);
             stopTextInputIfUnused();
             openRaProfilePanel(raProfilePanel, RaProfileTab::CurrentGame);
@@ -2120,7 +2140,19 @@ int RealtimeSession::run() {
             const bool raControllerHotplugEvent =
                 ev.type == SDL_CONTROLLERDEVICEADDED
                 || ev.type == SDL_CONTROLLERDEVICEREMOVED;
-            if (raLoginModal.open && !raControllerHotplugEvent) {
+            const RaOverlayGameplayEvent raGameplayEvent =
+                ev.type == SDL_KEYDOWN
+                    ? RaOverlayGameplayEvent::KeyboardDown
+                    : ev.type == SDL_KEYUP
+                        ? RaOverlayGameplayEvent::KeyboardUp
+                        : ev.type == SDL_CONTROLLERBUTTONDOWN
+                            ? RaOverlayGameplayEvent::ControllerDown
+                            : ev.type == SDL_CONTROLLERBUTTONUP
+                                ? RaOverlayGameplayEvent::ControllerUp
+                                : RaOverlayGameplayEvent::Other;
+            const bool raConsumesEvent =
+                raOverlayConsumesGameplayEvent(raGameplayEvent);
+            if (raLoginModal.open && !raControllerHotplugEvent && raConsumesEvent) {
                 int outputW = 0;
                 int outputH = 0;
                 SDL_GetRendererOutputSize(renderer, &outputW, &outputH);
@@ -2134,10 +2166,12 @@ int RealtimeSession::run() {
                     // Task 9 consumes the credential submission on the SDL thread.
                     uiMessage = "LOGIN RETROACHIEVEMENTS";
                     uiMessageFrames = 90;
+                } else if (action == RaLoginModalAction::Close) {
+                    stopTextInputIfUnused();
                 }
                 continue;
             }
-            if (raProfilePanel.open && !raControllerHotplugEvent) {
+            if (raProfilePanel.open && !raControllerHotplugEvent && raConsumesEvent) {
                 int outputW = 0;
                 int outputH = 0;
                 SDL_GetRendererOutputSize(renderer, &outputW, &outputH);
@@ -3401,6 +3435,7 @@ int RealtimeSession::run() {
                 std::chrono::steady_clock::now().time_since_epoch()
             ).count()
         );
+        raImageTextureCache.beginFrame();
         advanceRaToast(raToast, raNowMs);
         renderRaProfilePanel(
             renderer,

@@ -2921,6 +2921,19 @@ TEST_CASE("retroachievements", "login_modal_rejects_submit_until_both_fields_are
     T_REQUIRE(!state.requesting);
 }
 
+TEST_CASE("retroachievements", "login_modal_wipes_and_releases_reserved_password_storage") {
+    gb::frontend::RaLoginModalState state{};
+    gb::frontend::openRaLoginModal(state);
+    state.password.reserve(2048);
+    state.password = "senha-muito-secreta";
+    T_REQUIRE(state.password.capacity() >= 2048U);
+
+    gb::frontend::closeRaLoginModal(state);
+
+    T_REQUIRE(state.password.empty());
+    T_REQUIRE(state.password.capacity() < 2048U);
+}
+
 TEST_CASE("retroachievements", "login_modal_never_truncates_a_utf8_code_point_at_field_limits") {
     gb::frontend::RaLoginModalState state{};
     gb::frontend::openRaLoginModal(state);
@@ -2976,6 +2989,45 @@ TEST_CASE("retroachievements", "online_snapshot_closes_login_and_signals_text_in
     T_REQUIRE(state.password.empty());
 }
 
+TEST_CASE("retroachievements", "overlay_consumes_presses_but_passes_gameplay_releases") {
+    using gb::frontend::RaOverlayGameplayEvent;
+
+    T_REQUIRE(gb::frontend::raOverlayConsumesGameplayEvent(
+        RaOverlayGameplayEvent::KeyboardDown
+    ));
+    T_REQUIRE(!gb::frontend::raOverlayConsumesGameplayEvent(
+        RaOverlayGameplayEvent::KeyboardUp
+    ));
+    T_REQUIRE(gb::frontend::raOverlayConsumesGameplayEvent(
+        RaOverlayGameplayEvent::ControllerDown
+    ));
+    T_REQUIRE(!gb::frontend::raOverlayConsumesGameplayEvent(
+        RaOverlayGameplayEvent::ControllerUp
+    ));
+
+    const auto neutralized = gb::frontend::neutralizeRaGameplayInput(0xFFU, true);
+    T_EQ(neutralized.joypadMask, static_cast<std::uint8_t>(0));
+    T_REQUIRE(!neutralized.fastForward);
+}
+
+TEST_CASE("retroachievements", "login_close_preserves_text_input_owned_by_another_editor") {
+    T_REQUIRE(!gb::frontend::raShouldStopTextInput(true, false));
+    T_REQUIRE(!gb::frontend::raShouldStopTextInput(false, true));
+    T_REQUIRE(gb::frontend::raShouldStopTextInput(false, false));
+
+    gb::frontend::RaLoginModalState state{};
+    gb::frontend::openRaLoginModal(state);
+    state.password = "segredo";
+    gb::frontend::RaSessionSnapshot snapshot{};
+    snapshot.connectionState = gb::frontend::RaConnectionState::Online;
+
+    T_REQUIRE(
+        gb::frontend::applyRaLoginSnapshot(state, snapshot)
+        == gb::frontend::RaLoginModalAction::Close
+    );
+    T_REQUIRE(!gb::frontend::raShouldStopTextInput(state.open, true));
+}
+
 TEST_CASE("retroachievements", "profile_tabs_cycle_and_scroll_clamps_to_content") {
     using gb::frontend::RaProfileTab;
     using gb::frontend::RaUiKey;
@@ -3013,6 +3065,176 @@ TEST_CASE("retroachievements", "profile_tabs_cycle_and_scroll_clamps_to_content"
     gb::frontend::clampRaProfileScroll(state, 900, 300);
     T_EQ(state.scroll, 0);
 }
+
+TEST_CASE("retroachievements", "profile_visible_row_range_excludes_offscreen_rows") {
+    using gb::frontend::RaProfileTab;
+
+    const auto top = gb::frontend::raVisibleProfileRows(
+        RaProfileTab::CurrentGame,
+        100,
+        0,
+        300
+    );
+    T_EQ(top.begin, 0U);
+    T_REQUIRE(top.end > top.begin);
+    T_REQUIRE(top.end < 10U);
+
+    const auto middle = gb::frontend::raVisibleProfileRows(
+        RaProfileTab::CurrentGame,
+        100,
+        50 * 82,
+        300
+    );
+    T_REQUIRE(middle.begin > 40U);
+    T_REQUIRE(middle.end < 60U);
+    T_REQUIRE(middle.end - middle.begin < 10U);
+
+    const auto library = gb::frontend::raVisibleProfileRows(
+        RaProfileTab::Library,
+        100,
+        30 * 70,
+        140
+    );
+    T_REQUIRE(library.begin >= 28U);
+    T_REQUIRE(library.end <= 34U);
+}
+
+#ifdef GBEMU_USE_SDL2
+TEST_CASE("retroachievements", "login_ui_never_stops_text_input_owned_by_caller") {
+    SDL_StartTextInput();
+    T_REQUIRE(SDL_IsTextInputActive() == SDL_TRUE);
+
+    gb::frontend::RaLoginModalState state{};
+    gb::frontend::openRaLoginModal(state);
+    T_REQUIRE(SDL_IsTextInputActive() == SDL_TRUE);
+    gb::frontend::closeRaLoginModal(state);
+    T_REQUIRE(SDL_IsTextInputActive() == SDL_TRUE);
+
+    gb::frontend::openRaLoginModal(state);
+    gb::frontend::RaSessionSnapshot snapshot{};
+    snapshot.connectionState = gb::frontend::RaConnectionState::Online;
+    T_REQUIRE(
+        gb::frontend::applyRaLoginSnapshot(state, snapshot)
+        == gb::frontend::RaLoginModalAction::Close
+    );
+    T_REQUIRE(SDL_IsTextInputActive() == SDL_TRUE);
+
+    gb::frontend::openRaLoginModal(state);
+    SDL_Event escape{};
+    escape.type = SDL_KEYDOWN;
+    escape.key.repeat = 0;
+    escape.key.keysym.sym = SDLK_ESCAPE;
+    T_REQUIRE(
+        gb::frontend::handleRaLoginModalEvent(state, escape, 640, 480)
+        == gb::frontend::RaLoginModalAction::Close
+    );
+    T_REQUIRE(SDL_IsTextInputActive() == SDL_TRUE);
+    SDL_StopTextInput();
+}
+
+TEST_CASE("retroachievements", "profile_renderer_requests_textures_only_for_visible_rows") {
+    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(
+        0,
+        640,
+        480,
+        32,
+        SDL_PIXELFORMAT_RGBA32
+    );
+    T_REQUIRE(surface != nullptr);
+    SDL_Renderer* renderer = SDL_CreateSoftwareRenderer(surface);
+    T_REQUIRE(renderer != nullptr);
+
+    {
+        gb::frontend::RaSessionSnapshot snapshot{};
+        snapshot.currentGame.badgePath = "missing-game-badge.bmp";
+        snapshot.currentAchievements.resize(100);
+        for (std::size_t index = 0; index < snapshot.currentAchievements.size(); ++index) {
+            snapshot.currentAchievements[index].title = "Achievement";
+            snapshot.currentAchievements[index].badgePath =
+                "missing-achievement-" + std::to_string(index) + ".bmp";
+        }
+        gb::frontend::RaProfilePanelState panel{};
+        gb::frontend::openRaProfilePanel(panel, gb::frontend::RaProfileTab::CurrentGame);
+        gb::frontend::RaImageTextureCache cache(128);
+
+        gb::frontend::renderRaProfilePanel(
+            renderer,
+            panel,
+            snapshot,
+            cache,
+            640,
+            480
+        );
+
+        const auto layout = gb::frontend::raProfilePanelLayout(640, 480);
+        const auto visible = gb::frontend::raVisibleProfileRows(
+            panel.tab,
+            snapshot.currentAchievements.size(),
+            panel.scroll,
+            layout.content.h
+        );
+        T_EQ(cache.entryCount(), 1U + visible.end - visible.begin);
+        T_REQUIRE(cache.entryCount() < snapshot.currentAchievements.size());
+        cache.shutdown();
+    }
+
+    SDL_DestroyRenderer(renderer);
+    SDL_FreeSurface(surface);
+}
+
+TEST_CASE("retroachievements", "image_texture_cache_is_bounded_and_lru") {
+    const std::string pathA = tempFilePath("ra_texture_lru_a.bmp");
+    const std::string pathB = tempFilePath("ra_texture_lru_b.bmp");
+    const std::string pathC = tempFilePath("ra_texture_lru_c.bmp");
+    const std::string pathD = tempFilePath("ra_texture_lru_d.bmp");
+    tests::ScopedPath cleanupA(pathA);
+    tests::ScopedPath cleanupB(pathB);
+    tests::ScopedPath cleanupC(pathC);
+    tests::ScopedPath cleanupD(pathD);
+    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(
+        0,
+        32,
+        32,
+        32,
+        SDL_PIXELFORMAT_RGBA32
+    );
+    T_REQUIRE(surface != nullptr);
+    T_EQ(SDL_SaveBMP(surface, pathA.c_str()), 0);
+    T_EQ(SDL_SaveBMP(surface, pathB.c_str()), 0);
+    T_EQ(SDL_SaveBMP(surface, pathC.c_str()), 0);
+    T_EQ(SDL_SaveBMP(surface, pathD.c_str()), 0);
+    SDL_Renderer* renderer = SDL_CreateSoftwareRenderer(surface);
+    T_REQUIRE(renderer != nullptr);
+
+    {
+        gb::frontend::RaImageTextureCache cache(3);
+        cache.beginFrame();
+        SDL_Texture* textureA = cache.texture(renderer, pathA);
+        T_REQUIRE(textureA != nullptr);
+        SDL_Texture* textureB = cache.texture(renderer, pathB);
+        T_REQUIRE(textureB != nullptr);
+        T_REQUIRE(cache.texture(renderer, pathC) != nullptr);
+        T_REQUIRE(cache.texture(renderer, pathA) == textureA);
+        T_REQUIRE(cache.texture(renderer, pathD) != nullptr);
+
+        T_EQ(cache.capacity(), 3U);
+        T_EQ(cache.entryCount(), 3U);
+        T_REQUIRE(cache.contains(pathA));
+        T_REQUIRE(!cache.contains(pathB));
+        T_REQUIRE(cache.contains(pathC));
+        T_REQUIRE(cache.contains(pathD));
+        T_EQ(cache.retiredCount(), 1U);
+        T_EQ(SDL_QueryTexture(textureB, nullptr, nullptr, nullptr, nullptr), 0);
+
+        cache.beginFrame();
+        T_EQ(cache.retiredCount(), 0U);
+        cache.shutdown();
+    }
+
+    SDL_DestroyRenderer(renderer);
+    SDL_FreeSurface(surface);
+}
+#endif
 
 TEST_CASE("retroachievements", "toast_keeps_newest_five_and_fades_during_last_600ms") {
     gb::frontend::RaToastState state{};
