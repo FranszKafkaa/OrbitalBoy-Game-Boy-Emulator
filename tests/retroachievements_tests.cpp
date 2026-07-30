@@ -865,7 +865,58 @@ public:
 
     void destroy(rc_client_t*) override {
         recordCall();
+        ++destroyCalls;
         destroyed = true;
+
+        const auto pendingLogin = loginCallback;
+        const auto pendingLoginUserdata = loginCallbackUserdata;
+        loginCallback = nullptr;
+        loginCallbackUserdata = nullptr;
+        if (pendingLogin) {
+            pendingLogin(
+                RC_ABORTED,
+                "client destroyed",
+                handle,
+                pendingLoginUserdata
+            );
+        }
+
+        const auto pendingGame = gameCallback;
+        const auto pendingGameUserdata = gameCallbackUserdata;
+        gameCallback = nullptr;
+        gameCallbackUserdata = nullptr;
+        if (pendingGame) {
+            pendingGame(
+                RC_ABORTED,
+                "client destroyed",
+                handle,
+                pendingGameUserdata
+            );
+        }
+
+        for (const auto& [consoleId, pending] : progressCallbacks) {
+            static_cast<void>(consoleId);
+            pending.callback(
+                RC_ABORTED,
+                "client destroyed",
+                nullptr,
+                handle,
+                pending.userdata
+            );
+        }
+        progressCallbacks.clear();
+        for (const auto& pending : titleCallbacks) {
+            pending.callback(
+                RC_ABORTED,
+                "client destroyed",
+                nullptr,
+                handle,
+                pending.userdata
+            );
+        }
+        titleCallbacks.clear();
+        eventHandler = nullptr;
+        serverCallFunction = nullptr;
     }
 
     void setUserdata(rc_client_t*, void* value) override {
@@ -894,6 +945,8 @@ public:
         ++passwordLoginCalls;
         lastLoginUsername = username ? username : "";
         lastPassword = password ? password : "";
+        loginSecretBuffer = password;
+        loginSecretSize = password ? std::strlen(password) : 0;
         loginCallback = callback;
         loginCallbackUserdata = callbackUserdata;
         return asyncHandle;
@@ -910,9 +963,27 @@ public:
         ++tokenLoginCalls;
         lastLoginUsername = username ? username : "";
         lastToken = token ? token : "";
+        loginSecretBuffer = token;
+        loginSecretSize = token ? std::strlen(token) : 0;
         loginCallback = callback;
         loginCallbackUserdata = callbackUserdata;
         return asyncHandle;
+    }
+
+    void onLoginSecretWiped(
+        const char* logicalBuffer,
+        std::size_t logicalSize
+    ) override {
+        recordCall();
+        ++secretWipeNotifications;
+        secretWipeMatchedLoginBuffer = logicalBuffer == loginSecretBuffer
+            && logicalSize == loginSecretSize;
+        secretWipeWasZeroed = logicalBuffer
+            && std::all_of(
+                logicalBuffer,
+                logicalBuffer + logicalSize,
+                [](char value) { return value == '\0'; }
+            );
     }
 
     void logout(rc_client_t*) override {
@@ -941,6 +1012,45 @@ public:
     ) override {
         recordCall();
         progressConsoles.push_back(consoleId);
+        if (routeProfileThroughTransport) {
+            T_REQUIRE(serverCallFunction != nullptr);
+            serverUrl = "https://example.invalid/progress/"
+                + std::to_string(consoleId);
+            rc_api_request_t request{};
+            request.url = serverUrl.c_str();
+            serverCallFunction(
+                &request,
+                [](const rc_api_server_response_t* response, void* callbackData) {
+                    std::unique_ptr<TransportProgressCallback> pending(
+                        static_cast<TransportProgressCallback*>(callbackData)
+                    );
+                    const bool success = response
+                        && response->http_status_code >= 200
+                        && response->http_status_code < 300;
+                    auto& entries =
+                        pending->api->progressEntries[pending->consoleId];
+                    rc_client_all_user_progress_t list{
+                        entries.empty() ? nullptr : entries.data(),
+                        static_cast<std::uint32_t>(entries.size()),
+                    };
+                    pending->callback(
+                        success ? RC_OK : RC_NO_RESPONSE,
+                        success ? nullptr : "profile transport failed",
+                        success ? &list : nullptr,
+                        pending->api->handle,
+                        pending->userdata
+                    );
+                },
+                new TransportProgressCallback{
+                    this,
+                    consoleId,
+                    callback,
+                    callbackUserdata,
+                },
+                handle
+            );
+            return asyncHandle;
+        }
         if (!autoCompleteProgress) {
             progressCallbacks[consoleId] = {callback, callbackUserdata};
             return asyncHandle;
@@ -977,6 +1087,64 @@ public:
     ) override {
         recordCall();
         titleBatches.emplace_back(gameIds, gameIds + numGameIds);
+        if (routeProfileThroughTransport) {
+            T_REQUIRE(serverCallFunction != nullptr);
+            serverUrl = "https://example.invalid/titles";
+            rc_api_request_t request{};
+            request.url = serverUrl.c_str();
+            serverCallFunction(
+                &request,
+                [](const rc_api_server_response_t* response, void* callbackData) {
+                    std::unique_ptr<TransportTitleCallback> pending(
+                        static_cast<TransportTitleCallback*>(callbackData)
+                    );
+                    const bool success = response
+                        && response->http_status_code >= 200
+                        && response->http_status_code < 300;
+                    std::vector<rc_client_game_title_entry_t> entries;
+                    entries.reserve(pending->gameIds.size());
+                    for (const auto gameId : pending->gameIds) {
+                        auto& title = pending->api->titles[gameId];
+                        if (title.empty()) {
+                            title = "Game " + std::to_string(gameId);
+                        }
+                        auto& badgeUrl =
+                            pending->api->titleBadgeUrls[gameId];
+                        if (badgeUrl.empty()) {
+                            badgeUrl = "https://example.invalid/game-"
+                                + std::to_string(gameId) + ".png";
+                        }
+                        rc_client_game_title_entry_t entry{};
+                        entry.game_id = gameId;
+                        entry.title = title.c_str();
+                        entry.badge_url = badgeUrl.c_str();
+                        entries.push_back(entry);
+                    }
+                    rc_client_game_title_list_t list{
+                        entries.empty() ? nullptr : entries.data(),
+                        static_cast<std::uint32_t>(entries.size()),
+                    };
+                    pending->callback(
+                        success ? RC_OK : RC_NO_RESPONSE,
+                        success ? nullptr : "title transport failed",
+                        success ? &list : nullptr,
+                        pending->api->handle,
+                        pending->userdata
+                    );
+                },
+                new TransportTitleCallback{
+                    this,
+                    std::vector<std::uint32_t>(
+                        gameIds,
+                        gameIds + numGameIds
+                    ),
+                    callback,
+                    callbackUserdata,
+                },
+                handle
+            );
+            return asyncHandle;
+        }
         if (!autoCompleteTitles) {
             titleCallbacks.push_back({callback, callbackUserdata});
             return asyncHandle;
@@ -1033,7 +1201,14 @@ public:
         gameCallback = callback;
         gameCallbackUserdata = callbackUserdata;
         if (autoCompleteGame) {
-            callback(gameResult, gameResult == RC_OK ? nullptr : "game failed", handle, callbackUserdata);
+            gameCallback = nullptr;
+            gameCallbackUserdata = nullptr;
+            callback(
+                gameResult,
+                gameResult == RC_OK ? nullptr : "game failed",
+                handle,
+                callbackUserdata
+            );
         }
         return asyncHandle;
     }
@@ -1154,6 +1329,14 @@ public:
         callback(result, errorMessage, handle, loginCallbackUserdata);
     }
 
+    bool tryCompleteLogin(int result = RC_OK, const char* errorMessage = nullptr) {
+        if (!loginCallback) {
+            return false;
+        }
+        completeLogin(result, errorMessage);
+        return true;
+    }
+
     void completeGame(int result, const char* errorMessage = nullptr) {
         T_REQUIRE(gameCallback != nullptr);
         auto callback = gameCallback;
@@ -1190,6 +1373,42 @@ public:
                 fake.serverResponseStatus = response ? response->http_status_code : 0;
             },
             this,
+            handle
+        );
+    }
+
+    struct OwnedServerCallbackData {
+        std::atomic<int>* calls = nullptr;
+        std::atomic<int>* releases = nullptr;
+        std::atomic<int>* status = nullptr;
+
+        ~OwnedServerCallbackData() {
+            ++*releases;
+        }
+    };
+
+    void issueOwnedServerRequest(
+        std::string url,
+        std::atomic<int>& calls,
+        std::atomic<int>& releases,
+        std::atomic<int>& status
+    ) {
+        T_REQUIRE(serverCallFunction != nullptr);
+        serverUrl = std::move(url);
+        rc_api_request_t request{};
+        request.url = serverUrl.c_str();
+        serverCallFunction(
+            &request,
+            [](const rc_api_server_response_t* response, void* callbackData) {
+                std::unique_ptr<OwnedServerCallbackData> owned(
+                    static_cast<OwnedServerCallbackData*>(callbackData)
+                );
+                ++*owned->calls;
+                owned->status->store(
+                    response ? response->http_status_code : 0
+                );
+            },
+            new OwnedServerCallbackData{&calls, &releases, &status},
             handle
         );
     }
@@ -1273,12 +1492,30 @@ public:
         void* userdata = nullptr;
     };
 
+    struct TransportProgressCallback {
+        FakeRaClientApi* api = nullptr;
+        std::uint32_t consoleId = 0;
+        rc_client_fetch_all_user_progress_callback_t callback = nullptr;
+        void* userdata = nullptr;
+    };
+
+    struct TransportTitleCallback {
+        FakeRaClientApi* api = nullptr;
+        std::vector<std::uint32_t> gameIds;
+        rc_client_fetch_game_titles_callback_t callback = nullptr;
+        void* userdata = nullptr;
+    };
+
     std::thread::id ownerThread;
     bool calledOffOwner = false;
     bool destroyed = false;
+    int destroyCalls = 0;
     int hardcoreEnabled = 1;
     int passwordLoginCalls = 0;
     int tokenLoginCalls = 0;
+    int secretWipeNotifications = 0;
+    bool secretWipeMatchedLoginBuffer = false;
+    bool secretWipeWasZeroed = false;
     int logoutCalls = 0;
     int doFrameCalls = 0;
     int idleCalls = 0;
@@ -1289,6 +1526,8 @@ public:
     std::string lastLoginUsername;
     std::string lastPassword;
     std::string lastToken;
+    const char* loginSecretBuffer = nullptr;
+    std::size_t loginSecretSize = 0;
     std::uint32_t lastGameConsole = 0;
     std::string lastGamePath;
     std::vector<std::uint32_t> progressConsoles;
@@ -1300,6 +1539,7 @@ public:
     std::map<std::uint32_t, std::string> titleBadgeUrls;
     bool autoCompleteProgress = false;
     bool autoCompleteTitles = true;
+    bool routeProfileThroughTransport = false;
     int titleResult = RC_OK;
     bool autoCompleteGame = false;
     int gameResult = RC_OK;
@@ -1418,6 +1658,9 @@ TEST_CASE("retroachievements", "session_password_login_transitions_online_withou
     T_REQUIRE(session.snapshot().connectionState == gb::frontend::RaConnectionState::LoggingIn);
     T_EQ(api.passwordLoginCalls, 1);
     T_EQ(api.lastPassword, std::string("segredo-super-secreto"));
+    T_EQ(api.secretWipeNotifications, 1);
+    T_REQUIRE(api.secretWipeMatchedLoginBuffer);
+    T_REQUIRE(api.secretWipeWasZeroed);
     session.processPending();
     T_EQ(api.passwordLoginCalls, 1);
 
@@ -1467,6 +1710,87 @@ TEST_CASE("retroachievements", "session_memory_thunk_reads_only_on_owner_thread"
     });
     T_EQ(backgroundRead.get(), 0U);
     session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_shutdown_is_owner_only_and_observable") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    FakeRaClientApi api;
+    auto session = makeSession(gameBoy, transport, api);
+
+    auto backgroundShutdown = std::async(std::launch::async, [&] {
+        return session.shutdown();
+    });
+    T_REQUIRE(!backgroundShutdown.get());
+    T_EQ(api.destroyCalls, 0);
+    T_REQUIRE(!api.calledOffOwner);
+
+    T_REQUIRE(session.shutdown());
+    T_EQ(api.destroyCalls, 1);
+    T_REQUIRE(session.shutdown());
+    T_EQ(api.destroyCalls, 1);
+    T_REQUIRE(!api.calledOffOwner);
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_shutdown_cancels_pending_server_callback_before_destroy") {
+    std::promise<void> releaseRequest;
+    const auto releaseFuture = releaseRequest.get_future().share();
+    std::atomic<bool> requestStarted = false;
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([&](const auto& request) {
+        requestStarted.store(true);
+        releaseFuture.wait();
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    FakeRaClientApi api;
+    auto session = makeSession(gameBoy, transport, api);
+    std::atomic<int> callbackCalls = 0;
+    std::atomic<int> callbackDataReleases = 0;
+    std::atomic<int> callbackStatus = 0;
+
+    api.issueOwnedServerRequest(
+        "https://example.invalid/pending",
+        callbackCalls,
+        callbackDataReleases,
+        callbackStatus
+    );
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!requestStarted.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    T_REQUIRE(requestStarted.load());
+
+    T_REQUIRE(session.shutdown());
+    releaseRequest.set_value();
+    transport.shutdown();
+
+    T_EQ(callbackCalls.load(), 1);
+    T_EQ(callbackDataReleases.load(), 1);
+    T_EQ(callbackStatus.load(), RC_API_SERVER_RESPONSE_CLIENT_ERROR);
+    session.processPending();
+    T_EQ(callbackCalls.load(), 1);
+    T_REQUIRE(!api.calledOffOwner);
+}
+
+TEST_CASE("retroachievements", "session_destroy_contract_prevents_late_login_callback") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    FakeRaClientApi api;
+    auto session = makeSession(gameBoy, transport, api);
+
+    session.enqueueLogin("Marcelo", "pending-secret");
+    session.processPending();
+    T_REQUIRE(session.shutdown());
+
+    T_REQUIRE(!api.tryCompleteLogin());
+    T_EQ(api.destroyCalls, 1);
+    T_REQUIRE(!api.calledOffOwner);
     transport.shutdown();
 }
 
@@ -1861,6 +2185,11 @@ TEST_CASE("retroachievements", "session_loads_game_in_casual_mode_and_serializes
     T_REQUIRE(session.serializeProgress().empty());
     api.serializeResult = RC_OK;
     T_REQUIRE(!session.deserializeProgress(
+        "0123456789abcdef0123456789abcdef",
+        {}
+    ));
+    T_EQ(api.deserializeCalls, 0);
+    T_REQUIRE(!session.deserializeProgress(
         "fedcba9876543210fedcba9876543210",
         {9, 8}
     ));
@@ -1958,6 +2287,51 @@ TEST_CASE("retroachievements", "session_keeps_successful_console_profile_when_ot
     transport.shutdown();
 }
 
+TEST_CASE("retroachievements", "session_finishes_partial_profile_after_console_http_failure") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        if (request.url.find("/progress/6") != std::string::npos) {
+            return gb::frontend::RaHttpResponse{
+                request.id,
+                request.channel,
+                503,
+                {},
+                "HTTP 503"
+            };
+        }
+        return gb::frontend::RaHttpResponse{
+            request.id,
+            request.channel,
+            200,
+            {},
+            {}
+        };
+    });
+    FakeRaClientApi api;
+    api.routeProfileThroughTransport = true;
+    api.progressEntries[4].push_back({7, 9, 4, 2});
+    api.titles[7] = "Orbital Boy";
+    auto session = makeSession(gameBoy, transport, api);
+
+    session.enqueueTokenLogin("Marcelo", "token");
+    session.processPending();
+    api.completeLogin(RC_OK);
+    processUntil(session, [&] {
+        const auto snapshot = session.snapshot();
+        return snapshot.connectionState == gb::frontend::RaConnectionState::Offline
+            && !snapshot.errorText.empty();
+    });
+
+    const auto snapshot = session.snapshot();
+    T_REQUIRE(snapshot.connectionState == gb::frontend::RaConnectionState::Offline);
+    T_EQ(snapshot.profile.library.size(), 1U);
+    T_EQ(snapshot.profile.library.front().gameId, 7U);
+    T_EQ(snapshot.profile.library.front().title, std::string("Orbital Boy"));
+    T_REQUIRE(!snapshot.errorText.empty());
+    T_REQUIRE(session.shutdown());
+    transport.shutdown();
+}
+
 TEST_CASE("retroachievements", "session_publishes_empty_library_for_empty_console_results") {
     gb::GameBoy gameBoy;
     gb::frontend::RaHttpTransport transport([](const auto& request) {
@@ -2003,6 +2377,51 @@ TEST_CASE("retroachievements", "session_publishes_profile_progress_when_title_ba
     T_REQUIRE(snapshot.profile.library.front().title.empty());
     T_REQUIRE(!snapshot.errorText.empty());
     session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_publishes_profile_progress_after_title_http_failure") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        if (request.url.find("/titles") != std::string::npos) {
+            return gb::frontend::RaHttpResponse{
+                request.id,
+                request.channel,
+                503,
+                {},
+                "HTTP 503"
+            };
+        }
+        return gb::frontend::RaHttpResponse{
+            request.id,
+            request.channel,
+            200,
+            {},
+            {}
+        };
+    });
+    FakeRaClientApi api;
+    api.routeProfileThroughTransport = true;
+    api.progressEntries[4].push_back({17, 12, 5, 3});
+    auto session = makeSession(gameBoy, transport, api);
+
+    session.enqueueTokenLogin("Marcelo", "token");
+    session.processPending();
+    api.completeLogin(RC_OK);
+    processUntil(session, [&] {
+        const auto snapshot = session.snapshot();
+        return snapshot.connectionState == gb::frontend::RaConnectionState::Offline
+            && !snapshot.errorText.empty();
+    });
+
+    const auto snapshot = session.snapshot();
+    T_REQUIRE(snapshot.connectionState == gb::frontend::RaConnectionState::Offline);
+    T_EQ(snapshot.profile.library.size(), 1U);
+    T_EQ(snapshot.profile.library.front().gameId, 17U);
+    T_EQ(snapshot.profile.library.front().total, 12U);
+    T_REQUIRE(snapshot.profile.library.front().title.empty());
+    T_REQUIRE(!snapshot.errorText.empty());
+    T_REQUIRE(session.shutdown());
     transport.shutdown();
 }
 

@@ -75,6 +75,14 @@ rc_client_async_handle_t* RaClientApi::beginLoginWithToken(
     );
 }
 
+void RaClientApi::onLoginSecretWiped(
+    const char* logicalBuffer,
+    std::size_t logicalSize
+) {
+    static_cast<void>(logicalBuffer);
+    static_cast<void>(logicalSize);
+}
+
 void RaClientApi::logout(rc_client_t* client) {
     rc_client_logout(client);
 }
@@ -268,13 +276,17 @@ std::string copyText(const char* text) {
     return text ? text : "";
 }
 
-void eraseSecret(std::string& secret) {
+void wipeSecretBytes(std::string& secret) {
     volatile char* bytes = secret.empty()
         ? nullptr
         : reinterpret_cast<volatile char*>(secret.data());
     for (std::size_t index = 0; index < secret.size(); ++index) {
         bytes[index] = '\0';
     }
+}
+
+void eraseSecret(std::string& secret) {
+    wipeSecretBytes(secret);
     secret.clear();
 }
 
@@ -323,6 +335,10 @@ public:
         std::string secret;
         std::string romPath;
         std::uint32_t consoleId = 0;
+
+        ~Command() {
+            eraseSecret(secret);
+        }
     };
 
     struct PendingServerCall {
@@ -396,21 +412,25 @@ public:
     }
 
     ~Impl() {
-        shutdown();
+        if (!shutdownRequested) {
+            if (!onOwnerThread()) {
+                std::terminate();
+            }
+            static_cast<void>(shutdown());
+        }
     }
 
     [[nodiscard]] bool onOwnerThread() const {
         return std::this_thread::get_id() == ownerThread;
     }
 
-    void enqueue(Command&& command) {
+    void enqueue(std::unique_ptr<Command> command) {
         std::lock_guard lock(commandMutex);
         if (shutdownRequested) {
-            eraseSecret(command.secret);
+            eraseSecret(command->secret);
             return;
         }
         commands.push_back(std::move(command));
-        eraseSecret(command.secret);
     }
 
     void processPending() {
@@ -428,33 +448,42 @@ public:
     }
 
     void processCommands() {
-        std::deque<Command> localCommands;
+        std::deque<std::unique_ptr<Command>> localCommands;
         {
             std::lock_guard lock(commandMutex);
             localCommands.swap(commands);
         }
 
         while (!localCommands.empty()) {
-            Command command = std::move(localCommands.front());
-            eraseSecret(localCommands.front().secret);
+            auto command = std::move(localCommands.front());
             localCommands.pop_front();
-            switch (command.type) {
+            switch (command->type) {
             case CommandType::PasswordLogin:
-                beginLogin(command.username, command.secret, false);
-                eraseSecret(command.secret);
+                beginLogin(command->username, command->secret, false);
+                notifySecretWiped(*command);
                 break;
             case CommandType::TokenLogin:
-                beginLogin(command.username, command.secret, true);
-                eraseSecret(command.secret);
+                beginLogin(command->username, command->secret, true);
+                notifySecretWiped(*command);
                 break;
             case CommandType::Logout:
                 logout();
                 break;
             case CommandType::LoadGame:
-                beginLoadGame(command.consoleId, command.romPath);
+                beginLoadGame(command->consoleId, command->romPath);
                 break;
             }
         }
+    }
+
+    void notifySecretWiped(Command& command) {
+        const std::size_t logicalSize = command.secret.size();
+        char* const logicalBuffer = logicalSize == 0
+            ? nullptr
+            : command.secret.data();
+        wipeSecretBytes(command.secret);
+        api->onLoginSecretWiped(logicalBuffer, logicalSize);
+        command.secret.clear();
     }
 
     void beginLogin(
@@ -679,7 +708,8 @@ public:
 
         const bool active = !shutdownRequested
             && generation == profileGeneration
-            && state.connectionState == RaConnectionState::Online;
+            && (state.connectionState == RaConnectionState::Online
+                || state.connectionState == RaConnectionState::Offline);
         if (active && result == RC_OK && list) {
             for (std::uint32_t index = 0; index < list->num_entries; ++index) {
                 const auto& source = list->entries[index];
@@ -768,7 +798,8 @@ public:
 
         const bool active = !shutdownRequested
             && generation == profileGeneration
-            && state.connectionState == RaConnectionState::Online;
+            && (state.connectionState == RaConnectionState::Online
+                || state.connectionState == RaConnectionState::Offline);
         if (active && result == RC_OK && list) {
             for (std::uint32_t index = 0; index < list->num_entries; ++index) {
                 const auto& source = list->entries[index];
@@ -1034,6 +1065,25 @@ public:
         pending.callback(&serverResponse, pending.callbackData);
     }
 
+    void cancelServerCalls() {
+        const rc_api_server_response_t cancellation{
+            "",
+            0,
+            RC_API_SERVER_RESPONSE_CLIENT_ERROR,
+        };
+        while (!pendingServerCalls.empty()) {
+            const auto found = pendingServerCalls.begin();
+            const PendingServerCall pending = found->second;
+            pendingServerCalls.erase(found);
+            pending.callback(&cancellation, pending.callbackData);
+        }
+        while (!rejectedServerCalls.empty()) {
+            const RejectedServerCall rejected = rejectedServerCalls.front();
+            rejectedServerCalls.pop_front();
+            rejected.callback(&cancellation, rejected.callbackData);
+        }
+    }
+
     void markOfflineForTransportFailure() {
         if (state.connectionState != RaConnectionState::Online) {
             return;
@@ -1107,7 +1157,7 @@ public:
         const std::vector<std::uint8_t>& payload
     ) {
         if (!onOwnerThread() || shutdownRequested || !client
-            || !state.gameLoaded || currentRomHash.empty()
+            || !state.gameLoaded || payload.empty() || currentRomHash.empty()
             || romHash != currentRomHash) {
             return false;
         }
@@ -1136,26 +1186,29 @@ public:
         api->idle(client);
     }
 
-    void shutdown() {
+    [[nodiscard]] bool shutdown() {
+        if (!onOwnerThread()) {
+            return false;
+        }
+
         {
             std::lock_guard lock(commandMutex);
             if (shutdownRequested) {
-                return;
+                return true;
             }
             shutdownRequested = true;
             for (auto& command : commands) {
-                eraseSecret(command.secret);
+                eraseSecret(command->secret);
             }
             commands.clear();
         }
 
+        cancelServerCalls();
         if (client) {
-            unregisterSession(client);
             api->destroy(client);
+            unregisterSession(client);
             client = nullptr;
         }
-        pendingServerCalls.clear();
-        rejectedServerCalls.clear();
         for (auto* context : loginContexts) {
             delete context;
         }
@@ -1172,6 +1225,7 @@ public:
             delete context;
         }
         titleContexts.clear();
+        return true;
     }
 
     RetroAchievementsSession& owner;
@@ -1185,7 +1239,7 @@ public:
     std::thread::id ownerThread;
 
     mutable std::mutex commandMutex;
-    std::deque<Command> commands;
+    std::deque<std::unique_ptr<Command>> commands;
     mutable std::mutex snapshotMutex;
     RaSessionSnapshot publishedSnapshot;
     RaSessionSnapshot state;
@@ -1231,13 +1285,10 @@ void RetroAchievementsSession::enqueueLogin(
     std::string username,
     std::string password
 ) {
-    Impl::Command command{
-        Impl::CommandType::PasswordLogin,
-        std::move(username),
-        std::move(password),
-        {},
-        0,
-    };
+    auto command = std::make_unique<Impl::Command>();
+    command->type = Impl::CommandType::PasswordLogin;
+    command->username = std::move(username);
+    command->secret.swap(password);
     eraseSecret(password);
     impl_->enqueue(std::move(command));
 }
@@ -1246,19 +1297,17 @@ void RetroAchievementsSession::enqueueTokenLogin(
     std::string username,
     std::string token
 ) {
-    Impl::Command command{
-        Impl::CommandType::TokenLogin,
-        std::move(username),
-        std::move(token),
-        {},
-        0,
-    };
+    auto command = std::make_unique<Impl::Command>();
+    command->type = Impl::CommandType::TokenLogin;
+    command->username = std::move(username);
+    command->secret.swap(token);
     eraseSecret(token);
     impl_->enqueue(std::move(command));
 }
 
 void RetroAchievementsSession::enqueueLogout() {
-    Impl::Command command{Impl::CommandType::Logout, {}, {}, {}, 0};
+    auto command = std::make_unique<Impl::Command>();
+    command->type = Impl::CommandType::Logout;
     impl_->enqueue(std::move(command));
 }
 
@@ -1266,13 +1315,10 @@ void RetroAchievementsSession::enqueueLoadGame(
     std::uint32_t consoleId,
     std::string romPath
 ) {
-    Impl::Command command{
-        Impl::CommandType::LoadGame,
-        {},
-        {},
-        std::move(romPath),
-        consoleId,
-    };
+    auto command = std::make_unique<Impl::Command>();
+    command->type = Impl::CommandType::LoadGame;
+    command->romPath = std::move(romPath);
+    command->consoleId = consoleId;
     impl_->enqueue(std::move(command));
 }
 
@@ -1307,8 +1353,8 @@ bool RetroAchievementsSession::deserializeProgress(
     return impl_->deserializeProgress(romHash, payload);
 }
 
-void RetroAchievementsSession::shutdown() {
-    impl_->shutdown();
+bool RetroAchievementsSession::shutdown() {
+    return impl_->shutdown();
 }
 
 std::uint32_t RetroAchievementsSession::readMemoryThunk(

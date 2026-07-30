@@ -29,6 +29,8 @@ public:
         rc_client_read_memory_func_t readMemory,
         rc_client_server_call_t serverCall
     );
+    // The session completes outstanding server callbacks before this call. On
+    // return, no callback associated with the destroyed client may run again.
     virtual void destroy(rc_client_t* client);
     virtual void setUserdata(rc_client_t* client, void* userdata);
     virtual void setEventHandler(rc_client_t* client, rc_client_event_handler_t handler);
@@ -47,6 +49,12 @@ public:
         const char* token,
         rc_client_callback_t callback,
         void* callbackUserdata
+    );
+    // Lifecycle seam invoked after beginLogin has consumed the logical secret,
+    // while its stable buffer is still alive and already contains only zeroes.
+    virtual void onLoginSecretWiped(
+        const char* logicalBuffer,
+        std::size_t logicalSize
     );
     virtual void logout(rc_client_t* client);
     [[nodiscard]] virtual const rc_client_user_t* getUserInfo(
@@ -135,6 +143,7 @@ public:
         RaConfigPersistence persistConfig = {},
         RaClientApi* clientApi = nullptr
     );
+    // Destroy on the creating thread, or call shutdown successfully there first.
     ~RetroAchievementsSession();
 
     RetroAchievementsSession(const RetroAchievementsSession&) = delete;
@@ -158,7 +167,9 @@ public:
         std::string_view romHash,
         const std::vector<std::uint8_t>& payload
     );
-    void shutdown();
+    // Returns false without mutation off the creating thread. Owner-thread
+    // shutdown is idempotent and returns true.
+    bool shutdown();
 
 private:
     static std::uint32_t RC_CCONV readMemoryThunk(
