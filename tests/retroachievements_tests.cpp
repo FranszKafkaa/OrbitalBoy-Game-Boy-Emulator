@@ -3,14 +3,21 @@
 #include <atomic>
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <cstdint>
+#include <cstring>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <iterator>
+#include <map>
+#include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #if !defined(_WIN32)
@@ -22,6 +29,7 @@
 #include "gb/app/frontend/realtime/retroachievements_memory.hpp"
 #include "gb/app/frontend/realtime/retroachievements_models.hpp"
 #include "gb/app/frontend/realtime/retroachievements_progress.hpp"
+#include "gb/app/frontend/realtime/retroachievements_session.hpp"
 #include "gb/core/gameboy.hpp"
 #include "gb/app/runtime_paths.hpp"
 
@@ -87,6 +95,19 @@ TEST_CASE("retroachievements", "client_can_remain_in_casual_mode") {
     rc_client_set_hardcore_enabled(client, 0);
     T_REQUIRE(!rc_client_get_hardcore_enabled(client));
     rc_client_destroy(client);
+}
+
+TEST_CASE("retroachievements", "production_session_initializes_without_network") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    gb::frontend::RetroAchievementsSession session(gameBoy, transport);
+
+    T_REQUIRE(session.snapshot().connectionState == gb::frontend::RaConnectionState::LoggedOut);
+    T_REQUIRE(session.snapshot().profile.user.username.empty());
+    session.shutdown();
+    transport.shutdown();
 }
 
 TEST_CASE("retroachievements", "memory_reader_rejects_invalid_ranges") {
@@ -816,4 +837,1209 @@ TEST_CASE("retroachievements", "http_shutdown_is_idempotent_and_cancels_pending_
     const auto afterShutdown = transport.takeCompleted(gb::frontend::RaHttpChannel::Api);
     T_EQ(calls.load(), 1);
     T_REQUIRE(afterShutdown.empty());
+}
+
+namespace {
+
+class FakeRaClientApi final : public gb::frontend::RaClientApi {
+public:
+    FakeRaClientApi()
+        : ownerThread(std::this_thread::get_id()) {
+        handle = reinterpret_cast<rc_client_t*>(this);
+        asyncHandle = reinterpret_cast<rc_client_async_handle_t*>(this);
+        game.title = "";
+        game.hash = "";
+        game.badge_url = "";
+        setUser("Marcelo", "Marcelo", "token-1");
+    }
+
+    rc_client_t* create(
+        rc_client_read_memory_func_t readMemory,
+        rc_client_server_call_t serverCall
+    ) override {
+        recordCall();
+        readMemoryFunction = readMemory;
+        serverCallFunction = serverCall;
+        return handle;
+    }
+
+    void destroy(rc_client_t*) override {
+        recordCall();
+        destroyed = true;
+    }
+
+    void setUserdata(rc_client_t*, void* value) override {
+        recordCall();
+        userdata = value;
+    }
+
+    void setEventHandler(rc_client_t*, rc_client_event_handler_t handlerValue) override {
+        recordCall();
+        eventHandler = handlerValue;
+    }
+
+    void setHardcoreEnabled(rc_client_t*, int enabled) override {
+        recordCall();
+        hardcoreEnabled = enabled;
+    }
+
+    rc_client_async_handle_t* beginLoginWithPassword(
+        rc_client_t*,
+        const char* username,
+        const char* password,
+        rc_client_callback_t callback,
+        void* callbackUserdata
+    ) override {
+        recordCall();
+        ++passwordLoginCalls;
+        lastLoginUsername = username ? username : "";
+        lastPassword = password ? password : "";
+        loginCallback = callback;
+        loginCallbackUserdata = callbackUserdata;
+        return asyncHandle;
+    }
+
+    rc_client_async_handle_t* beginLoginWithToken(
+        rc_client_t*,
+        const char* username,
+        const char* token,
+        rc_client_callback_t callback,
+        void* callbackUserdata
+    ) override {
+        recordCall();
+        ++tokenLoginCalls;
+        lastLoginUsername = username ? username : "";
+        lastToken = token ? token : "";
+        loginCallback = callback;
+        loginCallbackUserdata = callbackUserdata;
+        return asyncHandle;
+    }
+
+    void logout(rc_client_t*) override {
+        recordCall();
+        ++logoutCalls;
+    }
+
+    const rc_client_user_t* getUserInfo(const rc_client_t*) const override {
+        return userAvailable ? &user : nullptr;
+    }
+
+    int userGetImageUrl(
+        const rc_client_user_t*,
+        char* buffer,
+        std::size_t bufferSize
+    ) const override {
+        ++const_cast<FakeRaClientApi*>(this)->userImageCalls;
+        return copyUrl(userAvatarUrl, buffer, bufferSize);
+    }
+
+    rc_client_async_handle_t* beginFetchAllUserProgress(
+        rc_client_t*,
+        std::uint32_t consoleId,
+        rc_client_fetch_all_user_progress_callback_t callback,
+        void* callbackUserdata
+    ) override {
+        recordCall();
+        progressConsoles.push_back(consoleId);
+        if (!autoCompleteProgress) {
+            progressCallbacks[consoleId] = {callback, callbackUserdata};
+            return asyncHandle;
+        }
+
+        auto& entries = progressEntries[consoleId];
+        rc_client_all_user_progress_t list{
+            entries.empty() ? nullptr : entries.data(),
+            static_cast<std::uint32_t>(entries.size()),
+        };
+        const int result = progressResults.count(consoleId) != 0
+            ? progressResults.at(consoleId)
+            : RC_OK;
+        callback(
+            result,
+            result == RC_OK ? nullptr : "profile failed",
+            result == RC_OK ? &list : nullptr,
+            handle,
+            callbackUserdata
+        );
+        return asyncHandle;
+    }
+
+    void destroyAllUserProgress(rc_client_all_user_progress_t*) override {
+        recordCall();
+    }
+
+    rc_client_async_handle_t* beginFetchGameTitles(
+        rc_client_t*,
+        const std::uint32_t* gameIds,
+        std::uint32_t numGameIds,
+        rc_client_fetch_game_titles_callback_t callback,
+        void* callbackUserdata
+    ) override {
+        recordCall();
+        titleBatches.emplace_back(gameIds, gameIds + numGameIds);
+        if (!autoCompleteTitles) {
+            titleCallbacks.push_back({callback, callbackUserdata});
+            return asyncHandle;
+        }
+
+        std::vector<rc_client_game_title_entry_t> entries;
+        entries.reserve(numGameIds);
+        for (std::uint32_t index = 0; index < numGameIds; ++index) {
+            const auto gameId = gameIds[index];
+            auto& title = titles[gameId];
+            if (title.empty()) {
+                title = "Game " + std::to_string(gameId);
+            }
+            auto& badgeUrl = titleBadgeUrls[gameId];
+            if (badgeUrl.empty()) {
+                badgeUrl = "https://example.invalid/game-" + std::to_string(gameId) + ".png";
+            }
+            rc_client_game_title_entry_t entry{};
+            entry.game_id = gameId;
+            entry.title = title.c_str();
+            entry.badge_url = badgeUrl.c_str();
+            entries.push_back(entry);
+        }
+        rc_client_game_title_list_t list{
+            entries.empty() ? nullptr : entries.data(),
+            static_cast<std::uint32_t>(entries.size()),
+        };
+        callback(
+            titleResult,
+            titleResult == RC_OK ? nullptr : "titles failed",
+            titleResult == RC_OK ? &list : nullptr,
+            handle,
+            callbackUserdata
+        );
+        return asyncHandle;
+    }
+
+    void destroyGameTitleList(rc_client_game_title_list_t*) override {
+        recordCall();
+    }
+
+    rc_client_async_handle_t* beginIdentifyAndLoadGame(
+        rc_client_t*,
+        std::uint32_t consoleId,
+        const char* filePath,
+        const std::uint8_t*,
+        std::size_t,
+        rc_client_callback_t callback,
+        void* callbackUserdata
+    ) override {
+        recordCall();
+        lastGameConsole = consoleId;
+        lastGamePath = filePath ? filePath : "";
+        gameCallback = callback;
+        gameCallbackUserdata = callbackUserdata;
+        if (autoCompleteGame) {
+            callback(gameResult, gameResult == RC_OK ? nullptr : "game failed", handle, callbackUserdata);
+        }
+        return asyncHandle;
+    }
+
+    bool isGameLoaded(const rc_client_t*) const override {
+        return gameAvailable;
+    }
+
+    const rc_client_game_t* getGameInfo(const rc_client_t*) const override {
+        return gameAvailable ? &game : nullptr;
+    }
+
+    int gameGetImageUrl(
+        const rc_client_game_t* gameInfo,
+        char* buffer,
+        std::size_t bufferSize
+    ) const override {
+        return copyUrl(gameInfo && gameInfo->badge_url ? gameInfo->badge_url : "", buffer, bufferSize);
+    }
+
+    void getUserGameSummary(
+        const rc_client_t*,
+        rc_client_user_game_summary_t* outSummary
+    ) const override {
+        if (outSummary) {
+            *outSummary = gameSummary;
+        }
+    }
+
+    rc_client_achievement_list_t* createAchievementList(
+        rc_client_t*,
+        int category,
+        int grouping
+    ) override {
+        recordCall();
+        achievementCategory = category;
+        achievementGrouping = grouping;
+        achievementPointers.clear();
+        for (auto& achievement : achievements) {
+            achievementPointers.push_back(&achievement);
+        }
+        achievementBucket = {
+            achievementPointers.empty() ? nullptr : achievementPointers.data(),
+            static_cast<std::uint32_t>(achievementPointers.size()),
+            "Progress",
+            0,
+            RC_CLIENT_ACHIEVEMENT_BUCKET_LOCKED,
+        };
+        achievementList = {&achievementBucket, 1};
+        return &achievementList;
+    }
+
+    void destroyAchievementList(rc_client_achievement_list_t*) override {
+        recordCall();
+    }
+
+    int achievementGetImageUrl(
+        const rc_client_achievement_t* achievement,
+        int,
+        char* buffer,
+        std::size_t bufferSize
+    ) const override {
+        return copyUrl(
+            achievement && achievement->badge_url ? achievement->badge_url : "",
+            buffer,
+            bufferSize
+        );
+    }
+
+    void doFrame(rc_client_t*) override {
+        recordCall();
+        ++doFrameCalls;
+        if (eventOnFrame.has_value() && eventHandler) {
+            eventHandler(&*eventOnFrame, handle);
+            eventOnFrame.reset();
+        }
+    }
+
+    void idle(rc_client_t*) override {
+        recordCall();
+        ++idleCalls;
+    }
+
+    std::size_t progressSize(rc_client_t*) const override {
+        return serializedProgress.size();
+    }
+
+    int serializeProgressSized(
+        rc_client_t*,
+        std::uint8_t* buffer,
+        std::size_t bufferSize
+    ) const override {
+        if (serializeResult != RC_OK) {
+            return serializeResult;
+        }
+        if (bufferSize != serializedProgress.size()) {
+            return RC_INSUFFICIENT_BUFFER;
+        }
+        std::copy(serializedProgress.begin(), serializedProgress.end(), buffer);
+        return RC_OK;
+    }
+
+    int deserializeProgressSized(
+        rc_client_t*,
+        const std::uint8_t* buffer,
+        std::size_t bufferSize
+    ) override {
+        recordCall();
+        ++deserializeCalls;
+        deserializedProgress.assign(buffer, buffer + bufferSize);
+        return deserializeResult;
+    }
+
+    void completeLogin(int result, const char* errorMessage = nullptr) {
+        T_REQUIRE(loginCallback != nullptr);
+        auto callback = loginCallback;
+        loginCallback = nullptr;
+        callback(result, errorMessage, handle, loginCallbackUserdata);
+    }
+
+    void completeGame(int result, const char* errorMessage = nullptr) {
+        T_REQUIRE(gameCallback != nullptr);
+        auto callback = gameCallback;
+        gameCallback = nullptr;
+        callback(result, errorMessage, handle, gameCallbackUserdata);
+    }
+
+    void emitAchievement(std::size_t index) {
+        T_REQUIRE(eventHandler != nullptr);
+        T_REQUIRE(index < achievements.size());
+        rc_client_event_t event{};
+        event.type = RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED;
+        event.achievement = &achievements[index];
+        eventHandler(&event, handle);
+    }
+
+    void emitIgnoredEvent() {
+        T_REQUIRE(eventHandler != nullptr);
+        rc_client_event_t event{};
+        event.type = RC_CLIENT_EVENT_LEADERBOARD_STARTED;
+        eventHandler(&event, handle);
+    }
+
+    void issueServerRequest(std::string url) {
+        T_REQUIRE(serverCallFunction != nullptr);
+        serverUrl = std::move(url);
+        rc_api_request_t request{};
+        request.url = serverUrl.c_str();
+        serverCallFunction(
+            &request,
+            [](const rc_api_server_response_t* response, void* callbackData) {
+                auto& fake = *static_cast<FakeRaClientApi*>(callbackData);
+                fake.serverCallbackThread = std::this_thread::get_id();
+                fake.serverResponseStatus = response ? response->http_status_code : 0;
+            },
+            this,
+            handle
+        );
+    }
+
+    std::uint32_t readThroughClient(
+        std::uint32_t address,
+        std::uint8_t* buffer,
+        std::uint32_t numBytes
+    ) {
+        T_REQUIRE(readMemoryFunction != nullptr);
+        return readMemoryFunction(address, buffer, numBytes, handle);
+    }
+
+    void setUser(std::string username, std::string displayName, std::string token) {
+        userUsername = std::move(username);
+        userDisplayName = std::move(displayName);
+        userToken = std::move(token);
+        user.username = userUsername.c_str();
+        user.display_name = userDisplayName.c_str();
+        user.token = userToken.c_str();
+        user.avatar_url = userAvatarUrl.c_str();
+    }
+
+    void setGame(
+        std::uint32_t id,
+        std::string title,
+        std::string hash,
+        std::string badgeUrl
+    ) {
+        gameTitle = std::move(title);
+        gameHash = std::move(hash);
+        gameBadgeUrl = std::move(badgeUrl);
+        game.id = id;
+        game.console_id = 4;
+        game.title = gameTitle.c_str();
+        game.hash = gameHash.c_str();
+        game.badge_url = gameBadgeUrl.c_str();
+        gameAvailable = true;
+    }
+
+    rc_client_achievement_t makeAchievement(
+        std::uint32_t id,
+        const char* title,
+        std::uint32_t points,
+        bool unlocked
+    ) {
+        achievementTitles.emplace_back(title);
+        achievementDescriptions.emplace_back("Description " + std::to_string(id));
+        achievementBadgeUrls.emplace_back(
+            "https://example.invalid/achievement-" + std::to_string(id) + ".png"
+        );
+        rc_client_achievement_t achievement{};
+        achievement.id = id;
+        achievement.title = achievementTitles.back().c_str();
+        achievement.description = achievementDescriptions.back().c_str();
+        achievement.badge_url = achievementBadgeUrls.back().c_str();
+        achievement.points = points;
+        achievement.state = unlocked
+            ? RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED
+            : RC_CLIENT_ACHIEVEMENT_STATE_ACTIVE;
+        achievement.unlocked = unlocked
+            ? RC_CLIENT_ACHIEVEMENT_UNLOCKED_SOFTCORE
+            : RC_CLIENT_ACHIEVEMENT_UNLOCKED_NONE;
+        std::snprintf(
+            achievement.measured_progress,
+            sizeof(achievement.measured_progress),
+            "%u/%u",
+            unlocked ? 1U : 0U,
+            1U
+        );
+        return achievement;
+    }
+
+    struct ProgressCallback {
+        rc_client_fetch_all_user_progress_callback_t callback = nullptr;
+        void* userdata = nullptr;
+    };
+
+    struct TitleCallback {
+        rc_client_fetch_game_titles_callback_t callback = nullptr;
+        void* userdata = nullptr;
+    };
+
+    std::thread::id ownerThread;
+    bool calledOffOwner = false;
+    bool destroyed = false;
+    int hardcoreEnabled = 1;
+    int passwordLoginCalls = 0;
+    int tokenLoginCalls = 0;
+    int logoutCalls = 0;
+    int doFrameCalls = 0;
+    int idleCalls = 0;
+    int userImageCalls = 0;
+    int deserializeCalls = 0;
+    int achievementCategory = 0;
+    int achievementGrouping = 0;
+    std::string lastLoginUsername;
+    std::string lastPassword;
+    std::string lastToken;
+    std::uint32_t lastGameConsole = 0;
+    std::string lastGamePath;
+    std::vector<std::uint32_t> progressConsoles;
+    std::vector<std::vector<std::uint32_t>> titleBatches;
+    std::unordered_map<std::uint32_t, std::vector<rc_client_all_user_progress_entry_t>>
+        progressEntries;
+    std::unordered_map<std::uint32_t, int> progressResults;
+    std::map<std::uint32_t, std::string> titles;
+    std::map<std::uint32_t, std::string> titleBadgeUrls;
+    bool autoCompleteProgress = false;
+    bool autoCompleteTitles = true;
+    int titleResult = RC_OK;
+    bool autoCompleteGame = false;
+    int gameResult = RC_OK;
+    bool userAvailable = true;
+    bool gameAvailable = false;
+    rc_client_user_t user{};
+    rc_client_game_t game{};
+    rc_client_user_game_summary_t gameSummary{};
+    std::deque<std::string> achievementTitles;
+    std::deque<std::string> achievementDescriptions;
+    std::deque<std::string> achievementBadgeUrls;
+    std::vector<rc_client_achievement_t> achievements;
+    std::vector<const rc_client_achievement_t*> achievementPointers;
+    rc_client_achievement_bucket_t achievementBucket{};
+    rc_client_achievement_list_t achievementList{};
+    std::vector<std::uint8_t> serializedProgress;
+    std::vector<std::uint8_t> deserializedProgress;
+    int serializeResult = RC_OK;
+    int deserializeResult = RC_OK;
+    std::optional<rc_client_event_t> eventOnFrame;
+    std::thread::id serverCallbackThread;
+    int serverResponseStatus = 0;
+
+private:
+    static int copyUrl(
+        std::string_view value,
+        char* buffer,
+        std::size_t bufferSize
+    ) {
+        if (!buffer || value.size() >= bufferSize) {
+            return RC_INSUFFICIENT_BUFFER;
+        }
+        std::memcpy(buffer, value.data(), value.size());
+        buffer[value.size()] = '\0';
+        return RC_OK;
+    }
+
+    void recordCall() const {
+        if (std::this_thread::get_id() != ownerThread) {
+            const_cast<FakeRaClientApi*>(this)->calledOffOwner = true;
+        }
+    }
+
+    rc_client_t* handle = nullptr;
+    rc_client_async_handle_t* asyncHandle = nullptr;
+    void* userdata = nullptr;
+    rc_client_read_memory_func_t readMemoryFunction = nullptr;
+    rc_client_server_call_t serverCallFunction = nullptr;
+    rc_client_event_handler_t eventHandler = nullptr;
+    rc_client_callback_t loginCallback = nullptr;
+    void* loginCallbackUserdata = nullptr;
+    rc_client_callback_t gameCallback = nullptr;
+    void* gameCallbackUserdata = nullptr;
+    std::unordered_map<std::uint32_t, ProgressCallback> progressCallbacks;
+    std::vector<TitleCallback> titleCallbacks;
+    std::string userUsername;
+    std::string userDisplayName;
+    std::string userToken;
+    std::string userAvatarUrl = "https://example.invalid/avatar.png";
+    std::string gameTitle;
+    std::string gameHash;
+    std::string gameBadgeUrl;
+    std::string serverUrl;
+};
+
+gb::frontend::RetroAchievementsSession makeSession(
+    gb::GameBoy& gameBoy,
+    gb::frontend::RaHttpTransport& transport,
+    FakeRaClientApi& api,
+    gb::frontend::RaConfig config = {},
+    gb::frontend::RaConfigPersistence persist = {}
+) {
+    return gb::frontend::RetroAchievementsSession(
+        gameBoy,
+        transport,
+        std::move(config),
+        std::move(persist),
+        &api
+    );
+}
+
+void processUntil(
+    gb::frontend::RetroAchievementsSession& session,
+    const std::function<bool()>& condition
+) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!condition() && std::chrono::steady_clock::now() < deadline) {
+        session.processPending();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    session.processPending();
+    T_REQUIRE(condition());
+}
+
+} // namespace
+
+TEST_CASE("retroachievements", "session_password_login_transitions_online_without_exposing_secret") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    FakeRaClientApi api;
+    std::vector<gb::frontend::RaConfig> persisted;
+    auto session = makeSession(
+        gameBoy,
+        transport,
+        api,
+        {},
+        [&](const auto& config) { persisted.push_back(config); }
+    );
+
+    T_REQUIRE(session.snapshot().connectionState == gb::frontend::RaConnectionState::LoggedOut);
+    session.enqueueLogin("Marcelo", "segredo-super-secreto");
+    session.processPending();
+
+    T_REQUIRE(session.snapshot().connectionState == gb::frontend::RaConnectionState::LoggingIn);
+    T_EQ(api.passwordLoginCalls, 1);
+    T_EQ(api.lastPassword, std::string("segredo-super-secreto"));
+    session.processPending();
+    T_EQ(api.passwordLoginCalls, 1);
+
+    api.setUser("Marcelo", "Marcelo Janke", "token-retornado");
+    api.user.score = 1234;
+    api.user.score_softcore = 56;
+    api.user.num_unread_messages = 7;
+    api.completeLogin(RC_OK);
+
+    const auto snapshot = session.snapshot();
+    T_REQUIRE(snapshot.connectionState == gb::frontend::RaConnectionState::Online);
+    T_EQ(snapshot.profile.user.username, std::string("Marcelo"));
+    T_EQ(snapshot.profile.user.displayName, std::string("Marcelo Janke"));
+    T_EQ(snapshot.profile.user.scoreHardcore, 1234U);
+    T_EQ(snapshot.profile.user.scoreCasual, 56U);
+    T_EQ(snapshot.profile.user.unreadMessages, 7U);
+    T_EQ(api.userImageCalls, 1);
+    T_REQUIRE(snapshot.statusText.find("segredo-super-secreto") == std::string::npos);
+    T_REQUIRE(snapshot.errorText.find("segredo-super-secreto") == std::string::npos);
+    T_EQ(persisted.size(), 1U);
+    T_EQ(persisted.front().token, std::string("token-retornado"));
+    T_REQUIRE(api.hardcoreEnabled == 0);
+    T_REQUIRE(!api.calledOffOwner);
+
+    const auto events = session.takeEvents();
+    T_EQ(events.size(), 1U);
+    T_REQUIRE(events.front().type == gb::frontend::RaUiEventType::LoginSucceeded);
+    session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_memory_thunk_reads_only_on_owner_thread") {
+    gb::GameBoy gameBoy;
+    gameBoy.bus().write(0xC000, 0x5A);
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    FakeRaClientApi api;
+    auto session = makeSession(gameBoy, transport, api);
+    std::array<std::uint8_t, 1> ownerBytes{};
+
+    T_EQ(api.readThroughClient(0xC000, ownerBytes.data(), 1), 1U);
+    T_EQ(ownerBytes.front(), 0x5A);
+    auto backgroundRead = std::async(std::launch::async, [&] {
+        std::array<std::uint8_t, 1> bytes{};
+        return api.readThroughClient(0xC000, bytes.data(), 1);
+    });
+    T_EQ(backgroundRead.get(), 0U);
+    session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_login_failure_clears_only_non_transient_credentials") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    FakeRaClientApi api;
+    gb::frontend::RaConfig config{};
+    config.username = "Marcelo";
+    config.token = "token-anterior";
+    std::vector<gb::frontend::RaConfig> persisted;
+    auto session = makeSession(
+        gameBoy,
+        transport,
+        api,
+        config,
+        [&](const auto& next) { persisted.push_back(next); }
+    );
+
+    session.enqueueTokenLogin(config.username, config.token);
+    session.processPending();
+    api.completeLogin(RC_NO_RESPONSE, "network detail");
+
+    T_REQUIRE(session.snapshot().connectionState == gb::frontend::RaConnectionState::Error);
+    T_REQUIRE(session.snapshot().errorText.find("network detail") == std::string::npos);
+    T_REQUIRE(persisted.empty());
+
+    session.enqueueTokenLogin(config.username, config.token);
+    session.processPending();
+    api.completeLogin(RC_INVALID_CREDENTIALS, "bad password");
+
+    T_REQUIRE(session.snapshot().connectionState == gb::frontend::RaConnectionState::Error);
+    T_EQ(persisted.size(), 1U);
+    T_REQUIRE(persisted.back().token.empty());
+    const auto events = session.takeEvents();
+    T_EQ(events.size(), 2U);
+    T_REQUIRE(events.back().type == gb::frontend::RaUiEventType::LoginFailed);
+    session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_transport_failure_goes_offline_on_owner_thread_and_keeps_snapshot") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{
+            request.id,
+            request.channel,
+            0,
+            {},
+            "sem rede"
+        };
+    });
+    FakeRaClientApi api;
+    auto session = makeSession(gameBoy, transport, api);
+    session.enqueueTokenLogin("Marcelo", "token");
+    session.processPending();
+    api.completeLogin(RC_OK);
+    const auto before = session.snapshot();
+
+    api.issueServerRequest("https://example.invalid/profile");
+    processUntil(session, [&] { return api.serverResponseStatus != 0; });
+
+    const auto after = session.snapshot();
+    T_REQUIRE(after.connectionState == gb::frontend::RaConnectionState::Offline);
+    T_EQ(after.profile.user.username, before.profile.user.username);
+    T_EQ(after.profile.user.avatarUrl, before.profile.user.avatarUrl);
+    T_REQUIRE(api.serverCallbackThread == api.ownerThread);
+    const auto events = session.takeEvents();
+    T_REQUIRE(!events.empty());
+    T_REQUIRE(events.back().type == gb::frontend::RaUiEventType::Offline);
+    session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_transport_backpressure_completes_rejection_without_pending_callback") {
+    std::atomic<bool> executorStarted{false};
+    std::atomic<bool> releaseExecutor{false};
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([&](const auto& request) {
+        executorStarted.store(true);
+        while (!releaseExecutor.load()) {
+            std::this_thread::yield();
+        }
+        return gb::frontend::RaHttpResponse{
+            request.id,
+            request.channel,
+            200,
+            {'o', 'k'},
+            {}
+        };
+    });
+    T_REQUIRE(transport.submit({
+        1000,
+        gb::frontend::RaHttpChannel::Api,
+        "https://example.invalid/blocked",
+        {},
+    }));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!executorStarted.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    T_REQUIRE(executorStarted.load());
+    for (std::uint64_t id = 1001; id < 1064; ++id) {
+        T_REQUIRE(transport.submit({
+            id,
+            gb::frontend::RaHttpChannel::Api,
+            "https://example.invalid/full",
+            {},
+        }));
+    }
+
+    FakeRaClientApi api;
+    auto session = makeSession(gameBoy, transport, api);
+    session.enqueueTokenLogin("Marcelo", "token");
+    session.processPending();
+    api.completeLogin(RC_OK);
+    api.issueServerRequest("https://example.invalid/rejected");
+    session.processPending();
+
+    T_REQUIRE(session.snapshot().connectionState == gb::frontend::RaConnectionState::Offline);
+    T_EQ(
+        api.serverResponseStatus,
+        RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR
+    );
+    T_REQUIRE(api.serverCallbackThread == api.ownerThread);
+
+    releaseExecutor.store(true);
+    transport.shutdown();
+    session.processPending();
+    T_EQ(
+        api.serverResponseStatus,
+        RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR
+    );
+    session.shutdown();
+}
+
+TEST_CASE("retroachievements", "production_session_handles_transport_backpressure_without_network") {
+    std::atomic<bool> executorStarted{false};
+    std::atomic<bool> releaseExecutor{false};
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([&](const auto& request) {
+        executorStarted.store(true);
+        while (!releaseExecutor.load()) {
+            std::this_thread::yield();
+        }
+        return gb::frontend::RaHttpResponse{
+            request.id,
+            request.channel,
+            200,
+            {'o', 'k'},
+            {}
+        };
+    });
+    T_REQUIRE(transport.submit({
+        2000,
+        gb::frontend::RaHttpChannel::Api,
+        "https://example.invalid/blocked",
+        {},
+    }));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!executorStarted.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    T_REQUIRE(executorStarted.load());
+    for (std::uint64_t id = 2001; id < 2064; ++id) {
+        T_REQUIRE(transport.submit({
+            id,
+            gb::frontend::RaHttpChannel::Api,
+            "https://example.invalid/full",
+            {},
+        }));
+    }
+
+    gb::frontend::RetroAchievementsSession session(gameBoy, transport);
+    session.enqueueTokenLogin("Marcelo", "token");
+    session.processPending();
+
+    T_REQUIRE(session.snapshot().connectionState == gb::frontend::RaConnectionState::Error);
+    T_REQUIRE(!session.snapshot().errorText.empty());
+    session.shutdown();
+    releaseExecutor.store(true);
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_process_pending_does_not_drain_image_channel") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{
+            request.id,
+            request.channel,
+            200,
+            {'p', 'n', 'g'},
+            {}
+        };
+    });
+    FakeRaClientApi api;
+    auto session = makeSession(gameBoy, transport, api);
+
+    T_REQUIRE(transport.submit({
+        71,
+        gb::frontend::RaHttpChannel::Image,
+        "https://example.invalid/image.png",
+        {},
+    }));
+    std::vector<gb::frontend::RaHttpResponse> imageResponses;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (imageResponses.empty() && std::chrono::steady_clock::now() < deadline) {
+        session.processPending();
+        imageResponses =
+            transport.takeCompleted(gb::frontend::RaHttpChannel::Image);
+        std::this_thread::yield();
+    }
+    session.processPending();
+
+    T_EQ(imageResponses.size(), 1U);
+    T_EQ(imageResponses.front().id, 71U);
+    session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_logout_clears_token_profile_and_current_game") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    FakeRaClientApi api;
+    std::vector<gb::frontend::RaConfig> persisted;
+    auto session = makeSession(
+        gameBoy,
+        transport,
+        api,
+        {},
+        [&](const auto& config) { persisted.push_back(config); }
+    );
+    session.enqueueLogin("Marcelo", "senha");
+    session.processPending();
+    api.completeLogin(RC_OK);
+    api.setGame(42, "Orbital Boy", "0123456789abcdef0123456789abcdef", "game.png");
+    api.gameSummary.num_core_achievements = 12;
+    api.gameSummary.num_unlocked_achievements = 3;
+    session.enqueueLoadGame(4, "/roms/orbital.gb");
+    session.processPending();
+    api.completeGame(RC_OK);
+    T_REQUIRE(session.snapshot().gameLoaded);
+
+    session.enqueueLogout();
+    session.processPending();
+
+    const auto snapshot = session.snapshot();
+    T_REQUIRE(snapshot.connectionState == gb::frontend::RaConnectionState::LoggedOut);
+    T_REQUIRE(snapshot.profile.user.username.empty());
+    T_REQUIRE(snapshot.profile.library.empty());
+    T_REQUIRE(snapshot.currentGame.title.empty());
+    T_REQUIRE(snapshot.currentAchievements.empty());
+    T_REQUIRE(!snapshot.gameLoaded);
+    T_REQUIRE(!persisted.empty());
+    T_REQUIRE(persisted.back().token.empty());
+    T_EQ(api.logoutCalls, 1);
+    session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_ignores_login_callback_that_arrives_after_logout") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    FakeRaClientApi api;
+    auto session = makeSession(gameBoy, transport, api);
+    session.enqueueLogin("Marcelo", "senha");
+    session.processPending();
+    T_REQUIRE(session.snapshot().connectionState == gb::frontend::RaConnectionState::LoggingIn);
+
+    session.enqueueLogout();
+    session.processPending();
+    T_REQUIRE(session.snapshot().connectionState == gb::frontend::RaConnectionState::LoggedOut);
+    api.completeLogin(RC_ABORTED, "Login aborted");
+
+    T_REQUIRE(session.snapshot().connectionState == gb::frontend::RaConnectionState::LoggedOut);
+    T_REQUIRE(session.snapshot().errorText.empty());
+    const auto events = session.takeEvents();
+    T_REQUIRE(events.empty());
+    session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_ignores_game_callback_that_arrives_after_logout") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    FakeRaClientApi api;
+    api.setGame(42, "Orbital Boy", "0123456789abcdef0123456789abcdef", "game.png");
+    auto session = makeSession(gameBoy, transport, api);
+    session.enqueueLoadGame(4, "/roms/orbital.gb");
+    session.processPending();
+
+    session.enqueueLogout();
+    session.processPending();
+    api.completeGame(RC_OK);
+
+    const auto snapshot = session.snapshot();
+    T_REQUIRE(snapshot.connectionState == gb::frontend::RaConnectionState::LoggedOut);
+    T_REQUIRE(!snapshot.gameLoaded);
+    T_REQUIRE(snapshot.currentGame.title.empty());
+    T_REQUIRE(session.takeEvents().empty());
+    session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_ignores_achievement_event_that_arrives_after_logout") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    FakeRaClientApi api;
+    api.setGame(42, "Orbital Boy", "0123456789abcdef0123456789abcdef", "game.png");
+    api.achievements.push_back(api.makeAchievement(7, "First Orbit", 5, true));
+    auto session = makeSession(gameBoy, transport, api);
+    session.enqueueLoadGame(4, "/roms/orbital.gb");
+    session.processPending();
+    api.completeGame(RC_OK);
+    T_EQ(session.takeEvents().size(), 1U);
+
+    session.enqueueLogout();
+    session.processPending();
+    api.emitAchievement(0);
+
+    const auto snapshot = session.snapshot();
+    T_REQUIRE(snapshot.connectionState == gb::frontend::RaConnectionState::LoggedOut);
+    T_REQUIRE(!snapshot.gameLoaded);
+    T_REQUIRE(snapshot.currentAchievements.empty());
+    T_REQUIRE(session.takeEvents().empty());
+    session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_do_frame_processes_game_load_before_one_runtime_frame") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    FakeRaClientApi api;
+    api.setGame(91, "Color Orbit", "0123456789abcdef0123456789abcdef", "game.png");
+    api.autoCompleteGame = true;
+    auto session = makeSession(gameBoy, transport, api);
+
+    session.enqueueLoadGame(0, "/roms/color-orbit.gbc");
+    gameBoy.setHardwareMode(true);
+    session.doFrame();
+
+    T_EQ(api.lastGameConsole, 6U);
+    T_EQ(api.doFrameCalls, 1);
+    T_REQUIRE(session.snapshot().gameLoaded);
+    session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_loads_game_in_casual_mode_and_serializes_matching_progress") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    FakeRaClientApi api;
+    api.setGame(42, "Orbital Boy", "0123456789abcdef0123456789abcdef", "game.png");
+    api.gameSummary.num_core_achievements = 2;
+    api.gameSummary.num_unlocked_achievements = 1;
+    api.achievements.push_back(api.makeAchievement(7, "First Orbit", 5, true));
+    api.achievements.push_back(api.makeAchievement(8, "Second Orbit", 10, false));
+    api.serializedProgress = {1, 2, 3, 4};
+    auto session = makeSession(gameBoy, transport, api);
+
+    session.enqueueLoadGame(4, "/roms/orbital.gb");
+    session.processPending();
+    api.completeGame(RC_OK);
+
+    const auto snapshot = session.snapshot();
+    T_REQUIRE(snapshot.gameLoaded);
+    T_EQ(snapshot.currentGame.gameId, 42U);
+    T_EQ(snapshot.currentGame.total, 2U);
+    T_EQ(snapshot.currentGame.unlockedCasual, 1U);
+    T_EQ(snapshot.currentAchievements.size(), 2U);
+    T_REQUIRE(snapshot.currentAchievements.front().unlocked);
+    T_EQ(snapshot.currentAchievements.front().measuredProgress, std::string("1/1"));
+    T_EQ(api.achievementCategory, RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE);
+    T_EQ(api.achievementGrouping, RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_PROGRESS);
+
+    T_REQUIRE(session.serializeProgress() == std::vector<std::uint8_t>({1, 2, 3, 4}));
+    api.serializeResult = RC_API_FAILURE;
+    T_REQUIRE(session.serializeProgress().empty());
+    api.serializeResult = RC_OK;
+    T_REQUIRE(!session.deserializeProgress(
+        "fedcba9876543210fedcba9876543210",
+        {9, 8}
+    ));
+    T_EQ(api.deserializeCalls, 0);
+    T_REQUIRE(session.deserializeProgress(
+        "0123456789abcdef0123456789abcdef",
+        {9, 8}
+    ));
+    T_REQUIRE(api.deserializedProgress == std::vector<std::uint8_t>({9, 8}));
+    api.deserializeResult = RC_API_FAILURE;
+    T_REQUIRE(!session.deserializeProgress(
+        "0123456789abcdef0123456789abcdef",
+        {7, 6}
+    ));
+
+    session.doFrame();
+    session.idle();
+    T_EQ(api.doFrameCalls, 1);
+    T_EQ(api.idleCalls, 1);
+    session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_merges_gb_gbc_profile_batches_titles_and_sorts_case_insensitively") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    FakeRaClientApi api;
+    api.autoCompleteProgress = true;
+    for (std::uint32_t id = 1; id <= 101; ++id) {
+        api.progressEntries[4].push_back({id, 10, id % 4, id % 3});
+    }
+    for (std::uint32_t id = 100; id <= 205; ++id) {
+        api.progressEntries[6].push_back({id, 20, id % 5, id % 2});
+    }
+    api.titles[1] = "beta";
+    api.titles[2] = "Alpha";
+    api.titles[3] = "alpha";
+    auto session = makeSession(gameBoy, transport, api);
+
+    session.enqueueLogin("Marcelo", "senha");
+    session.processPending();
+    api.completeLogin(RC_OK);
+
+    const auto snapshot = session.snapshot();
+    T_REQUIRE(snapshot.connectionState == gb::frontend::RaConnectionState::Online);
+    T_EQ(api.progressConsoles.size(), 2U);
+    T_EQ(api.progressConsoles.at(0), 4U);
+    T_EQ(api.progressConsoles.at(1), 6U);
+    T_EQ(snapshot.profile.library.size(), 205U);
+    T_EQ(api.titleBatches.size(), 3U);
+    T_EQ(api.titleBatches.at(0).size(), 100U);
+    T_EQ(api.titleBatches.at(1).size(), 100U);
+    T_EQ(api.titleBatches.at(2).size(), 5U);
+    for (const auto& batch : api.titleBatches) {
+        T_REQUIRE(batch.size() <= 100U);
+    }
+    T_EQ(snapshot.profile.library.at(0).gameId, 2U);
+    T_EQ(snapshot.profile.library.at(1).gameId, 3U);
+    T_EQ(snapshot.profile.library.at(2).gameId, 1U);
+    const auto duplicate = std::find_if(
+        snapshot.profile.library.begin(),
+        snapshot.profile.library.end(),
+        [](const auto& game) { return game.gameId == 100; }
+    );
+    T_REQUIRE(duplicate != snapshot.profile.library.end());
+    T_EQ(duplicate->total, 20U);
+    session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_keeps_successful_console_profile_when_other_console_fails") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    FakeRaClientApi api;
+    api.autoCompleteProgress = true;
+    api.progressEntries[4].push_back({7, 9, 4, 2});
+    api.progressResults[6] = RC_API_FAILURE;
+    api.titles[7] = "Orbital Boy";
+    auto session = makeSession(gameBoy, transport, api);
+
+    session.enqueueTokenLogin("Marcelo", "token");
+    session.processPending();
+    api.completeLogin(RC_OK);
+
+    const auto snapshot = session.snapshot();
+    T_REQUIRE(snapshot.connectionState == gb::frontend::RaConnectionState::Online);
+    T_EQ(snapshot.profile.library.size(), 1U);
+    T_EQ(snapshot.profile.library.front().gameId, 7U);
+    T_REQUIRE(!snapshot.errorText.empty());
+    session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_publishes_empty_library_for_empty_console_results") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    FakeRaClientApi api;
+    api.autoCompleteProgress = true;
+    auto session = makeSession(gameBoy, transport, api);
+
+    session.enqueueTokenLogin("Marcelo", "token");
+    session.processPending();
+    api.completeLogin(RC_OK);
+
+    const auto snapshot = session.snapshot();
+    T_REQUIRE(snapshot.connectionState == gb::frontend::RaConnectionState::Online);
+    T_REQUIRE(snapshot.profile.library.empty());
+    T_REQUIRE(snapshot.errorText.empty());
+    T_REQUIRE(api.titleBatches.empty());
+    session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_publishes_profile_progress_when_title_batch_fails") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    FakeRaClientApi api;
+    api.autoCompleteProgress = true;
+    api.progressEntries[4].push_back({17, 12, 5, 3});
+    api.titleResult = RC_API_FAILURE;
+    auto session = makeSession(gameBoy, transport, api);
+
+    session.enqueueTokenLogin("Marcelo", "token");
+    session.processPending();
+    api.completeLogin(RC_OK);
+
+    const auto snapshot = session.snapshot();
+    T_REQUIRE(snapshot.connectionState == gb::frontend::RaConnectionState::Online);
+    T_EQ(snapshot.profile.library.size(), 1U);
+    T_EQ(snapshot.profile.library.front().gameId, 17U);
+    T_EQ(snapshot.profile.library.front().total, 12U);
+    T_REQUIRE(snapshot.profile.library.front().title.empty());
+    T_REQUIRE(!snapshot.errorText.empty());
+    session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_bounds_achievement_events_and_publishes_newest_snapshot") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    FakeRaClientApi api;
+    api.setGame(42, "Orbital Boy", "0123456789abcdef0123456789abcdef", "game.png");
+    api.gameSummary.num_core_achievements = 34;
+    for (std::uint32_t id = 0; id < 34; ++id) {
+        api.achievements.push_back(
+            api.makeAchievement(id, ("Achievement " + std::to_string(id)).c_str(), id, true)
+        );
+    }
+    auto session = makeSession(gameBoy, transport, api);
+    session.enqueueLoadGame(6, "/roms/orbital.gbc");
+    session.processPending();
+    api.completeGame(RC_OK);
+    const auto gameLoadedEvents = session.takeEvents();
+    T_EQ(gameLoadedEvents.size(), 1U);
+
+    api.emitIgnoredEvent();
+    api.user.score = 4321;
+    api.user.score_softcore = 123;
+    for (std::size_t index = 0; index < api.achievements.size(); ++index) {
+        api.emitAchievement(index);
+    }
+
+    const auto events = session.takeEvents();
+    T_EQ(events.size(), 32U);
+    T_EQ(events.front().title, std::string("Achievement 2"));
+    T_EQ(events.back().title, std::string("Achievement 33"));
+    T_EQ(session.snapshot().currentAchievements.size(), 34U);
+    T_EQ(session.snapshot().profile.user.scoreHardcore, 4321U);
+    T_EQ(session.snapshot().profile.user.scoreCasual, 123U);
+    session.shutdown();
+    transport.shutdown();
 }
