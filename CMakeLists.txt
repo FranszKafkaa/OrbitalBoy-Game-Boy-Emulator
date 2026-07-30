@@ -180,8 +180,10 @@ if (GBEMU_ENABLE_RETROACHIEVEMENTS)
     add_subdirectory(third_party/rcheevos EXCLUDE_FROM_ALL)
     target_sources(gbfrontend_support PRIVATE
         src/app/frontend/realtime/retroachievements_http.cpp
+        src/app/frontend/realtime/retroachievements_image_cache.cpp
         src/app/frontend/realtime/retroachievements_session.cpp
     )
+    target_include_directories(gbfrontend_support PRIVATE third_party/rcheevos/src)
     target_link_libraries(gbfrontend_support PUBLIC rcheevos CURL::libcurl)
     if (WIN32)
         target_link_libraries(gbfrontend_support PRIVATE advapi32)
