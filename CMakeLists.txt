@@ -92,6 +92,7 @@ set(GBEMU_REALTIME_SUPPORT_SOURCES
     src/app/frontend/realtime/network_config.cpp
     src/app/frontend/realtime/retroachievements_config.cpp
     src/app/frontend/realtime/retroachievements_memory.cpp
+    src/app/frontend/realtime/retroachievements_progress.cpp
     src/app/frontend/realtime/top_menu.cpp
     src/app/frontend/realtime/ui_message_queue.cpp
 )

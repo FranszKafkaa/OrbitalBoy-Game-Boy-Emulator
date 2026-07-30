@@ -1,16 +1,30 @@
 #include "gb/app/frontend/realtime/frame_timeline.hpp"
 
 #include <cstdio>
+#include <utility>
 
 namespace gb::frontend {
 
-FrameTimeline::FrameTimeline(const gb::GameBoy& gb) {
+FrameTimeline::FrameTimeline(const gb::GameBoy& gb)
+    : FrameTimeline(gb, {}, {}) {
+}
+
+FrameTimeline::FrameTimeline(
+    const gb::GameBoy& gb,
+    ProgressCapture progressCapture,
+    ProgressRestore progressRestore
+)
+    : progressCapture_(std::move(progressCapture)),
+      progressRestore_(std::move(progressRestore)) {
     reset(gb);
 }
 
 void FrameTimeline::reset(const gb::GameBoy& gb) {
     history_.clear();
-    history_.push_back(gb.saveState());
+    history_.push_back({
+        gb.saveState(),
+        progressCapture_ ? progressCapture_() : std::vector<std::uint8_t>{}
+    });
     cursor_ = 0;
 }
 
@@ -19,7 +33,11 @@ bool FrameTimeline::stepBack(gb::GameBoy& gb) {
         return false;
     }
     --cursor_;
-    gb.loadState(history_[cursor_]);
+    const auto& entry = history_[cursor_];
+    gb.loadState(entry.gameBoy);
+    if (progressRestore_) {
+        progressRestore_(entry.achievementProgress);
+    }
     return true;
 }
 
@@ -28,13 +46,20 @@ bool FrameTimeline::stepForward(gb::GameBoy& gb) {
         return false;
     }
     ++cursor_;
-    gb.loadState(history_[cursor_]);
+    const auto& entry = history_[cursor_];
+    gb.loadState(entry.gameBoy);
+    if (progressRestore_) {
+        progressRestore_(entry.achievementProgress);
+    }
     return true;
 }
 
 void FrameTimeline::captureCurrent(const gb::GameBoy& gb) {
     truncateFuture();
-    history_.push_back(gb.saveState());
+    history_.push_back({
+        gb.saveState(),
+        progressCapture_ ? progressCapture_() : std::vector<std::uint8_t>{}
+    });
     if (history_.size() > MaxHistory) {
         history_.pop_front();
         if (cursor_ > 0) {

@@ -907,6 +907,35 @@ TEST_CASE("frontend", "frame_timeline_keeps_fixed_size_and_navigation") {
     T_EQ(timeline.position(), timeline.size());
 }
 
+TEST_CASE("frontend", "frame_timeline_restores_matching_achievement_progress") {
+    gb::GameBoy gb;
+    tests::ScopedPath cleanup;
+    loadBlankRom(gb, cleanup);
+    gb.bus().write(0xC000, 1);
+
+    std::vector<std::uint8_t> current{1};
+    std::vector<std::uint8_t> memorySeenByRestore;
+    gb::frontend::FrameTimeline timeline(
+        gb,
+        [&] { return current; },
+        [&](const auto& restored) {
+            current = restored;
+            memorySeenByRestore.push_back(gb.bus().peek(0xC000));
+        }
+    );
+
+    gb.bus().write(0xC000, 2);
+    current = {2};
+    timeline.captureCurrent(gb);
+
+    T_REQUIRE(timeline.stepBack(gb));
+    T_EQ(current.front(), 1U);
+    T_EQ(memorySeenByRestore.back(), 1U);
+    T_REQUIRE(timeline.stepForward(gb));
+    T_EQ(current.front(), 2U);
+    T_EQ(memorySeenByRestore.back(), 2U);
+}
+
 TEST_CASE("frontend", "top_menu_section_and_action_hit_test") {
     const int outputW = 960;
     const int yInBar = gb::frontend::topMenuBarHeight() / 2;
