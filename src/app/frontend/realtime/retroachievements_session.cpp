@@ -222,6 +222,10 @@ void RaClientApi::idle(rc_client_t* client) {
     rc_client_idle(client);
 }
 
+void RaClientApi::reset(rc_client_t* client) {
+    rc_client_reset(client);
+}
+
 std::size_t RaClientApi::progressSize(rc_client_t* client) const {
     return rc_client_progress_size(client);
 }
@@ -586,6 +590,7 @@ public:
         state.connectionState = RaConnectionState::LoggedOut;
         state.statusText = "Desconectado do RetroAchievements.";
         currentRomHash.clear();
+        state.romHash.clear();
         mergedLibrary.clear();
         pendingProfileRequests = 0;
         pendingTitleRequests = 0;
@@ -639,6 +644,7 @@ public:
             state.currentGame = {};
             state.currentAchievements.clear();
             currentRomHash.clear();
+            state.romHash.clear();
             state.errorText =
                 "O jogo continua disponível, mas não foi identificado no RetroAchievements.";
             publishSnapshot();
@@ -647,6 +653,7 @@ public:
 
         const rc_client_game_t* game = api->getGameInfo(client);
         currentRomHash = game ? copyText(game->hash) : "";
+        state.romHash = currentRomHash;
         refreshCurrentGame();
         publishSnapshot();
         addEvent({
@@ -1168,6 +1175,17 @@ public:
         ) == RC_OK;
     }
 
+    [[nodiscard]] bool resetProgress() {
+        if (!onOwnerThread() || shutdownRequested || !client
+            || !state.gameLoaded) {
+            return false;
+        }
+        api->reset(client);
+        refreshCurrentGame();
+        publishSnapshot();
+        return true;
+    }
+
     void doFrame() {
         if (!onOwnerThread() || shutdownRequested || !client) {
             return;
@@ -1351,6 +1369,10 @@ bool RetroAchievementsSession::deserializeProgress(
     const std::vector<std::uint8_t>& payload
 ) {
     return impl_->deserializeProgress(romHash, payload);
+}
+
+bool RetroAchievementsSession::resetProgress() {
+    return impl_->resetProgress();
 }
 
 bool RetroAchievementsSession::shutdown() {

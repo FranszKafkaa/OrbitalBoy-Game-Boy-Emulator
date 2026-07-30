@@ -181,6 +181,7 @@ if (GBEMU_ENABLE_RETROACHIEVEMENTS)
     target_sources(gbfrontend_support PRIVATE
         src/app/frontend/realtime/retroachievements_http.cpp
         src/app/frontend/realtime/retroachievements_image_cache.cpp
+        src/app/frontend/realtime/retroachievements_lifecycle.cpp
         src/app/frontend/realtime/retroachievements_session.cpp
         src/app/frontend/realtime/retroachievements_ui.cpp
     )

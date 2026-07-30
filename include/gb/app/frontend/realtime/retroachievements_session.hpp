@@ -119,6 +119,7 @@ public:
 
     virtual void doFrame(rc_client_t* client);
     virtual void idle(rc_client_t* client);
+    virtual void reset(rc_client_t* client);
     [[nodiscard]] virtual std::size_t progressSize(rc_client_t* client) const;
     [[nodiscard]] virtual int serializeProgressSized(
         rc_client_t* client,
@@ -167,6 +168,7 @@ public:
         std::string_view romHash,
         const std::vector<std::uint8_t>& payload
     );
+    [[nodiscard]] bool resetProgress();
     // Returns false without mutation off the creating thread. Owner-thread
     // shutdown is idempotent and returns true.
     bool shutdown();

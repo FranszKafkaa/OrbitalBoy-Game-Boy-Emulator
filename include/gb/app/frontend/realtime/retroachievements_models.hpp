@@ -76,6 +76,7 @@ struct RaSessionSnapshot {
     RaProfileSummary profile;
     RaGameSummary currentGame;
     std::vector<RaAchievementSummary> currentAchievements;
+    std::string romHash;
     bool gameLoaded = false;
 };
 

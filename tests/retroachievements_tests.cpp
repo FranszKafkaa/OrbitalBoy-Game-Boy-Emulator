@@ -27,6 +27,7 @@
 #include "gb/app/frontend/realtime/retroachievements_config.hpp"
 #include "gb/app/frontend/realtime/retroachievements_http.hpp"
 #include "gb/app/frontend/realtime/retroachievements_image_cache.hpp"
+#include "gb/app/frontend/realtime/retroachievements_lifecycle.hpp"
 #include "gb/app/frontend/realtime/retroachievements_memory.hpp"
 #include "gb/app/frontend/realtime/retroachievements_models.hpp"
 #include "gb/app/frontend/realtime/retroachievements_progress.hpp"
@@ -1680,6 +1681,11 @@ public:
         ++idleCalls;
     }
 
+    void reset(rc_client_t*) override {
+        recordCall();
+        ++resetCalls;
+    }
+
     std::size_t progressSize(rc_client_t*) const override {
         return serializedProgress.size();
     }
@@ -1907,6 +1913,7 @@ public:
     int logoutCalls = 0;
     int doFrameCalls = 0;
     int idleCalls = 0;
+    int resetCalls = 0;
     int userImageCalls = 0;
     int deserializeCalls = 0;
     int achievementCategory = 0;
@@ -2425,6 +2432,10 @@ TEST_CASE("retroachievements", "session_logout_clears_token_profile_and_current_
     session.processPending();
     api.completeGame(RC_OK);
     T_REQUIRE(session.snapshot().gameLoaded);
+    T_EQ(
+        session.snapshot().romHash,
+        std::string("0123456789abcdef0123456789abcdef")
+    );
 
     session.enqueueLogout();
     session.processPending();
@@ -2436,6 +2447,7 @@ TEST_CASE("retroachievements", "session_logout_clears_token_profile_and_current_
     T_REQUIRE(snapshot.currentGame.title.empty());
     T_REQUIRE(snapshot.currentAchievements.empty());
     T_REQUIRE(!snapshot.gameLoaded);
+    T_REQUIRE(snapshot.romHash.empty());
     T_REQUIRE(!persisted.empty());
     T_REQUIRE(persisted.back().token.empty());
     T_EQ(api.logoutCalls, 1);
@@ -2592,6 +2604,13 @@ TEST_CASE("retroachievements", "session_loads_game_in_casual_mode_and_serializes
         "0123456789abcdef0123456789abcdef",
         {7, 6}
     ));
+    auto offOwnerReset = std::async(std::launch::async, [&]() {
+        return session.resetProgress();
+    });
+    T_REQUIRE(!offOwnerReset.get());
+    T_EQ(api.resetCalls, 0);
+    T_REQUIRE(session.resetProgress());
+    T_EQ(api.resetCalls, 1);
 
     session.doFrame();
     session.idle();
@@ -3339,4 +3358,92 @@ TEST_CASE("retroachievements", "ra_window_size_floor_survives_panel_and_fullscre
     const auto largerWindow = gb::frontend::raWindowedSize(960, 720);
     T_EQ(largerWindow.w, 960);
     T_EQ(largerWindow.h, 720);
+}
+
+TEST_CASE("retroachievements", "realtime_lifecycle_preserves_owner_operation_order") {
+    std::vector<std::string> trace;
+    gb::frontend::RaLifecycleActions actions{};
+    actions.loadConfig = [&]() { trace.push_back("load config"); };
+    actions.tokenLogin = [&]() { trace.push_back("token login"); };
+    actions.loadGame = [&]() { trace.push_back("load game after login"); };
+    actions.processPending = [&]() { trace.push_back("process pending before frame"); };
+    actions.doFrame = [&]() { trace.push_back("do frame once"); };
+    actions.captureTimeline = [&]() { trace.push_back("capture timeline"); };
+    actions.serializeProgress = [&]() { trace.push_back("serialize before save sidecar"); };
+    actions.saveProgressSidecar = [&]() { trace.push_back("save sidecar"); };
+    actions.loadGameState = [&]() { trace.push_back("load game state"); };
+    actions.deserializeProgress = [&]() { trace.push_back("deserialize after game state load"); };
+    actions.shutdownSession = [&]() { trace.push_back("shutdown session"); };
+    actions.shutdownImageCache = [&]() { trace.push_back("shutdown image cache"); };
+    actions.joinHttpWorker = [&]() { trace.push_back("join HTTP worker"); };
+
+    gb::frontend::RaRealtimeLifecycleCoordinator lifecycle;
+    lifecycle.start(actions, true);
+    gb::frontend::RaSessionSnapshot online{};
+    online.connectionState = gb::frontend::RaConnectionState::Online;
+    lifecycle.observeSnapshot(online, actions);
+    lifecycle.committedFrames(1, actions);
+    lifecycle.saveState(actions);
+    lifecycle.loadState(actions);
+    lifecycle.shutdownOwner(actions);
+    lifecycle.shutdownUi(actions);
+
+    const std::vector<std::string> expected{
+        "load config",
+        "token login",
+        "load game after login",
+        "process pending before frame",
+        "do frame once",
+        "capture timeline",
+        "serialize before save sidecar",
+        "save sidecar",
+        "load game state",
+        "deserialize after game state load",
+        "shutdown session",
+        "shutdown image cache",
+        "join HTTP worker",
+    };
+    T_EQ(trace.size(), expected.size());
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        T_EQ(trace[index], expected[index]);
+    }
+}
+
+TEST_CASE("retroachievements", "realtime_lifecycle_counts_committed_frames_and_ignores_rollback") {
+    int pendingCalls = 0;
+    int frameCalls = 0;
+    int captures = 0;
+    int rollbackFrames = 0;
+    gb::frontend::RaLifecycleActions actions{};
+    actions.processPending = [&]() { ++pendingCalls; };
+    actions.doFrame = [&]() { ++frameCalls; };
+    actions.captureTimeline = [&]() { ++captures; };
+    actions.emulateRollbackFrame = [&]() { ++rollbackFrames; };
+
+    gb::frontend::RaRealtimeLifecycleCoordinator lifecycle;
+    lifecycle.committedFrames(7, actions);
+    lifecycle.rollbackFrames(3, actions);
+
+    T_EQ(pendingCalls, 7);
+    T_EQ(frameCalls, 7);
+    T_EQ(captures, 7);
+    T_EQ(rollbackFrames, 3);
+}
+
+TEST_CASE("retroachievements", "realtime_lifecycle_throttles_paused_idle_to_100ms") {
+    int pendingCalls = 0;
+    int idleCalls = 0;
+    gb::frontend::RaLifecycleActions actions{};
+    actions.processPending = [&]() { ++pendingCalls; };
+    actions.idle = [&]() { ++idleCalls; };
+
+    gb::frontend::RaRealtimeLifecycleCoordinator lifecycle;
+    lifecycle.pausedPoll(std::chrono::milliseconds(0), actions);
+    lifecycle.pausedPoll(std::chrono::milliseconds(99), actions);
+    lifecycle.pausedPoll(std::chrono::milliseconds(100), actions);
+    lifecycle.pausedPoll(std::chrono::milliseconds(199), actions);
+    lifecycle.pausedPoll(std::chrono::milliseconds(200), actions);
+
+    T_EQ(pendingCalls, 5);
+    T_EQ(idleCalls, 3);
 }
