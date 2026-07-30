@@ -18,7 +18,12 @@ enum class TopMenuSection : int {
     Debug = 2,
     Controls = 3,
     Network = 4,
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    Achievements = 5,
+    Count = 6,
+#else
     Count = 5,
+#endif
 };
 
 enum class TopMenuAction : int {
@@ -44,6 +49,12 @@ enum class TopMenuAction : int {
     CycleLinkMode,
     NetplayDelayDown,
     NetplayDelayUp,
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    RaLogin,
+    RaLogout,
+    RaOpenProfile,
+    RaOpenAchievements,
+#endif
 };
 
 struct TopMenuItem {
@@ -58,6 +69,9 @@ bool topMenuRectContains(const TopMenuRect& rect, int px, int py);
 
 const char* topMenuSectionLabel(TopMenuSection section);
 const std::vector<TopMenuItem>& topMenuItems(TopMenuSection section);
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+const std::vector<TopMenuItem>& topMenuItems(TopMenuSection section, bool raLoggedIn);
+#endif
 
 TopMenuRect topMenuSectionRect(int outputW, TopMenuSection section);
 TopMenuRect topMenuDropdownRect(int outputW, TopMenuSection section);

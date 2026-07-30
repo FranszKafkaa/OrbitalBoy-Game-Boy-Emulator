@@ -31,6 +31,8 @@
 #include "gb/app/frontend/realtime/retroachievements_models.hpp"
 #include "gb/app/frontend/realtime/retroachievements_progress.hpp"
 #include "gb/app/frontend/realtime/retroachievements_session.hpp"
+#include "gb/app/frontend/realtime/retroachievements_ui.hpp"
+#include "gb/app/frontend/realtime/top_menu.hpp"
 #include "gb/core/gameboy.hpp"
 #include "gb/app/runtime_paths.hpp"
 
@@ -2847,4 +2849,272 @@ TEST_CASE("retroachievements", "session_bounds_achievement_events_and_publishes_
     T_EQ(session.snapshot().profile.user.scoreCasual, 123U);
     session.shutdown();
     transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "menu_exposes_login_or_profile_actions_from_session_state") {
+    using gb::frontend::TopMenuAction;
+    using gb::frontend::TopMenuSection;
+
+    T_EQ(
+        std::string(gb::frontend::topMenuSectionLabel(TopMenuSection::Achievements)),
+        std::string("CONQUISTAS")
+    );
+
+    const auto& loggedOut = gb::frontend::topMenuItems(TopMenuSection::Achievements, false);
+    T_EQ(loggedOut.size(), 1U);
+    T_REQUIRE(loggedOut.front().action == TopMenuAction::RaLogin);
+    T_EQ(std::string(loggedOut.front().label), std::string("ENTRAR"));
+
+    const auto& loggedIn = gb::frontend::topMenuItems(TopMenuSection::Achievements, true);
+    T_EQ(loggedIn.size(), 3U);
+    T_REQUIRE(loggedIn[0].action == TopMenuAction::RaOpenProfile);
+    T_EQ(std::string(loggedIn[0].label), std::string("MEU PERFIL"));
+    T_REQUIRE(loggedIn[1].action == TopMenuAction::RaOpenAchievements);
+    T_EQ(std::string(loggedIn[1].label), std::string("JOGO ATUAL"));
+    T_REQUIRE(loggedIn[2].action == TopMenuAction::RaLogout);
+    T_EQ(std::string(loggedIn[2].label), std::string("SAIR DA CONTA"));
+}
+
+TEST_CASE("retroachievements", "login_modal_edits_utf8_password_without_exposing_it") {
+    using gb::frontend::RaLoginField;
+    using gb::frontend::RaLoginModalAction;
+    using gb::frontend::RaUiKey;
+
+    gb::frontend::RaLoginModalState state{};
+    gb::frontend::openRaLoginModal(state);
+    T_REQUIRE(state.open);
+
+    state.focusedField = RaLoginField::Username;
+    gb::frontend::appendRaLoginText(state, "Marcelo");
+    state.focusedField = RaLoginField::Password;
+    gb::frontend::appendRaLoginText(state, u8"abcç");
+    T_EQ(gb::frontend::maskedRaPassword(state), std::string("****"));
+
+    gb::frontend::backspaceRaLoginText(state);
+    T_EQ(state.password, std::string("abc"));
+    T_REQUIRE(gb::frontend::canSubmitRaLogin(state));
+    T_REQUIRE(
+        gb::frontend::handleRaLoginKey(state, RaUiKey::Enter)
+        == RaLoginModalAction::Submit
+    );
+    T_REQUIRE(state.requesting);
+
+    gb::frontend::openRaLoginModal(state);
+    T_REQUIRE(
+        gb::frontend::handleRaLoginKey(state, RaUiKey::Escape)
+        == RaLoginModalAction::Close
+    );
+    T_REQUIRE(!state.open);
+    T_REQUIRE(state.password.empty());
+}
+
+TEST_CASE("retroachievements", "login_modal_rejects_submit_until_both_fields_are_present") {
+    gb::frontend::RaLoginModalState state{};
+    gb::frontend::openRaLoginModal(state);
+    state.username = "Marcelo";
+
+    T_REQUIRE(!gb::frontend::canSubmitRaLogin(state));
+    T_REQUIRE(
+        gb::frontend::handleRaLoginKey(state, gb::frontend::RaUiKey::Enter)
+        == gb::frontend::RaLoginModalAction::None
+    );
+    T_REQUIRE(!state.requesting);
+}
+
+TEST_CASE("retroachievements", "login_modal_never_truncates_a_utf8_code_point_at_field_limits") {
+    gb::frontend::RaLoginModalState state{};
+    gb::frontend::openRaLoginModal(state);
+    state.focusedField = gb::frontend::RaLoginField::Password;
+
+    state.password.assign(1023, 'a');
+    gb::frontend::appendRaLoginText(state, u8"ç");
+    T_EQ(state.password.size(), 1023U);
+    T_EQ(gb::frontend::maskedRaPassword(state).size(), 1023U);
+
+    state.password.assign(1022, 'a');
+    gb::frontend::appendRaLoginText(state, u8"ç");
+    T_EQ(state.password.size(), 1024U);
+    gb::frontend::backspaceRaLoginText(state);
+    T_EQ(state.password.size(), 1022U);
+
+    state.password.assign(1022, 'a');
+    gb::frontend::appendRaLoginText(state, u8"€");
+    T_EQ(state.password.size(), 1022U);
+
+    state.password.assign(1021, 'a');
+    gb::frontend::appendRaLoginText(state, u8"€");
+    T_EQ(state.password.size(), 1024U);
+    T_EQ(gb::frontend::maskedRaPassword(state).size(), 1022U);
+    gb::frontend::backspaceRaLoginText(state);
+    T_EQ(state.password.size(), 1021U);
+
+    state.password.assign(1021, 'a');
+    gb::frontend::appendRaLoginText(state, u8"😀");
+    T_EQ(state.password.size(), 1021U);
+
+    state.password.assign(1020, 'a');
+    gb::frontend::appendRaLoginText(state, u8"😀");
+    T_EQ(state.password.size(), 1024U);
+    T_EQ(gb::frontend::maskedRaPassword(state).size(), 1021U);
+    gb::frontend::backspaceRaLoginText(state);
+    T_EQ(state.password.size(), 1020U);
+}
+
+TEST_CASE("retroachievements", "online_snapshot_closes_login_and_signals_text_input_shutdown") {
+    gb::frontend::RaLoginModalState state{};
+    gb::frontend::openRaLoginModal(state);
+    state.password = "segredo";
+    state.requesting = true;
+    gb::frontend::RaSessionSnapshot snapshot{};
+    snapshot.connectionState = gb::frontend::RaConnectionState::Online;
+
+    T_REQUIRE(
+        gb::frontend::applyRaLoginSnapshot(state, snapshot)
+        == gb::frontend::RaLoginModalAction::Close
+    );
+    T_REQUIRE(!state.open);
+    T_REQUIRE(state.password.empty());
+}
+
+TEST_CASE("retroachievements", "profile_tabs_cycle_and_scroll_clamps_to_content") {
+    using gb::frontend::RaProfileTab;
+    using gb::frontend::RaUiKey;
+
+    gb::frontend::RaProfilePanelState state{};
+    gb::frontend::openRaProfilePanel(state, RaProfileTab::Summary);
+    T_REQUIRE(state.open);
+    T_REQUIRE(state.tab == RaProfileTab::Summary);
+
+    gb::frontend::cycleRaProfileTab(state, 1);
+    T_REQUIRE(state.tab == RaProfileTab::CurrentGame);
+    gb::frontend::cycleRaProfileTab(state, 1);
+    T_REQUIRE(state.tab == RaProfileTab::Library);
+    gb::frontend::cycleRaProfileTab(state, 1);
+    T_REQUIRE(state.tab == RaProfileTab::Summary);
+
+    gb::frontend::openRaProfilePanel(state, RaProfileTab::CurrentGame);
+    gb::frontend::handleRaProfileNavigation(state, RaUiKey::End, 900, 300);
+    T_EQ(state.scroll, 600);
+    gb::frontend::handleRaProfileNavigation(state, RaUiKey::Down, 900, 300);
+    T_EQ(state.scroll, 600);
+    gb::frontend::handleRaProfileNavigation(state, RaUiKey::Home, 900, 300);
+    T_EQ(state.scroll, 0);
+    gb::frontend::handleRaProfileNavigation(state, RaUiKey::PageDown, 900, 300);
+    T_EQ(state.scroll, 240);
+    gb::frontend::handleRaProfileNavigation(state, RaUiKey::PageUp, 900, 300);
+    T_EQ(state.scroll, 0);
+
+    state.scroll = 600;
+    gb::frontend::clampRaProfileScroll(state, 340, 300);
+    T_EQ(state.scroll, 40);
+
+    state.tab = RaProfileTab::Summary;
+    state.scroll = 100;
+    gb::frontend::clampRaProfileScroll(state, 900, 300);
+    T_EQ(state.scroll, 0);
+}
+
+TEST_CASE("retroachievements", "toast_keeps_newest_five_and_fades_during_last_600ms") {
+    gb::frontend::RaToastState state{};
+    for (std::uint32_t index = 1; index <= 6; ++index) {
+        gb::frontend::RaUiEvent event{};
+        event.type = gb::frontend::RaUiEventType::AchievementUnlocked;
+        event.title = "Conquista " + std::to_string(index);
+        event.points = index;
+        gb::frontend::enqueueRaToast(state, event, 1000);
+    }
+
+    T_EQ(gb::frontend::raToastQueueSize(state), 5U);
+    const auto* current = gb::frontend::currentRaToast(state);
+    T_REQUIRE(current != nullptr);
+    T_EQ(current->title, std::string("Conquista 2"));
+    T_EQ(gb::frontend::raToastOpacity(state, 4399), static_cast<std::uint8_t>(255));
+    const auto midFade = gb::frontend::raToastOpacity(state, 4700);
+    T_REQUIRE(midFade >= 126U && midFade <= 128U);
+
+    gb::frontend::advanceRaToast(state, 5000);
+    current = gb::frontend::currentRaToast(state);
+    T_REQUIRE(current != nullptr);
+    T_EQ(current->title, std::string("Conquista 3"));
+    T_EQ(gb::frontend::raToastOpacity(state, 5000), static_cast<std::uint8_t>(255));
+}
+
+TEST_CASE("retroachievements", "ui_layout_hit_tests_fields_tabs_and_close_buttons") {
+    const auto login = gb::frontend::raLoginModalLayout(960, 720);
+    T_REQUIRE(gb::frontend::raUiRectContains(
+        login.passwordField,
+        login.passwordField.x + 2,
+        login.passwordField.y + 2
+    ));
+    T_REQUIRE(!gb::frontend::raUiRectContains(login.passwordField, login.panel.x - 1, login.panel.y));
+
+    const auto profile = gb::frontend::raProfilePanelLayout(960, 720);
+    const auto tab = gb::frontend::hitTestRaProfileTab(
+        profile,
+        profile.tabs[2].x + 2,
+        profile.tabs[2].y + 2
+    );
+    T_REQUIRE(tab.has_value());
+    T_REQUIRE(tab.value() == gb::frontend::RaProfileTab::Library);
+    T_REQUIRE(gb::frontend::raUiRectContains(
+        profile.closeButton,
+        profile.closeButton.x + 1,
+        profile.closeButton.y + 1
+    ));
+}
+
+TEST_CASE("retroachievements", "ui_layouts_stay_inside_scale_one_output") {
+    const auto inside = [](const gb::frontend::RaUiRect& outer, const gb::frontend::RaUiRect& inner) {
+        return inner.x >= outer.x
+            && inner.y >= outer.y
+            && inner.x + inner.w <= outer.x + outer.w
+            && inner.y + inner.h <= outer.y + outer.h;
+    };
+
+    const std::array<std::array<int, 2>, 2> outputSizes{{
+        {{160, 144}},
+        {{320, 288}},
+    }};
+    for (const auto& size : outputSizes) {
+        const int width = size[0];
+        const int height = size[1];
+        const auto login = gb::frontend::raLoginModalLayout(width, height);
+        T_REQUIRE(inside(login.overlay, login.panel));
+        T_REQUIRE(inside(login.overlay, login.closeButton));
+        T_REQUIRE(inside(login.overlay, login.usernameField));
+        T_REQUIRE(inside(login.overlay, login.passwordField));
+        T_REQUIRE(inside(login.overlay, login.submitButton));
+        T_REQUIRE(inside(login.overlay, login.cancelButton));
+
+        const auto profile = gb::frontend::raProfilePanelLayout(width, height);
+        T_REQUIRE(inside(profile.overlay, profile.panel));
+        T_REQUIRE(inside(profile.overlay, profile.closeButton));
+        T_REQUIRE(inside(profile.overlay, profile.content));
+        for (const auto& tab : profile.tabs) {
+            T_REQUIRE(inside(profile.overlay, tab));
+        }
+
+        const auto toast = gb::frontend::raToastLayout(width, height);
+        const gb::frontend::RaUiRect output{0, 0, width, height};
+        T_REQUIRE(inside(output, toast.card));
+        T_REQUIRE(inside(output, toast.badge));
+    }
+}
+
+TEST_CASE("retroachievements", "ra_window_size_floor_survives_panel_and_fullscreen_transitions") {
+    const auto startup = gb::frontend::raWindowedSize(160, 144);
+    T_EQ(startup.w, 640);
+    T_EQ(startup.h, 480);
+
+    const auto debugPanel = gb::frontend::raWindowedSize(420, 144);
+    T_EQ(debugPanel.w, 640);
+    T_EQ(debugPanel.h, 480);
+
+    const auto fullscreenExit = gb::frontend::raWindowedSize(320, 288);
+    T_EQ(fullscreenExit.w, 640);
+    T_EQ(fullscreenExit.h, 480);
+
+    const auto largerWindow = gb::frontend::raWindowedSize(960, 720);
+    T_EQ(largerWindow.w, 960);
+    T_EQ(largerWindow.h, 720);
 }

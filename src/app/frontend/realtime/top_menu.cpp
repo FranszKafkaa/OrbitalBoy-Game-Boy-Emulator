@@ -24,6 +24,9 @@ constexpr std::array<const char*, static_cast<std::size_t>(TopMenuSection::Count
     "DEBUG",
     "CONTROLES",
     "REDE",
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    "CONQUISTAS",
+#endif
 };
 
 const std::vector<TopMenuItem> kSessionItems{
@@ -61,6 +64,18 @@ const std::vector<TopMenuItem> kNetworkItems{
     {TopMenuAction::NetplayDelayDown, "DELAY NETPLAY -"},
     {TopMenuAction::NetplayDelayUp, "DELAY NETPLAY +"},
 };
+
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+const std::vector<TopMenuItem> kAchievementsLoggedOutItems{
+    {TopMenuAction::RaLogin, "ENTRAR"},
+};
+
+const std::vector<TopMenuItem> kAchievementsLoggedInItems{
+    {TopMenuAction::RaOpenProfile, "MEU PERFIL"},
+    {TopMenuAction::RaOpenAchievements, "JOGO ATUAL"},
+    {TopMenuAction::RaLogout, "SAIR DA CONTA"},
+};
+#endif
 
 std::size_t sectionIndex(TopMenuSection section) {
     return static_cast<std::size_t>(section);
@@ -110,9 +125,22 @@ const std::vector<TopMenuItem>& topMenuItems(TopMenuSection section) {
     case TopMenuSection::Image: return kImageItems;
     case TopMenuSection::Debug: return kDebugItems;
     case TopMenuSection::Controls: return kControlsItems;
+    case TopMenuSection::Network: return kNetworkItems;
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    case TopMenuSection::Achievements: return kAchievementsLoggedOutItems;
+#endif
     default: return kNetworkItems;
     }
 }
+
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+const std::vector<TopMenuItem>& topMenuItems(TopMenuSection section, bool raLoggedIn) {
+    if (section == TopMenuSection::Achievements) {
+        return raLoggedIn ? kAchievementsLoggedInItems : kAchievementsLoggedOutItems;
+    }
+    return topMenuItems(section);
+}
+#endif
 
 TopMenuRect topMenuSectionRect(int outputW, TopMenuSection section) {
     (void)outputW;

@@ -1004,3 +1004,15 @@ TEST_CASE("frontend", "top_menu_section_and_action_hit_test") {
     T_REQUIRE(netAction.has_value());
     T_EQ(static_cast<int>(netAction.value()), static_cast<int>(gb::frontend::TopMenuAction::CycleLinkMode));
 }
+
+TEST_CASE("frontend", "top_menu_feature_matrix_keeps_retroachievements_conditional") {
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    T_EQ(static_cast<int>(gb::frontend::TopMenuSection::Count), 6);
+    T_EQ(
+        std::string(gb::frontend::topMenuSectionLabel(gb::frontend::TopMenuSection::Achievements)),
+        std::string("CONQUISTAS")
+    );
+#else
+    T_EQ(static_cast<int>(gb::frontend::TopMenuSection::Count), 5);
+#endif
+}

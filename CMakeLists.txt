@@ -182,6 +182,7 @@ if (GBEMU_ENABLE_RETROACHIEVEMENTS)
         src/app/frontend/realtime/retroachievements_http.cpp
         src/app/frontend/realtime/retroachievements_image_cache.cpp
         src/app/frontend/realtime/retroachievements_session.cpp
+        src/app/frontend/realtime/retroachievements_ui.cpp
     )
     target_include_directories(gbfrontend_support PRIVATE third_party/rcheevos/src)
     target_link_libraries(gbfrontend_support PUBLIC rcheevos CURL::libcurl)
@@ -218,10 +219,12 @@ if (GBEMU_USE_SDL2)
         add_custom_command(TARGET gbemu POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL2::SDL2> $<TARGET_FILE_DIR:gbemu>
         )
-        find_package(SDL2_image CONFIG QUIET)
-        if (SDL2_image_FOUND)
-            target_link_libraries(gbemu PRIVATE SDL2_image::SDL2_image)
-            target_compile_definitions(gbemu PRIVATE GBEMU_USE_SDL2_IMAGE=1)
+        if (GBEMU_ENABLE_RETROACHIEVEMENTS)
+            find_package(SDL2_image CONFIG QUIET)
+        endif()
+        if (GBEMU_ENABLE_RETROACHIEVEMENTS AND SDL2_image_FOUND)
+            target_link_libraries(gbfrontend_support PUBLIC SDL2_image::SDL2_image)
+            target_compile_definitions(gbfrontend_support PUBLIC GBEMU_USE_SDL2_IMAGE=1)
             add_custom_command(TARGET gbemu POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL2_image::SDL2_image> $<TARGET_FILE_DIR:gbemu>
             )

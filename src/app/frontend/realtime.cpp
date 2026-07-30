@@ -29,6 +29,9 @@
 #include "gb/app/frontend/realtime/network_config.hpp"
 #include "gb/app/frontend/realtime/netplay_session.hpp"
 #include "gb/app/frontend/realtime/realtime_session.hpp"
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+#include "gb/app/frontend/realtime/retroachievements_ui.hpp"
+#endif
 #include "gb/app/frontend/realtime/runlab_control_queue.hpp"
 #include "gb/app/frontend/realtime/runlab_session.hpp"
 #include "gb/app/frontend/realtime/sdl_session_view.hpp"
@@ -82,6 +85,15 @@ int RealtimeSession::run() {
     const int panelWidth = 260;
     const int gameWidth = width * scale;
     const int gameHeight = height * scale;
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    const RaUiSize raMinimumWindowSize = raWindowedSize(0, 0);
+    const RaUiSize initialWindowSize = raWindowedSize(gameWidth, gameHeight);
+    const int initialWindowWidth = initialWindowSize.w;
+    const int initialWindowHeight = initialWindowSize.h;
+#else
+    const int initialWindowWidth = gameWidth;
+    const int initialWindowHeight = gameHeight;
+#endif
     bool showPanel = false;
     bool fullscreen = false;
 
@@ -89,8 +101,8 @@ int RealtimeSession::run() {
         "Orion Boy",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
-        gameWidth,
-        gameHeight,
+        initialWindowWidth,
+        initialWindowHeight,
         SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
     );
     if (!window) {
@@ -98,7 +110,15 @@ int RealtimeSession::run() {
         return 1;
     }
     sessionView.ownWindow(window);
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    SDL_SetWindowMinimumSize(
+        window,
+        raMinimumWindowSize.w,
+        raMinimumWindowSize.h
+    );
+#else
     SDL_SetWindowMinimumSize(window, width, height);
+#endif
 
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!renderer) {
@@ -265,6 +285,14 @@ int RealtimeSession::run() {
     std::optional<TopMenuSection> openTopMenuSection;
     std::optional<TopMenuSection> hoveredTopMenuSection;
     int hoveredTopMenuItem = -1;
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    RaSessionSnapshot raUiSnapshot{};
+    raUiSnapshot.connectionState = RaConnectionState::LoggedOut;
+    RaLoginModalState raLoginModal{};
+    RaProfilePanelState raProfilePanel{};
+    RaToastState raToast{};
+    RaImageTextureCache raImageTextureCache{};
+#endif
     MemoryWatch& memoryWatch = debugSession.memoryWatch();
     MemoryEditState memoryEdit{};
     MemoryWriteUiState memoryWriteUi{};
@@ -481,7 +509,14 @@ int RealtimeSession::run() {
     };
 
     const auto stopTextInputIfUnused = [&]() {
-        if (!memoryEdit.active && !breakpointEdit.active && !memorySearch.ui.editingValue && !runLabPromptInput.active) {
+        if (!memoryEdit.active
+            && !breakpointEdit.active
+            && !memorySearch.ui.editingValue
+            && !runLabPromptInput.active
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+            && !raLoginModal.open
+#endif
+        ) {
             SDL_StopTextInput();
         }
     };
@@ -924,8 +959,21 @@ int RealtimeSession::run() {
             const int nextW = showPanel
                 ? std::max(width, currentW - panelWidth)
                 : std::max(width + panelWidth, currentW + panelWidth);
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+            const RaUiSize nextSize = raWindowedSize(
+                nextW,
+                std::max(height, currentH)
+            );
+            SDL_SetWindowMinimumSize(
+                window,
+                raMinimumWindowSize.w,
+                raMinimumWindowSize.h
+            );
+            SDL_SetWindowSize(window, nextSize.w, nextSize.h);
+#else
             SDL_SetWindowMinimumSize(window, showPanel ? width : width + panelWidth, height);
             SDL_SetWindowSize(window, nextW, std::max(height, currentH));
+#endif
             SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
         }
         showPanel = !showPanel;
@@ -977,8 +1025,18 @@ int RealtimeSession::run() {
             fullscreen = !fullscreen;
         } else {
             if (!fullscreen) {
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+                const RaUiSize windowedSize = raWindowedSize(gameWidth, gameHeight);
+                SDL_SetWindowMinimumSize(
+                    window,
+                    raMinimumWindowSize.w,
+                    raMinimumWindowSize.h
+                );
+                SDL_SetWindowSize(window, windowedSize.w, windowedSize.h);
+#else
                 SDL_SetWindowMinimumSize(window, width, height);
                 SDL_SetWindowSize(window, gameWidth, gameHeight);
+#endif
                 SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
             }
             uiMessage = fullscreen ? "FULLSCREEN ON" : "FULLSCREEN OFF";
@@ -1659,6 +1717,33 @@ int RealtimeSession::run() {
             uiMessageFrames = 120;
             break;
         }
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+        case TopMenuAction::RaLogin:
+            openRaLoginModal(raLoginModal, raUiSnapshot.profile.user.username);
+            closeRaProfilePanel(raProfilePanel);
+            showScaleMenu = false;
+            showPaletteMenu = false;
+            showControlsMenu = false;
+            SDL_StartTextInput();
+            break;
+        case TopMenuAction::RaLogout:
+            closeRaLoginModal(raLoginModal);
+            closeRaProfilePanel(raProfilePanel);
+            stopTextInputIfUnused();
+            uiMessage = "SAIR DA CONTA RA";
+            uiMessageFrames = 90;
+            break;
+        case TopMenuAction::RaOpenProfile:
+            closeRaLoginModal(raLoginModal);
+            stopTextInputIfUnused();
+            openRaProfilePanel(raProfilePanel, RaProfileTab::Summary);
+            break;
+        case TopMenuAction::RaOpenAchievements:
+            closeRaLoginModal(raLoginModal);
+            stopTextInputIfUnused();
+            openRaProfilePanel(raProfilePanel, RaProfileTab::CurrentGame);
+            break;
+#endif
         default:
             break;
         }
@@ -1722,6 +1807,19 @@ int RealtimeSession::run() {
                 out.push_back({TopMenuAction::None, "NETPLAY OFF"});
             }
             break;
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+        case TopMenuSection::Achievements: {
+            const bool loggedIn =
+                raUiSnapshot.connectionState == RaConnectionState::Online
+                || (!raUiSnapshot.profile.user.username.empty()
+                    && raUiSnapshot.connectionState == RaConnectionState::Offline);
+            const auto& items = topMenuItems(section, loggedIn);
+            for (const auto& item : items) {
+                out.push_back({item.action, item.label});
+            }
+            break;
+        }
+#endif
         default:
             break;
         }
@@ -2018,6 +2116,41 @@ int RealtimeSession::run() {
             if (ev.type == SDL_QUIT) {
                 running = false;
             }
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+            const bool raControllerHotplugEvent =
+                ev.type == SDL_CONTROLLERDEVICEADDED
+                || ev.type == SDL_CONTROLLERDEVICEREMOVED;
+            if (raLoginModal.open && !raControllerHotplugEvent) {
+                int outputW = 0;
+                int outputH = 0;
+                SDL_GetRendererOutputSize(renderer, &outputW, &outputH);
+                const RaLoginModalAction action = handleRaLoginModalEvent(
+                    raLoginModal,
+                    ev,
+                    outputW,
+                    outputH
+                );
+                if (action == RaLoginModalAction::Submit) {
+                    // Task 9 consumes the credential submission on the SDL thread.
+                    uiMessage = "LOGIN RETROACHIEVEMENTS";
+                    uiMessageFrames = 90;
+                }
+                continue;
+            }
+            if (raProfilePanel.open && !raControllerHotplugEvent) {
+                int outputW = 0;
+                int outputH = 0;
+                SDL_GetRendererOutputSize(renderer, &outputW, &outputH);
+                (void)handleRaProfilePanelEvent(
+                    raProfilePanel,
+                    raUiSnapshot,
+                    ev,
+                    outputW,
+                    outputH
+                );
+                continue;
+            }
+#endif
             if (ev.type == SDL_CONTROLLERDEVICEADDED && !gamepad) {
                 if (SDL_IsGameController(ev.cdevice.which)) {
                     gamepad = SDL_GameControllerOpen(ev.cdevice.which);
@@ -3262,6 +3395,37 @@ int RealtimeSession::run() {
             drawControlsMenuOverlay(outputW, outputH);
         }
         drawRunLabPromptOverlay();
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+        const auto raNowMs = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()
+            ).count()
+        );
+        advanceRaToast(raToast, raNowMs);
+        renderRaProfilePanel(
+            renderer,
+            raProfilePanel,
+            raUiSnapshot,
+            raImageTextureCache,
+            outputW,
+            outputH
+        );
+        renderRaLoginModal(
+            renderer,
+            raLoginModal,
+            raUiSnapshot,
+            outputW,
+            outputH
+        );
+        renderRaToast(
+            renderer,
+            raToast,
+            raImageTextureCache,
+            raNowMs,
+            outputW,
+            outputH
+        );
+#endif
         SDL_RenderPresent(renderer);
 
     }
@@ -3272,6 +3436,10 @@ int RealtimeSession::run() {
     std::cout << "[MT] workers encerrados\n";
 
     SDL_StopTextInput();
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    closeRaLoginModal(raLoginModal);
+    raImageTextureCache.shutdown();
+#endif
     sessionView.reset();
 
     if (gb.saveBatteryRamToFile(batteryRamPath)) {
