@@ -3,11 +3,97 @@
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <mutex>
 #include <optional>
+#include <string>
+#include <vector>
 
 #include "gb/app/frontend/realtime/retroachievements_models.hpp"
+#include "gb/app/frontend/realtime/retroachievements_progress.hpp"
 
 namespace gb::frontend {
+
+enum class RaRuntimeCommandType {
+    Login,
+    Logout,
+    SaveState,
+    LoadState,
+    TimelineBack,
+    TimelineForward,
+};
+
+using RaSecretWipeObserver =
+    std::function<void(const char* bytes, std::size_t size)>;
+
+struct RaRuntimeCommand {
+    RaRuntimeCommand(
+        RaRuntimeCommandType typeValue = RaRuntimeCommandType::Logout,
+        std::string usernameValue = {},
+        std::string passwordValue = {},
+        int saveSlotValue = 0
+    );
+    ~RaRuntimeCommand();
+    RaRuntimeCommand(const RaRuntimeCommand&) = delete;
+    RaRuntimeCommand& operator=(const RaRuntimeCommand&) = delete;
+    RaRuntimeCommand(RaRuntimeCommand&& other) noexcept;
+    RaRuntimeCommand& operator=(RaRuntimeCommand&& other) noexcept;
+
+    void wipeSecret(const RaSecretWipeObserver& observer = {});
+
+    RaRuntimeCommandType type = RaRuntimeCommandType::Logout;
+    std::string username{};
+    std::string password{};
+    int saveSlot = 0;
+    std::size_t repeatCount = 1;
+};
+
+class RaRuntimeCommandQueue {
+public:
+    explicit RaRuntimeCommandQueue(
+        std::size_t capacity = 32,
+        RaSecretWipeObserver wipeObserver = {}
+    );
+
+    bool enqueue(RaRuntimeCommand command);
+    [[nodiscard]] std::vector<RaRuntimeCommand> takeAll();
+    void stopAccepting();
+    [[nodiscard]] std::size_t size() const;
+
+private:
+    std::size_t capacity_ = 0;
+    RaSecretWipeObserver wipeObserver_{};
+    mutable std::mutex mutex_{};
+    std::vector<RaRuntimeCommand> commands_{};
+    bool accepting_ = true;
+};
+
+enum class RaDeferredRestoreResult {
+    NotPending,
+    Waiting,
+    Restored,
+    Reset,
+};
+
+class RaDeferredProgressRestore {
+public:
+    using Deserialize = std::function<bool(
+        std::string_view,
+        const std::vector<std::uint8_t>&
+    )>;
+    using Reset = std::function<bool()>;
+
+    void stage(std::optional<RaStoredProgress> progress);
+    [[nodiscard]] bool pending() const;
+    RaDeferredRestoreResult applyIfReady(
+        const RaSessionSnapshot& snapshot,
+        const Deserialize& deserialize,
+        const Reset& reset
+    );
+
+private:
+    std::optional<RaStoredProgress> progress_{};
+    bool resetPending_ = false;
+};
 
 struct RaLifecycleActions {
     std::function<void()> loadConfig;

@@ -334,33 +334,10 @@ int RealtimeSession::run() {
     std::mutex raPublicationMutex{};
     std::vector<RaUiEvent> raPublishedEvents{};
     std::atomic<bool> raShowNotifications{true};
-    std::atomic<bool> raAcceptCommands{true};
-    enum class RaRuntimeCommandType {
-        Login,
-        Logout,
-        SaveState,
-        LoadState,
-        TimelineBack,
-        TimelineForward,
-    };
-    struct RaRuntimeCommand {
-        RaRuntimeCommandType type = RaRuntimeCommandType::Logout;
-        std::string username{};
-        std::string password{};
-        int saveSlot = 0;
-    };
-    std::mutex raCommandMutex{};
-    std::deque<RaRuntimeCommand> raCommands{};
+    RaRuntimeCommandQueue raCommandQueue{32};
     const auto enqueueRaCommand = [&](RaRuntimeCommand command) {
-        if (!raAcceptCommands.load(std::memory_order_acquire)) {
-            std::fill(command.password.begin(), command.password.end(), '\0');
-            return;
-        }
-        std::lock_guard<std::mutex> lock(raCommandMutex);
-        if (raAcceptCommands.load(std::memory_order_relaxed)) {
-            raCommands.push_back(std::move(command));
-        } else {
-            std::fill(command.password.begin(), command.password.end(), '\0');
+        if (!raCommandQueue.enqueue(std::move(command))) {
+            workerUiMessages.post("FILA RA CHEIA", 120);
         }
     };
 #endif
@@ -1259,6 +1236,32 @@ int RealtimeSession::run() {
         RaLifecycleActions raActions{};
         bool captureRaTimelineThisFrame = false;
         std::string raTimelineRomHash{};
+        RaDeferredProgressRestore raDeferredProgress{};
+        bool raDeferredTimelineReset = false;
+        const auto applyPendingProgressIfReady = [&]() {
+            if (!raSession) {
+                return false;
+            }
+            const auto result = raDeferredProgress.applyIfReady(
+                raSession->snapshot(),
+                [&](std::string_view hash, const std::vector<std::uint8_t>& payload) {
+                    return raSession->deserializeProgress(hash, payload);
+                },
+                [&]() { return raSession->resetProgress(); }
+            );
+            if (result == RaDeferredRestoreResult::Reset) {
+                workerUiMessages.post("STATE SEM PROGRESSO RA", 180);
+            } else if (result == RaDeferredRestoreResult::Restored) {
+                workerUiMessages.post("PROGRESSO RA RESTAURADO", 150);
+            }
+            if ((result == RaDeferredRestoreResult::Reset
+                 || result == RaDeferredRestoreResult::Restored)
+                && raDeferredTimelineReset) {
+                timeline.reset(gb);
+                raDeferredTimelineReset = false;
+            }
+            return result == RaDeferredRestoreResult::Restored;
+        };
         raActions.loadConfig = [&]() {
             raConfig = loadRetroAchievementsConfig(raConfigPath);
             raShowNotifications.store(
@@ -1274,7 +1277,22 @@ int RealtimeSession::run() {
                         updated.showNotifications,
                         std::memory_order_release
                     );
-                    (void)saveRetroAchievementsConfig(raConfigPath, updated);
+                    if (saveRetroAchievementsConfig(raConfigPath, updated)) {
+                        return true;
+                    }
+                    if (updated.username.empty() && updated.token.empty()) {
+                        const bool invalidated =
+                            invalidateRetroAchievementsConfig(raConfigPath);
+                        if (!invalidated) {
+                            workerUiMessages.post(
+                                "ERRO AO REMOVER LOGIN RA",
+                                240
+                            );
+                        }
+                        return invalidated;
+                    }
+                    workerUiMessages.post("ERRO AO SALVAR LOGIN RA", 240);
+                    return false;
                 }
             );
             raOwnerSession = raSession.get();
@@ -1284,6 +1302,12 @@ int RealtimeSession::run() {
                 && !raConfig.username.empty() && !raConfig.token.empty()) {
                 raSession->enqueueTokenLogin(raConfig.username, raConfig.token);
             }
+            volatile char* tokenBytes = raConfig.token.data();
+            for (std::size_t index = 0; index < raConfig.token.size(); ++index) {
+                tokenBytes[index] = '\0';
+            }
+            raConfig.token.clear();
+            raConfig.username.clear();
         };
         raActions.loadGame = [&]() {
             if (raSession) {
@@ -1300,6 +1324,7 @@ int RealtimeSession::run() {
         };
         raActions.doFrame = [&]() {
             if (raSession) {
+                (void)applyPendingProgressIfReady();
                 raSession->doFrame();
             }
         };
@@ -1310,6 +1335,7 @@ int RealtimeSession::run() {
         };
         raActions.idle = [&]() {
             if (raSession) {
+                (void)applyPendingProgressIfReady();
                 raSession->idle();
             }
         };
@@ -1348,16 +1374,17 @@ int RealtimeSession::run() {
         };
 
         const auto processRaCommandsLocked = [&]() {
-            std::deque<RaRuntimeCommand> commands;
-            {
-                std::lock_guard<std::mutex> commandLock(raCommandMutex);
-                commands.swap(raCommands);
-            }
+            auto commands = raCommandQueue.takeAll();
             for (auto& command : commands) {
                 if (!raSession) {
-                    std::fill(command.password.begin(), command.password.end(), '\0');
+                    command.wipeSecret();
                     continue;
                 }
+                const std::size_t repeatCount = std::max<std::size_t>(
+                    1U,
+                    command.repeatCount
+                );
+                for (std::size_t repeat = 0; repeat < repeatCount; ++repeat) {
                 switch (command.type) {
                 case RaRuntimeCommandType::Login:
                     raSession->enqueueLogin(
@@ -1375,33 +1402,34 @@ int RealtimeSession::run() {
                         workerUiMessages.post("SAVE FAIL", 180);
                         break;
                     }
+                    const auto stateImage =
+                        readRetroAchievementsStateFile(slotStatePath);
                     std::vector<std::uint8_t> progress;
                     std::string romHash;
                     bool progressSaved = false;
+                    bool staleInvalidated = false;
                     raActions.serializeProgress = [&]() {
-                        progress = raSession->serializeProgress();
-                        romHash = raSession->snapshot().romHash;
+                        const auto snapshot = raSession->snapshot();
+                        if (snapshot.gameLoaded && !snapshot.romHash.empty()) {
+                            progress = raSession->serializeProgress();
+                            romHash = snapshot.romHash;
+                        }
                     };
                     raActions.saveProgressSidecar = [&]() {
-                        if (!progress.empty() && !romHash.empty()) {
-                            progressSaved = saveRetroAchievementsProgress(
+                        const std::string progressPath =
+                            retroAchievementsProgressPathForState(slotStatePath);
+                        if (stateImage.has_value()
+                            && !progress.empty() && !romHash.empty()) {
+                            progressSaved = saveRetroAchievementsProgressV2(
                                 retroAchievementsProgressPathForState(slotStatePath),
                                 romHash,
+                                stateImage->fingerprint,
                                 progress
                             );
-                            if (!progressSaved) {
-                                std::error_code removeError;
-                                std::filesystem::remove(
-                                    retroAchievementsProgressPathForState(slotStatePath),
-                                    removeError
-                                );
-                            }
-                        } else {
-                            std::error_code removeError;
-                            std::filesystem::remove(
-                                retroAchievementsProgressPathForState(slotStatePath),
-                                removeError
-                            );
+                        }
+                        if (!progressSaved) {
+                            staleInvalidated =
+                                invalidateRetroAchievementsProgress(progressPath);
                         }
                     };
                     raLifecycle.saveState(raActions);
@@ -1417,9 +1445,11 @@ int RealtimeSession::run() {
                         meta
                     );
                     workerUiMessages.post(
-                        !romHash.empty() && !progressSaved
-                            ? "STATE SAVED SEM PROGRESSO RA"
-                            : "STATE SAVED S" + std::to_string(command.saveSlot),
+                        progressSaved
+                            ? "STATE SAVED S" + std::to_string(command.saveSlot)
+                            : staleInvalidated
+                                ? "STATE SALVO SEM PROGRESSO RA"
+                                : "STATE SALVO; FALHA INVALIDAR RA",
                         180
                     );
                     break;
@@ -1429,33 +1459,32 @@ int RealtimeSession::run() {
                         saveSlotStatePath(statePath, command.saveSlot);
                     std::string loadedPath = slotStatePath;
                     bool loaded = false;
-                    bool restoredProgress = false;
+                    std::optional<RaStateFileImage> loadedImage{};
                     raActions.loadGameState = [&]() {
-                        loaded = gb.loadStateFromFile(slotStatePath);
+                        loadedImage =
+                            readRetroAchievementsStateFile(slotStatePath);
+                        loaded = loadedImage.has_value()
+                            && gb.loadStateFromBytes(loadedImage->bytes);
                         if (!loaded && command.saveSlot == 0) {
                             loadedPath = legacyStatePath;
-                            loaded = gb.loadStateFromFile(legacyStatePath);
+                            loadedImage =
+                                readRetroAchievementsStateFile(legacyStatePath);
+                            loaded = loadedImage.has_value()
+                                && gb.loadStateFromBytes(loadedImage->bytes);
                         }
                     };
                     raActions.deserializeProgress = [&]() {
-                        if (!loaded) {
+                        if (!loaded || !loadedImage.has_value()) {
                             return;
                         }
-                        const auto snapshot = raSession->snapshot();
-                        if (snapshot.gameLoaded && !snapshot.romHash.empty()) {
-                            const auto stored = loadRetroAchievementsProgress(
+                        raDeferredProgress.stage(
+                            loadRetroAchievementsProgressV2(
                                 retroAchievementsProgressPathForState(loadedPath),
-                                snapshot.romHash
-                            );
-                            restoredProgress = stored.has_value()
-                                && raSession->deserializeProgress(
-                                    stored->romHash,
-                                    stored->payload
-                                );
-                            if (!restoredProgress) {
-                                (void)raSession->resetProgress();
-                            }
-                        }
+                                {},
+                                loadedImage->fingerprint
+                            )
+                        );
+                        raDeferredTimelineReset = true;
                     };
                     raLifecycle.loadState(raActions);
                     raActions.loadGameState = {};
@@ -1464,15 +1493,18 @@ int RealtimeSession::run() {
                         workerUiMessages.post("NO STATE", 180);
                         break;
                     }
+                    const bool progressHandledNow =
+                        raSession->snapshot().gameLoaded;
+                    (void)applyPendingProgressIfReady();
                     timeline.reset(gb);
                     resetMemoryWatch(memoryWatch, gb.bus());
                     enqueueRawFrameLocked();
-                    workerUiMessages.post(
-                        restoredProgress || !raSession->snapshot().gameLoaded
-                            ? "STATE LOADED S" + std::to_string(command.saveSlot)
-                            : "STATE SEM PROGRESSO RA",
-                        180
-                    );
+                    if (!progressHandledNow) {
+                        workerUiMessages.post(
+                            "STATE CARREGADO; PROGRESSO RA PENDENTE",
+                            180
+                        );
+                    }
                     break;
                 }
                 case RaRuntimeCommandType::TimelineBack:
@@ -1493,6 +1525,7 @@ int RealtimeSession::run() {
                     resetMemoryWatch(memoryWatch, gb.bus());
                     workerUiMessages.post(frameTimelineLabel(timeline), 120);
                     break;
+                }
                 }
             }
         };
@@ -3926,7 +3959,7 @@ int RealtimeSession::run() {
     }
 
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
-    raAcceptCommands.store(false, std::memory_order_release);
+    raCommandQueue.stopAccepting();
 #endif
     pausedAtomic.store(true, std::memory_order_relaxed);
     audioGateAtomic.store(false, std::memory_order_relaxed);

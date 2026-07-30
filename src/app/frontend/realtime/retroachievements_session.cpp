@@ -389,6 +389,8 @@ public:
           config(std::move(configValue)),
           persistConfig(std::move(persistConfigValue)),
           ownerThread(std::this_thread::get_id()) {
+        eraseSecret(config.token);
+        config.username.clear();
         if (clientApi) {
             api = clientApi;
         } else {
@@ -545,8 +547,11 @@ public:
                 ? "Não foi possível conectar ao RetroAchievements. Tente novamente."
                 : "Usuário, senha ou token inválido no RetroAchievements.";
             if (!isTransientLoginFailure(result)) {
-                config.token.clear();
-                persist();
+                eraseSecret(config.token);
+                if (!persist()) {
+                    state.errorText =
+                        "Login recusado e não foi possível atualizar as credenciais locais.";
+                }
             }
             publishSnapshot();
             addEvent({
@@ -561,11 +566,18 @@ public:
 
         copyUser(*user);
         config.username = copyText(user->username);
+        eraseSecret(config.token);
         config.token = copyText(user->token);
-        persist();
+        const bool configPersisted = persist();
+        eraseSecret(config.token);
+        config.username.clear();
         state.connectionState = RaConnectionState::Online;
-        state.statusText = "Conectado ao RetroAchievements.";
-        state.errorText.clear();
+        state.statusText = configPersisted
+            ? "Conectado ao RetroAchievements."
+            : "Conectado; credenciais não foram salvas.";
+        state.errorText = configPersisted
+            ? std::string{}
+            : "Não foi possível salvar as credenciais do RetroAchievements.";
         publishSnapshot();
         addEvent({
             RaUiEventType::LoginSucceeded,
@@ -583,12 +595,18 @@ public:
         ++profileGeneration;
         api->logout(client);
         config.username.clear();
-        config.token.clear();
-        persist();
+        eraseSecret(config.token);
+        const bool configPersisted = persist();
 
         state = {};
         state.connectionState = RaConnectionState::LoggedOut;
-        state.statusText = "Desconectado do RetroAchievements.";
+        state.statusText = configPersisted
+            ? "Desconectado do RetroAchievements."
+            : "Desconectado; arquivo de credenciais não foi atualizado.";
+        if (!configPersisted) {
+            state.errorText =
+                "As credenciais foram removidas da sessão, mas o arquivo local não pôde ser atualizado.";
+        }
         currentRomHash.clear();
         state.romHash.clear();
         mergedLibrary.clear();
@@ -1136,10 +1154,8 @@ public:
         return result;
     }
 
-    void persist() {
-        if (persistConfig) {
-            persistConfig(config);
-        }
+    [[nodiscard]] bool persist() {
+        return !persistConfig || persistConfig(config);
     }
 
     [[nodiscard]] std::vector<std::uint8_t> serializeProgress() const {
@@ -1172,7 +1188,13 @@ public:
             client,
             payload.data(),
             payload.size()
-        ) == RC_OK;
+        ) == RC_OK && refreshAfterProgressRestore();
+    }
+
+    [[nodiscard]] bool refreshAfterProgressRestore() {
+        refreshCurrentGame();
+        publishSnapshot();
+        return true;
     }
 
     [[nodiscard]] bool resetProgress() {
@@ -1222,6 +1244,8 @@ public:
         }
 
         cancelServerCalls();
+        eraseSecret(config.token);
+        config.username.clear();
         if (client) {
             api->destroy(client);
             unregisterSession(client);

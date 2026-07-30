@@ -3,6 +3,8 @@
 #include <array>
 #include <cstdint>
 #include <fstream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 namespace gb {
@@ -274,6 +276,20 @@ bool readCartridgeState(std::istream& is, Cartridge::State& s) {
     return readPod(is, s.type) && readVector(is, s.ram) && readVector(is, s.mapper);
 }
 
+bool readGameBoyState(std::istream& in, GameBoy::SaveState& state) {
+    std::uint32_t magic = 0;
+    std::uint32_t version = 0;
+    if (!readPod(in, magic) || !readPod(in, version)) {
+        return false;
+    }
+    if (magic != SaveMagic || (version != 2 && version != 3 && version != SaveVersion)) {
+        return false;
+    }
+    return readCartridgeState(in, state.cartridge)
+        && readBusState(in, state.bus, version >= 3, version >= 4)
+        && readCpuState(in, state.cpu);
+}
+
 } // namespace
 
 bool GameBoy::saveStateToFile(const std::string& path) const {
@@ -299,23 +315,29 @@ bool GameBoy::loadStateFromFile(const std::string& path) {
         return false;
     }
 
-    std::uint32_t magic = 0;
-    std::uint32_t version = 0;
-    if (!readPod(in, magic) || !readPod(in, version)) {
-        return false;
-    }
-    if (magic != SaveMagic || (version != 2 && version != 3 && version != SaveVersion)) {
-        return false;
-    }
-
     SaveState s{};
-    if (!readCartridgeState(in, s.cartridge)
-        || !readBusState(in, s.bus, version >= 3, version >= 4)
-        || !readCpuState(in, s.cpu)) {
+    if (!readGameBoyState(in, s)) {
         return false;
     }
 
     loadState(s);
+    return true;
+}
+
+bool GameBoy::loadStateFromBytes(const std::vector<std::uint8_t>& bytes) {
+    if (bytes.empty()) {
+        return false;
+    }
+    const std::string contents(
+        reinterpret_cast<const char*>(bytes.data()),
+        bytes.size()
+    );
+    std::istringstream in(contents, std::ios::binary);
+    SaveState state{};
+    if (!readGameBoyState(in, state)) {
+        return false;
+    }
+    loadState(state);
     return true;
 }
 

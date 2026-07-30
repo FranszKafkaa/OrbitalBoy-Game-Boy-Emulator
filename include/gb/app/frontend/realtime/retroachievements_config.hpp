@@ -14,5 +14,6 @@ struct RaConfig {
 
 RaConfig loadRetroAchievementsConfig(const std::string& path);
 bool saveRetroAchievementsConfig(const std::string& path, const RaConfig& config);
+bool invalidateRetroAchievementsConfig(const std::string& path);
 
 } // namespace gb::frontend

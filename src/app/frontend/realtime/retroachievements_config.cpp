@@ -399,4 +399,25 @@ bool saveRetroAchievementsConfig(const std::string& path, const RaConfig& config
     return true;
 }
 
+bool invalidateRetroAchievementsConfig(const std::string& path) {
+    if (path.empty()) {
+        return false;
+    }
+    const std::filesystem::path source(path);
+    std::error_code error;
+    if (!std::filesystem::exists(source, error)) {
+        return !error;
+    }
+    if (std::filesystem::remove(source, error)) {
+        return true;
+    }
+    error.clear();
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path quarantine(
+        path + ".invalid." + std::to_string(now)
+    );
+    std::filesystem::rename(source, quarantine, error);
+    return !error;
+}
+
 } // namespace gb::frontend

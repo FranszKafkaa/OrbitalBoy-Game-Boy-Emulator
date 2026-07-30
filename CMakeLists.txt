@@ -92,7 +92,6 @@ set(GBEMU_REALTIME_SUPPORT_SOURCES
     src/app/frontend/realtime/network_config.cpp
     src/app/frontend/realtime/retroachievements_config.cpp
     src/app/frontend/realtime/retroachievements_memory.cpp
-    src/app/frontend/realtime/retroachievements_progress.cpp
     src/app/frontend/realtime/top_menu.cpp
     src/app/frontend/realtime/ui_message_queue.cpp
 )
@@ -182,6 +181,7 @@ if (GBEMU_ENABLE_RETROACHIEVEMENTS)
         src/app/frontend/realtime/retroachievements_http.cpp
         src/app/frontend/realtime/retroachievements_image_cache.cpp
         src/app/frontend/realtime/retroachievements_lifecycle.cpp
+        src/app/frontend/realtime/retroachievements_progress.cpp
         src/app/frontend/realtime/retroachievements_session.cpp
         src/app/frontend/realtime/retroachievements_ui.cpp
     )

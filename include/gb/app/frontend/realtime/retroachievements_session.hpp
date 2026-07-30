@@ -133,7 +133,7 @@ public:
     );
 };
 
-using RaConfigPersistence = std::function<void(const RaConfig&)>;
+using RaConfigPersistence = std::function<bool(const RaConfig&)>;
 
 class RetroAchievementsSession {
 public:

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 #include "gb/core/bus.hpp"
 #include "gb/core/cartridge.hpp"
@@ -39,6 +41,7 @@ public:
     void loadState(const SaveState& state);
     bool saveStateToFile(const std::string& path) const;
     bool loadStateFromFile(const std::string& path);
+    bool loadStateFromBytes(const std::vector<std::uint8_t>& bytes);
     bool loadBatteryRamFromFile(const std::string& path);
     bool saveBatteryRamToFile(const std::string& path) const;
     bool loadRtcFromFile(const std::string& path);
