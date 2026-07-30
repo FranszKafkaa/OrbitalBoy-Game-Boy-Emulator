@@ -67,6 +67,13 @@ private:
     bool accepting_ = true;
 };
 
+using RaRuntimeCommandExecutor = std::function<void(RaRuntimeCommand&)>;
+void processRaRuntimeCommandBatch(
+    std::vector<RaRuntimeCommand> commands,
+    const RaRuntimeCommandExecutor& execute,
+    const std::function<void()>& processPending
+);
+
 enum class RaDeferredRestoreResult {
     NotPending,
     Waiting,
@@ -100,6 +107,7 @@ struct RaLifecycleActions {
     std::function<void()> tokenLogin;
     std::function<void()> loadGame;
     std::function<void()> processPending;
+    std::function<void()> applyPendingProgress;
     std::function<void()> doFrame;
     std::function<void()> captureTimeline;
     std::function<void()> emulateRollbackFrame;

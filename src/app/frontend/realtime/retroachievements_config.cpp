@@ -1,77 +1,90 @@
 #include "gb/app/frontend/realtime/retroachievements_config.hpp"
 
-#include <atomic>
+#include "private_file_io.hpp"
+
+#include <algorithm>
 #include <charconv>
 #include <cctype>
-#include <chrono>
-#include <cerrno>
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <random>
 #include <string_view>
 #include <system_error>
-#include <vector>
-
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
+#include <utility>
 
 namespace gb::frontend {
-
 namespace {
 
 constexpr std::size_t kMaxStoredValueBytes = 4U * 1024U;
-constexpr int kTemporaryFileAttempts = 32;
+constexpr int kQuarantineAttempts = 32;
+
+void wipeString(
+    std::string& value,
+    const RaConfigWipeObserver& observer = {}
+) {
+    const std::size_t size = value.size();
+    volatile char* bytes = value.empty()
+        ? nullptr
+        : reinterpret_cast<volatile char*>(value.data());
+    for (std::size_t index = 0; index < size; ++index) {
+        bytes[index] = '\0';
+    }
+    if (observer && size != 0U) {
+        observer(value.data(), size);
+    }
+    value.clear();
+}
 
 bool isSafeStoredValue(std::string_view value) {
     if (value.size() > kMaxStoredValueBytes) {
         return false;
     }
-    for (const unsigned char character : value) {
-        if (std::iscntrl(character) != 0) {
-            return false;
+    return std::all_of(
+        value.begin(),
+        value.end(),
+        [](unsigned char character) {
+            return std::iscntrl(character) == 0;
         }
-    }
-    return true;
+    );
 }
 
-std::string escapeValue(std::string_view value) {
-    std::string escaped;
-    escaped.reserve(value.size());
+void appendEscapedValue(std::string& destination, std::string_view value) {
     for (const char character : value) {
         if (character == '\\' || character == '=') {
-            escaped.push_back('\\');
+            destination.push_back('\\');
         }
-        escaped.push_back(character);
+        destination.push_back(character);
     }
-    return escaped;
 }
 
-std::optional<std::string> unescapeValue(std::string_view value) {
-    std::string unescaped;
-    unescaped.reserve(value.size());
+bool unescapeValueInto(
+    std::string_view value,
+    std::string& destination,
+    const RaConfigWipeObserver& observer
+) {
+    wipeString(destination, observer);
+    destination.reserve(value.size());
     bool escaped = false;
     for (const char character : value) {
         if (escaped) {
             if (character != '\\' && character != '=') {
-                return std::nullopt;
+                wipeString(destination, observer);
+                return false;
             }
-            unescaped.push_back(character);
+            destination.push_back(character);
             escaped = false;
         } else if (character == '\\') {
             escaped = true;
         } else {
-            unescaped.push_back(character);
+            destination.push_back(character);
         }
     }
-    if (escaped || !isSafeStoredValue(unescaped)) {
-        return std::nullopt;
+    if (escaped || !isSafeStoredValue(destination)) {
+        wipeString(destination, observer);
+        return false;
     }
-    return unescaped;
+    return true;
 }
 
 std::optional<int> parseVersion(std::string_view value) {
@@ -99,9 +112,9 @@ std::string serializeConfig(const RaConfig& config) {
     std::string serialized;
     serialized.reserve(config.username.size() + config.token.size() + 96U);
     serialized += "version=1\nusername=";
-    serialized += escapeValue(config.username);
+    appendEscapedValue(serialized, config.username);
     serialized += "\ntoken=";
-    serialized += escapeValue(config.token);
+    appendEscapedValue(serialized, config.token);
     serialized += "\nauto_login=";
     serialized += config.autoLogin ? "true" : "false";
     serialized += "\nshow_notifications=";
@@ -110,224 +123,44 @@ std::string serializeConfig(const RaConfig& config) {
     return serialized;
 }
 
-std::filesystem::path temporarySiblingPath(const std::filesystem::path& destination, int attempt) {
-    static std::atomic<std::uint64_t> counter{0};
-    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-    const std::uint64_t serial = counter.fetch_add(1, std::memory_order_relaxed);
-    const std::string name = destination.filename().string()
-        + ".tmp."
-        + std::to_string(now)
-        + "."
-        + std::to_string(serial)
-        + "."
-        + std::to_string(attempt);
-    return destination.parent_path() / name;
+std::filesystem::path quarantinePath(
+    const std::filesystem::path& source
+) {
+    thread_local std::mt19937_64 generator(std::random_device{}());
+    return source.parent_path()
+        / (source.filename().string()
+           + ".invalid."
+           + std::to_string(generator()));
 }
 
-void removeTemporaryFile(const std::filesystem::path& temporary) {
-    std::error_code ignored;
-    std::filesystem::remove(temporary, ignored);
-}
-
-#if defined(_WIN32)
-
-class ScopedWindowsHandle {
-public:
-    explicit ScopedWindowsHandle(HANDLE handle)
-        : handle_(handle) {}
-
-    ScopedWindowsHandle(const ScopedWindowsHandle&) = delete;
-    ScopedWindowsHandle& operator=(const ScopedWindowsHandle&) = delete;
-
-    ~ScopedWindowsHandle() {
-        if (handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE) {
-            CloseHandle(handle_);
-        }
-    }
-
-    [[nodiscard]] HANDLE get() const {
-        return handle_;
-    }
-
-private:
-    HANDLE handle_ = nullptr;
-};
-
-class CurrentUserOnlySecurityAttributes {
-public:
-    CurrentUserOnlySecurityAttributes() {
-        valid_ = initialize();
-    }
-
-    [[nodiscard]] const SECURITY_ATTRIBUTES* get() const {
-        return valid_ ? &attributes_ : nullptr;
-    }
-
-private:
-    bool initialize() {
-        HANDLE rawToken = nullptr;
-        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &rawToken)) {
-            return false;
-        }
-        const ScopedWindowsHandle token(rawToken);
-
-        DWORD tokenUserSize = 0;
-        if (GetTokenInformation(token.get(), TokenUser, nullptr, 0, &tokenUserSize)
-            || GetLastError() != ERROR_INSUFFICIENT_BUFFER
-            || tokenUserSize < sizeof(TOKEN_USER)) {
-            return false;
-        }
-
-        tokenUser_.resize(tokenUserSize);
-        if (!GetTokenInformation(token.get(), TokenUser, tokenUser_.data(), tokenUserSize, &tokenUserSize)) {
-            return false;
-        }
-
-        const auto* const user = reinterpret_cast<const TOKEN_USER*>(tokenUser_.data());
-        if (!IsValidSid(user->User.Sid)) {
-            return false;
-        }
-        const DWORD sidSize = GetLengthSid(user->User.Sid);
-        constexpr DWORD kAclOverhead = sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD);
-        if (sidSize == 0U || sidSize > MAXDWORD - kAclOverhead) {
-            return false;
-        }
-
-        acl_.resize(kAclOverhead + sidSize);
-        auto* const dacl = reinterpret_cast<ACL*>(acl_.data());
-        if (!InitializeAcl(dacl, static_cast<DWORD>(acl_.size()), ACL_REVISION)
-            || !AddAccessAllowedAce(dacl, ACL_REVISION, FILE_ALL_ACCESS, user->User.Sid)
-            || !InitializeSecurityDescriptor(&securityDescriptor_, SECURITY_DESCRIPTOR_REVISION)
-            || !SetSecurityDescriptorOwner(&securityDescriptor_, user->User.Sid, FALSE)
-            || !SetSecurityDescriptorDacl(&securityDescriptor_, TRUE, dacl, FALSE)
-            || !SetSecurityDescriptorControl(&securityDescriptor_, SE_DACL_PROTECTED, SE_DACL_PROTECTED)) {
-            return false;
-        }
-
-        attributes_.nLength = sizeof(attributes_);
-        attributes_.lpSecurityDescriptor = &securityDescriptor_;
-        attributes_.bInheritHandle = FALSE;
-        return true;
-    }
-
-    std::vector<BYTE> tokenUser_;
-    std::vector<BYTE> acl_;
-    SECURITY_DESCRIPTOR securityDescriptor_{};
-    SECURITY_ATTRIBUTES attributes_{};
-    bool valid_ = false;
-};
-
-bool writePrivateTemporaryFile(const std::filesystem::path& destination,
-                               std::string_view contents,
-                               std::filesystem::path& temporary) {
-    const CurrentUserOnlySecurityAttributes securityAttributes;
-    if (securityAttributes.get() == nullptr) {
+bool quarantineConfig(
+    const std::filesystem::path& source,
+    bool sensitive
+) {
+    if (sensitive && !detail::makeFileOwnerPrivate(source)) {
         return false;
     }
-
-    for (int attempt = 0; attempt < kTemporaryFileAttempts; ++attempt) {
-        temporary = temporarySiblingPath(destination, attempt);
-        const std::wstring temporaryPath = temporary.wstring();
-        HANDLE handle = CreateFileW(
-            temporaryPath.c_str(),
-            GENERIC_WRITE,
-            0,
-            securityAttributes.get(),
-            CREATE_NEW,
-            FILE_ATTRIBUTE_NORMAL,
-            nullptr
-        );
-        if (handle == INVALID_HANDLE_VALUE) {
-            const DWORD error = GetLastError();
-            if (error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS) {
-                continue;
-            }
-            return false;
+    for (int attempt = 0; attempt < kQuarantineAttempts; ++attempt) {
+        const auto quarantine = quarantinePath(source);
+        std::error_code existsError;
+        if (std::filesystem::exists(quarantine, existsError) || existsError) {
+            continue;
         }
-
-        std::size_t offset = 0;
-        bool wrote = true;
-        while (offset < contents.size()) {
-            const std::size_t remaining = contents.size() - offset;
-            const DWORD chunk = remaining > 0xFFFFFFFFULL ? 0xFFFFFFFFU : static_cast<DWORD>(remaining);
-            DWORD written = 0;
-            if (!WriteFile(handle, contents.data() + offset, chunk, &written, nullptr) || written == 0U) {
-                wrote = false;
-                break;
-            }
-            offset += written;
-        }
-        const bool flushed = wrote && FlushFileBuffers(handle) != 0;
-        const bool closed = CloseHandle(handle) != 0;
-        if (flushed && closed) {
+        std::error_code renameError;
+        std::filesystem::rename(source, quarantine, renameError);
+        if (!renameError) {
             return true;
         }
-        removeTemporaryFile(temporary);
-        return false;
     }
     return false;
 }
-
-bool replaceWithTemporaryFile(const std::filesystem::path& temporary, const std::filesystem::path& destination) {
-    return MoveFileExW(
-               temporary.wstring().c_str(),
-               destination.wstring().c_str(),
-               MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
-           ) != 0;
-}
-
-#else
-
-bool writeAll(int descriptor, std::string_view contents) {
-    std::size_t offset = 0;
-    while (offset < contents.size()) {
-        const ssize_t written = ::write(descriptor, contents.data() + offset, contents.size() - offset);
-        if (written > 0) {
-            offset += static_cast<std::size_t>(written);
-            continue;
-        }
-        if (written < 0 && errno == EINTR) {
-            continue;
-        }
-        return false;
-    }
-    return true;
-}
-
-bool writePrivateTemporaryFile(const std::filesystem::path& destination,
-                               std::string_view contents,
-                               std::filesystem::path& temporary) {
-    for (int attempt = 0; attempt < kTemporaryFileAttempts; ++attempt) {
-        temporary = temporarySiblingPath(destination, attempt);
-        const int descriptor = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
-        if (descriptor < 0) {
-            if (errno == EEXIST) {
-                continue;
-            }
-            return false;
-        }
-
-        const bool wrote = writeAll(descriptor, contents);
-        const bool flushed = wrote && ::fsync(descriptor) == 0;
-        const bool closed = ::close(descriptor) == 0;
-        if (flushed && closed) {
-            return true;
-        }
-        removeTemporaryFile(temporary);
-        return false;
-    }
-    return false;
-}
-
-bool replaceWithTemporaryFile(const std::filesystem::path& temporary, const std::filesystem::path& destination) {
-    return ::rename(temporary.c_str(), destination.c_str()) == 0;
-}
-
-#endif
 
 } // namespace
 
-RaConfig loadRetroAchievementsConfig(const std::string& path) {
+RaConfig loadRetroAchievementsConfig(
+    const std::string& path,
+    RaConfigWipeObserver wipeObserver
+) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
         return {};
@@ -339,85 +172,125 @@ RaConfig loadRetroAchievementsConfig(const std::string& path) {
     while (std::getline(in, line)) {
         const std::size_t separator = line.find('=');
         if (separator == std::string::npos) {
+            wipeString(line, wipeObserver);
             continue;
         }
-
         const std::string_view key(line.data(), separator);
-        const auto value = unescapeValue(std::string_view(line.data() + separator + 1U, line.size() - separator - 1U));
-        if (!value.has_value()) {
+        const std::string_view encodedValue(
+            line.data() + separator + 1U,
+            line.size() - separator - 1U
+        );
+        if (key == "token") {
+            if (!unescapeValueInto(
+                    encodedValue,
+                    config.token,
+                    wipeObserver
+                )) {
+                wipeString(line, wipeObserver);
+                continue;
+            }
+            wipeString(line, wipeObserver);
+            continue;
+        }
+        std::string value;
+        if (!unescapeValueInto(encodedValue, value, wipeObserver)) {
+            wipeString(line, wipeObserver);
             continue;
         }
 
         if (key == "version") {
-            const auto version = parseVersion(*value);
+            const auto version = parseVersion(value);
             if (!version.has_value() || *version != config.version) {
+                wipeString(value, wipeObserver);
+                wipeString(line, wipeObserver);
+                wipeString(config.token, wipeObserver);
+                config.username.clear();
                 return {};
             }
             hasValidVersion = true;
         } else if (key == "username") {
-            config.username = *value;
-        } else if (key == "token") {
-            config.token = *value;
+            config.username = value;
         } else if (key == "auto_login") {
-            if (const auto parsed = parseBoolean(*value)) {
+            if (const auto parsed = parseBoolean(value)) {
                 config.autoLogin = *parsed;
             }
         } else if (key == "show_notifications") {
-            if (const auto parsed = parseBoolean(*value)) {
+            if (const auto parsed = parseBoolean(value)) {
                 config.showNotifications = *parsed;
             }
         }
+        wipeString(value, wipeObserver);
+        wipeString(line, wipeObserver);
     }
-
-    return hasValidVersion ? config : RaConfig{};
+    if (!hasValidVersion) {
+        wipeString(config.token, wipeObserver);
+        config.username.clear();
+        return {};
+    }
+    return config;
 }
 
-bool saveRetroAchievementsConfig(const std::string& path, const RaConfig& config) {
-    if (path.empty() || config.version != 1 || !isSafeStoredValue(config.username) || !isSafeStoredValue(config.token)) {
+bool saveRetroAchievementsConfig(
+    const std::string& path,
+    const RaConfig& config
+) {
+    if (path.empty() || config.version != 1
+        || !isSafeStoredValue(config.username)
+        || !isSafeStoredValue(config.token)) {
         return false;
     }
-
-    const std::filesystem::path destination(path);
-    const std::filesystem::path parent = destination.parent_path();
-    std::error_code error;
-    if (!parent.empty()) {
-        std::filesystem::create_directories(parent, error);
-        if (error) {
-            return false;
-        }
-    }
-
-    std::filesystem::path temporary;
-    if (!writePrivateTemporaryFile(destination, serializeConfig(config), temporary)) {
-        return false;
-    }
-
-    if (!replaceWithTemporaryFile(temporary, destination)) {
-        removeTemporaryFile(temporary);
-        return false;
-    }
-    return true;
+    std::string serialized = serializeConfig(config);
+    const bool saved = detail::writePrivateFileAtomically(
+        std::filesystem::path(path),
+        std::string_view(serialized)
+    );
+    wipeString(serialized);
+    return saved;
 }
 
-bool invalidateRetroAchievementsConfig(const std::string& path) {
+bool invalidateRetroAchievementsConfig(
+    const std::string& path,
+    bool* quarantinedSensitiveData
+) {
+    if (quarantinedSensitiveData) {
+        *quarantinedSensitiveData = false;
+    }
     if (path.empty()) {
         return false;
     }
     const std::filesystem::path source(path);
-    std::error_code error;
-    if (!std::filesystem::exists(source, error)) {
-        return !error;
+    std::error_code statusError;
+    const auto status = std::filesystem::symlink_status(source, statusError);
+    if (statusError) {
+        return false;
     }
-    if (std::filesystem::remove(source, error)) {
+    if (!std::filesystem::exists(status)) {
         return true;
     }
-    error.clear();
-    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-    const std::filesystem::path quarantine(
-        path + ".invalid." + std::to_string(now)
-    );
-    std::filesystem::rename(source, quarantine, error);
-    return !error;
+    std::error_code removeError;
+    if (std::filesystem::remove(source, removeError)) {
+        return true;
+    }
+    if (!std::filesystem::is_regular_file(status)) {
+        return false;
+    }
+
+    const RaConfig emptyConfig{1, {}, {}, false, true};
+    if (saveRetroAchievementsConfig(path, emptyConfig)) {
+        removeError.clear();
+        if (std::filesystem::remove(source, removeError)) {
+            return true;
+        }
+        return quarantineConfig(source, false);
+    }
+
+    if (!quarantineConfig(source, true)) {
+        return false;
+    }
+    if (quarantinedSensitiveData) {
+        *quarantinedSensitiveData = true;
+    }
+    return true;
 }
 
 } // namespace gb::frontend

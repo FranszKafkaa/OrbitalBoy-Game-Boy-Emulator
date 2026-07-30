@@ -1212,7 +1212,6 @@ public:
         if (!onOwnerThread() || shutdownRequested || !client) {
             return;
         }
-        processPending();
         if (state.gameLoaded) {
             api->doFrame(client);
         }

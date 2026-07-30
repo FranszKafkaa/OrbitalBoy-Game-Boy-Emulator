@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <functional>
 #include <string>
 
 namespace gb::frontend {
@@ -12,8 +14,17 @@ struct RaConfig {
     bool showNotifications = true;
 };
 
-RaConfig loadRetroAchievementsConfig(const std::string& path);
+using RaConfigWipeObserver =
+    std::function<void(const char* bytes, std::size_t size)>;
+
+RaConfig loadRetroAchievementsConfig(
+    const std::string& path,
+    RaConfigWipeObserver wipeObserver = {}
+);
 bool saveRetroAchievementsConfig(const std::string& path, const RaConfig& config);
-bool invalidateRetroAchievementsConfig(const std::string& path);
+bool invalidateRetroAchievementsConfig(
+    const std::string& path,
+    bool* quarantinedSensitiveData = nullptr
+);
 
 } // namespace gb::frontend

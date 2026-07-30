@@ -1268,10 +1268,17 @@ int RealtimeSession::run() {
                 raConfig.showNotifications,
                 std::memory_order_release
             );
+            RaConfig sessionConfig{
+                raConfig.version,
+                {},
+                {},
+                raConfig.autoLogin,
+                raConfig.showNotifications,
+            };
             raSession = std::make_unique<RetroAchievementsSession>(
                 gb,
                 raHttpTransport,
-                raConfig,
+                std::move(sessionConfig),
                 [&](const RaConfig& updated) {
                     raShowNotifications.store(
                         updated.showNotifications,
@@ -1281,8 +1288,18 @@ int RealtimeSession::run() {
                         return true;
                     }
                     if (updated.username.empty() && updated.token.empty()) {
+                        bool sensitiveQuarantine = false;
                         const bool invalidated =
-                            invalidateRetroAchievementsConfig(raConfigPath);
+                            invalidateRetroAchievementsConfig(
+                                raConfigPath,
+                                &sensitiveQuarantine
+                            );
+                        if (sensitiveQuarantine) {
+                            workerUiMessages.post(
+                                "LOGIN RA INATIVO; TOKEN EM QUARENTENA PRIVADA",
+                                300
+                            );
+                        }
                         if (!invalidated) {
                             workerUiMessages.post(
                                 "ERRO AO REMOVER LOGIN RA",
@@ -1300,7 +1317,10 @@ int RealtimeSession::run() {
         raActions.tokenLogin = [&]() {
             if (raSession && raConfig.autoLogin
                 && !raConfig.username.empty() && !raConfig.token.empty()) {
-                raSession->enqueueTokenLogin(raConfig.username, raConfig.token);
+                raSession->enqueueTokenLogin(
+                    std::move(raConfig.username),
+                    std::move(raConfig.token)
+                );
             }
             volatile char* tokenBytes = raConfig.token.data();
             for (std::size_t index = 0; index < raConfig.token.size(); ++index) {
@@ -1322,9 +1342,13 @@ int RealtimeSession::run() {
                 raSession->processPending();
             }
         };
-        raActions.doFrame = [&]() {
+        raActions.applyPendingProgress = [&]() {
             if (raSession) {
                 (void)applyPendingProgressIfReady();
+            }
+        };
+        raActions.doFrame = [&]() {
+            if (raSession) {
                 raSession->doFrame();
             }
         };
@@ -1374,17 +1398,13 @@ int RealtimeSession::run() {
         };
 
         const auto processRaCommandsLocked = [&]() {
-            auto commands = raCommandQueue.takeAll();
-            for (auto& command : commands) {
+            processRaRuntimeCommandBatch(
+                raCommandQueue.takeAll(),
+                [&](RaRuntimeCommand& command) {
                 if (!raSession) {
                     command.wipeSecret();
-                    continue;
+                    return;
                 }
-                const std::size_t repeatCount = std::max<std::size_t>(
-                    1U,
-                    command.repeatCount
-                );
-                for (std::size_t repeat = 0; repeat < repeatCount; ++repeat) {
                 switch (command.type) {
                 case RaRuntimeCommandType::Login:
                     raSession->enqueueLogin(
@@ -1517,8 +1537,9 @@ int RealtimeSession::run() {
                 case RaRuntimeCommandType::TimelineForward:
                     if (!timeline.stepForward(gb)) {
                         gb.runFrame();
-                        raSession->doFrame();
-                        timeline.captureCurrent(gb);
+                        captureRaTimelineThisFrame = true;
+                        raLifecycle.committedFrames(1, raActions);
+                        captureRaTimelineThisFrame = false;
                         emulatedFrameCounter.fetch_add(1, std::memory_order_relaxed);
                     }
                     enqueueRawFrameLocked();
@@ -1526,8 +1547,13 @@ int RealtimeSession::run() {
                     workerUiMessages.post(frameTimelineLabel(timeline), 120);
                     break;
                 }
+                },
+                [&]() {
+                    if (raSession) {
+                        raSession->processPending();
+                    }
                 }
-            }
+            );
         };
 #endif
         std::mt19937 emuRng(std::random_device{}());

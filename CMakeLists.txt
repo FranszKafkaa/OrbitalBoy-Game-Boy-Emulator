@@ -90,6 +90,7 @@ set(GBEMU_REALTIME_SUPPORT_SOURCES
     src/app/frontend/realtime/control_bindings.cpp
     src/app/frontend/realtime/link_transport.cpp
     src/app/frontend/realtime/network_config.cpp
+    src/app/frontend/realtime/private_file_io.cpp
     src/app/frontend/realtime/retroachievements_config.cpp
     src/app/frontend/realtime/retroachievements_memory.cpp
     src/app/frontend/realtime/top_menu.cpp

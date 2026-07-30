@@ -1,5 +1,7 @@
 #include "gb/app/frontend/realtime/retroachievements_progress.hpp"
 
+#include "private_file_io.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -8,11 +10,6 @@
 #include <fstream>
 #include <system_error>
 #include <utility>
-
-#if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#endif
 
 namespace gb::frontend {
 
@@ -153,26 +150,6 @@ std::string sha256Hex(const std::vector<std::uint8_t>& input) {
     return result;
 }
 
-void removeTemporaryFile(const std::filesystem::path& path) {
-    std::error_code ignored;
-    std::filesystem::remove(path, ignored);
-}
-
-bool replaceWithTemporaryFile(
-    const std::filesystem::path& temporary,
-    const std::filesystem::path& destination
-) {
-#if defined(_WIN32)
-    return MoveFileExW(
-        temporary.c_str(),
-        destination.c_str(),
-        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
-    ) != 0;
-#else
-    return ::rename(temporary.c_str(), destination.c_str()) == 0;
-#endif
-}
-
 std::array<std::uint8_t, kHeaderSize> makeHeader(
     std::string_view romHash,
     std::uint32_t payloadSize
@@ -246,53 +223,15 @@ bool saveRetroAchievementsProgress(
         return false;
     }
 
-    const std::filesystem::path destination(path);
-    const std::filesystem::path temporary(path + ".tmp");
-    const auto parent = destination.parent_path();
-    if (!parent.empty()) {
-        std::error_code error;
-        std::filesystem::create_directories(parent, error);
-        if (error) {
-            return false;
-        }
-    }
-
     const auto header = makeHeader(romHash, static_cast<std::uint32_t>(payload.size()));
-    {
-        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            removeTemporaryFile(temporary);
-            return false;
-        }
-
-        out.write(
-            reinterpret_cast<const char*>(header.data()),
-            static_cast<std::streamsize>(header.size())
-        );
-        if (!payload.empty()) {
-            out.write(
-                reinterpret_cast<const char*>(payload.data()),
-                static_cast<std::streamsize>(payload.size())
-            );
-        }
-        out.flush();
-        if (!out) {
-            out.close();
-            removeTemporaryFile(temporary);
-            return false;
-        }
-        out.close();
-        if (out.fail()) {
-            removeTemporaryFile(temporary);
-            return false;
-        }
-    }
-
-    if (!replaceWithTemporaryFile(temporary, destination)) {
-        removeTemporaryFile(temporary);
-        return false;
-    }
-    return true;
+    std::vector<std::uint8_t> contents;
+    contents.reserve(header.size() + payload.size());
+    contents.insert(contents.end(), header.begin(), header.end());
+    contents.insert(contents.end(), payload.begin(), payload.end());
+    return detail::writePrivateFileAtomically(
+        std::filesystem::path(path),
+        contents
+    );
 }
 
 std::optional<RaStoredProgress> loadRetroAchievementsProgress(
@@ -369,17 +308,6 @@ bool saveRetroAchievementsProgressV2(
         || payload.size() > kMaximumPayloadSize) {
         return false;
     }
-    const std::filesystem::path destination(path);
-    const std::filesystem::path temporary(path + ".tmp");
-    const auto parent = destination.parent_path();
-    if (!parent.empty()) {
-        std::error_code error;
-        std::filesystem::create_directories(parent, error);
-        if (error) {
-            return false;
-        }
-    }
-
     std::array<std::uint8_t, kBoundHeaderSize> header{};
     std::copy(kMagic.begin(), kMagic.end(), header.begin());
     header[4] = kBoundVersion;
@@ -396,39 +324,14 @@ bool saveRetroAchievementsProgressV2(
             static_cast<std::uint8_t>(payloadSize >> (byte * 8U));
     }
 
-    {
-        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            removeTemporaryFile(temporary);
-            return false;
-        }
-        out.write(
-            reinterpret_cast<const char*>(header.data()),
-            static_cast<std::streamsize>(header.size())
-        );
-        if (!payload.empty()) {
-            out.write(
-                reinterpret_cast<const char*>(payload.data()),
-                static_cast<std::streamsize>(payload.size())
-            );
-        }
-        out.flush();
-        if (!out) {
-            out.close();
-            removeTemporaryFile(temporary);
-            return false;
-        }
-        out.close();
-        if (out.fail()) {
-            removeTemporaryFile(temporary);
-            return false;
-        }
-    }
-    if (!replaceWithTemporaryFile(temporary, destination)) {
-        removeTemporaryFile(temporary);
-        return false;
-    }
-    return true;
+    std::vector<std::uint8_t> contents;
+    contents.reserve(header.size() + payload.size());
+    contents.insert(contents.end(), header.begin(), header.end());
+    contents.insert(contents.end(), payload.begin(), payload.end());
+    return detail::writePrivateFileAtomically(
+        std::filesystem::path(path),
+        contents
+    );
 }
 
 std::optional<RaStoredProgress> loadRetroAchievementsProgressV2(

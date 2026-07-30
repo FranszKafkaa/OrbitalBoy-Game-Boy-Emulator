@@ -123,6 +123,27 @@ std::size_t RaRuntimeCommandQueue::size() const {
     return commands_.size();
 }
 
+void processRaRuntimeCommandBatch(
+    std::vector<RaRuntimeCommand> commands,
+    const RaRuntimeCommandExecutor& execute,
+    const std::function<void()>& processPending
+) {
+    for (auto& command : commands) {
+        const std::size_t repeatCount =
+            std::max<std::size_t>(1U, command.repeatCount);
+        for (std::size_t repeat = 0; repeat < repeatCount; ++repeat) {
+            if (execute) {
+                execute(command);
+            }
+            if ((command.type == RaRuntimeCommandType::Login
+                 || command.type == RaRuntimeCommandType::Logout)
+                && processPending) {
+                processPending();
+            }
+        }
+    }
+}
+
 void RaDeferredProgressRestore::stage(
     std::optional<RaStoredProgress> progress
 ) {
@@ -191,6 +212,7 @@ void RaRealtimeLifecycleCoordinator::committedFrames(
 ) {
     for (std::size_t index = 0; index < count; ++index) {
         callIfSet(actions.processPending);
+        callIfSet(actions.applyPendingProgress);
         callIfSet(actions.doFrame);
         callIfSet(actions.captureTimeline);
     }

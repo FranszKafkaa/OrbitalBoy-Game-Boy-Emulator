@@ -234,6 +234,73 @@ TEST_CASE("retroachievements", "progress_v2_binds_payload_to_exact_state_fingerp
     ).has_value());
 }
 
+#if !defined(_WIN32)
+TEST_CASE("retroachievements", "progress_v2_uses_private_exclusive_temporary_without_following_symlink") {
+    const auto directory = tests::makeTempPath("ra_progress_private_temp", "");
+    tests::ScopedPath cleanup(directory);
+    T_REQUIRE(std::filesystem::create_directories(directory));
+    const auto sidecar = directory / "slot.state.ra-progress";
+    const auto predictableTemporary =
+        std::filesystem::path(sidecar.string() + ".tmp");
+    const auto outside = directory / "outside";
+    T_REQUIRE(tests::writeBinaryFile(outside, {'k', 'e', 'e', 'p'}));
+    std::filesystem::create_symlink(outside, predictableTemporary);
+
+    T_REQUIRE(gb::frontend::saveRetroAchievementsProgressV2(
+        sidecar.string(),
+        "0123456789abcdef0123456789abcdef",
+        std::string(64, 'a'),
+        {1, 2, 3}
+    ));
+    T_REQUIRE(std::filesystem::is_regular_file(sidecar));
+    T_REQUIRE(!std::filesystem::is_symlink(sidecar));
+    T_REQUIRE(std::filesystem::is_symlink(predictableTemporary));
+    T_REQUIRE(tests::readBinaryFile(outside)
+        == std::vector<std::uint8_t>({'k', 'e', 'e', 'p'}));
+
+    struct stat status {};
+    T_EQ(::stat(sidecar.c_str(), &status), 0);
+    T_EQ(status.st_mode & 0777, 0600);
+}
+
+TEST_CASE("retroachievements", "progress_v2_allows_two_writers_and_cleans_unique_temporaries") {
+    const auto directory = tests::makeTempPath("ra_progress_two_writers", "");
+    tests::ScopedPath cleanup(directory);
+    T_REQUIRE(std::filesystem::create_directories(directory));
+    const auto sidecar = directory / "slot.state.ra-progress";
+    const std::string romHash = "0123456789abcdef0123456789abcdef";
+    const std::string fingerprint(64, 'b');
+    const std::vector<std::uint8_t> first(1024U * 1024U, 0x11U);
+    const std::vector<std::uint8_t> second(1024U * 1024U, 0x22U);
+    std::promise<void> release;
+    const auto ready = release.get_future().share();
+    auto firstWriter = std::async(std::launch::async, [&] {
+        ready.wait();
+        return gb::frontend::saveRetroAchievementsProgressV2(
+            sidecar.string(), romHash, fingerprint, first
+        );
+    });
+    auto secondWriter = std::async(std::launch::async, [&] {
+        ready.wait();
+        return gb::frontend::saveRetroAchievementsProgressV2(
+            sidecar.string(), romHash, fingerprint, second
+        );
+    });
+    release.set_value();
+
+    T_REQUIRE(firstWriter.get());
+    T_REQUIRE(secondWriter.get());
+    const auto loaded = gb::frontend::loadRetroAchievementsProgressV2(
+        sidecar.string(), romHash, fingerprint
+    );
+    T_REQUIRE(loaded.has_value());
+    T_REQUIRE(loaded->payload == first || loaded->payload == second);
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        T_REQUIRE(entry.path().filename().string().find(".tmp.") == std::string::npos);
+    }
+}
+#endif
+
 TEST_CASE("retroachievements", "state_fingerprint_matches_known_sha256_vectors") {
     const auto emptyPath = tests::makeTempPath("ra_sha_empty", ".state");
     const auto abcPath = tests::makeTempPath("ra_sha_abc", ".state");
@@ -517,6 +584,32 @@ TEST_CASE("retroachievements", "config_round_trips_token_without_password") {
     T_REQUIRE(actual.autoLogin);
     T_REQUIRE(actual.showNotifications);
     T_REQUIRE(readTextFile(path).find("password") == std::string::npos);
+}
+
+TEST_CASE("retroachievements", "config_parser_wipes_short_token_source_buffers") {
+    const auto path = tests::makeTempPath("ra_config_short_token_wipe", ".cfg");
+    tests::ScopedPath cleanup(path);
+    T_REQUIRE(gb::frontend::saveRetroAchievementsConfig(
+        path.string(),
+        {1, "M", "short-token", true, true}
+    ));
+    int observedBuffers = 0;
+    bool allZero = true;
+    const auto loaded = gb::frontend::loadRetroAchievementsConfig(
+        path.string(),
+        [&](const char* bytes, std::size_t size) {
+            ++observedBuffers;
+            allZero = allZero && std::all_of(
+                bytes,
+                bytes + size,
+                [](char value) { return value == '\0'; }
+            );
+        }
+    );
+
+    T_EQ(loaded.token, std::string("short-token"));
+    T_REQUIRE(observedBuffers >= 5);
+    T_REQUIRE(allZero);
 }
 
 TEST_CASE("retroachievements", "config_replaces_existing_content") {
@@ -2242,6 +2335,14 @@ TEST_CASE("retroachievements", "session_surfaces_config_persistence_failure_with
     T_REQUIRE(!snapshot.errorText.empty());
     T_REQUIRE(snapshot.errorText.find("token-not-for-errors") == std::string::npos);
     T_REQUIRE(snapshot.errorText.find("password-not-for-errors") == std::string::npos);
+    T_REQUIRE(snapshot.statusText.find("token-not-for-errors") == std::string::npos);
+    T_REQUIRE(snapshot.statusText.find("password-not-for-errors") == std::string::npos);
+    for (const auto& event : session.takeEvents()) {
+        T_REQUIRE(event.title.find("token-not-for-errors") == std::string::npos);
+        T_REQUIRE(event.detail.find("token-not-for-errors") == std::string::npos);
+        T_REQUIRE(event.title.find("password-not-for-errors") == std::string::npos);
+        T_REQUIRE(event.detail.find("password-not-for-errors") == std::string::npos);
+    }
 
     session.enqueueLogout();
     session.processPending();
@@ -2249,6 +2350,8 @@ TEST_CASE("retroachievements", "session_surfaces_config_persistence_failure_with
     T_REQUIRE(snapshot.connectionState == gb::frontend::RaConnectionState::LoggedOut);
     T_REQUIRE(!snapshot.errorText.empty());
     T_REQUIRE(snapshot.statusText.find("seguro") == std::string::npos);
+    T_REQUIRE(snapshot.errorText.find("token-not-for-errors") == std::string::npos);
+    T_REQUIRE(snapshot.statusText.find("token-not-for-errors") == std::string::npos);
     session.shutdown();
     transport.shutdown();
 }
@@ -2737,7 +2840,7 @@ TEST_CASE("retroachievements", "session_ignores_achievement_event_that_arrives_a
     transport.shutdown();
 }
 
-TEST_CASE("retroachievements", "session_do_frame_processes_game_load_before_one_runtime_frame") {
+TEST_CASE("retroachievements", "session_do_frame_does_not_drain_pending_commands") {
     gb::GameBoy gameBoy;
     gb::frontend::RaHttpTransport transport([](const auto& request) {
         return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
@@ -2751,6 +2854,12 @@ TEST_CASE("retroachievements", "session_do_frame_processes_game_load_before_one_
     gameBoy.setHardwareMode(true);
     session.doFrame();
 
+    T_EQ(api.lastGameConsole, 0U);
+    T_EQ(api.doFrameCalls, 0);
+    T_REQUIRE(!session.snapshot().gameLoaded);
+
+    session.processPending();
+    session.doFrame();
     T_EQ(api.lastGameConsole, 6U);
     T_EQ(api.doFrameCalls, 1);
     T_REQUIRE(session.snapshot().gameLoaded);
@@ -3580,6 +3689,9 @@ TEST_CASE("retroachievements", "realtime_lifecycle_preserves_owner_operation_ord
     actions.tokenLogin = [&]() { trace.push_back("token login"); };
     actions.loadGame = [&]() { trace.push_back("load game after login"); };
     actions.processPending = [&]() { trace.push_back("process pending before frame"); };
+    actions.applyPendingProgress = [&]() {
+        trace.push_back("apply pending progress before frame");
+    };
     actions.doFrame = [&]() { trace.push_back("do frame once"); };
     actions.captureTimeline = [&]() { trace.push_back("capture timeline"); };
     actions.serializeProgress = [&]() { trace.push_back("serialize before save sidecar"); };
@@ -3607,6 +3719,7 @@ TEST_CASE("retroachievements", "realtime_lifecycle_preserves_owner_operation_ord
         "token login",
         "load game after login",
         "process pending before frame",
+        "apply pending progress before frame",
         "do frame once",
         "capture timeline",
         "serialize before save sidecar",
@@ -3622,6 +3735,142 @@ TEST_CASE("retroachievements", "realtime_lifecycle_preserves_owner_operation_ord
     for (std::size_t index = 0; index < expected.size(); ++index) {
         T_EQ(trace[index], expected[index]);
     }
+}
+
+TEST_CASE("retroachievements", "realtime_command_batch_executes_login_logout_as_owner_barriers") {
+    const auto traceBatch = [](
+        gb::frontend::RaRuntimeCommandType first,
+        gb::frontend::RaRuntimeCommandType second
+    ) {
+        gb::GameBoy gameBoy;
+        gb::frontend::RaHttpTransport transport([](const auto& request) {
+            return gb::frontend::RaHttpResponse{
+                request.id, request.channel, 200, {}, {}
+            };
+        });
+        FakeRaClientApi api;
+        auto session = makeSession(gameBoy, transport, api);
+        gb::frontend::RaRuntimeCommandQueue queue(4);
+        T_REQUIRE(queue.enqueue({first, "Marcelo", "secret", 0}));
+        T_REQUIRE(queue.enqueue({second, {}, {}, 1}));
+        std::vector<std::string> trace;
+        gb::frontend::processRaRuntimeCommandBatch(
+            queue.takeAll(),
+            [&](gb::frontend::RaRuntimeCommand& command) {
+                switch (command.type) {
+                case gb::frontend::RaRuntimeCommandType::Login:
+                    trace.push_back("enqueue login");
+                    session.enqueueLogin(
+                        std::move(command.username),
+                        std::move(command.password)
+                    );
+                    break;
+                case gb::frontend::RaRuntimeCommandType::Logout:
+                    trace.push_back("enqueue logout");
+                    session.enqueueLogout();
+                    break;
+                case gb::frontend::RaRuntimeCommandType::SaveState:
+                    T_REQUIRE(
+                        first == gb::frontend::RaRuntimeCommandType::Login
+                            ? api.passwordLoginCalls == 1
+                                && session.snapshot().connectionState
+                                    == gb::frontend::RaConnectionState::LoggingIn
+                            : api.logoutCalls == 1
+                                && session.snapshot().connectionState
+                                    == gb::frontend::RaConnectionState::LoggedOut
+                    );
+                    trace.push_back("save");
+                    break;
+                case gb::frontend::RaRuntimeCommandType::LoadState:
+                    T_EQ(api.logoutCalls, 1);
+                    T_REQUIRE(
+                        session.snapshot().connectionState
+                        == gb::frontend::RaConnectionState::LoggedOut
+                    );
+                    trace.push_back("load");
+                    break;
+                case gb::frontend::RaRuntimeCommandType::TimelineBack:
+                    trace.push_back("rewind");
+                    break;
+                case gb::frontend::RaRuntimeCommandType::TimelineForward:
+                    trace.push_back("forward");
+                    break;
+                }
+            },
+            [&]() {
+                trace.push_back("process session commands");
+                session.processPending();
+            }
+        );
+        T_REQUIRE(session.shutdown());
+        transport.shutdown();
+        return trace;
+    };
+
+    T_REQUIRE(traceBatch(
+        gb::frontend::RaRuntimeCommandType::Logout,
+        gb::frontend::RaRuntimeCommandType::SaveState
+    ) == std::vector<std::string>({
+        "enqueue logout", "process session commands", "save",
+    }));
+    T_REQUIRE(traceBatch(
+        gb::frontend::RaRuntimeCommandType::Logout,
+        gb::frontend::RaRuntimeCommandType::LoadState
+    ) == std::vector<std::string>({
+        "enqueue logout", "process session commands", "load",
+    }));
+    T_REQUIRE(traceBatch(
+        gb::frontend::RaRuntimeCommandType::Login,
+        gb::frontend::RaRuntimeCommandType::SaveState
+    ) == std::vector<std::string>({
+        "enqueue login", "process session commands", "save",
+    }));
+}
+
+TEST_CASE("retroachievements", "realtime_command_batch_barrier_precedes_shutdown_drain") {
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{
+            request.id, request.channel, 200, {}, {}
+        };
+    });
+    FakeRaClientApi api;
+    auto session = makeSession(gameBoy, transport, api);
+    gb::frontend::RaRuntimeCommandQueue queue(4);
+    T_REQUIRE(queue.enqueue({gb::frontend::RaRuntimeCommandType::Logout}));
+    std::vector<std::string> trace;
+    gb::frontend::processRaRuntimeCommandBatch(
+        queue.takeAll(),
+        [&](gb::frontend::RaRuntimeCommand&) {
+            trace.push_back("enqueue logout");
+            session.enqueueLogout();
+        },
+        [&]() {
+            trace.push_back("process barrier");
+            session.processPending();
+        }
+    );
+    gb::frontend::RaLifecycleActions actions{};
+    actions.processPending = [&]() {
+        trace.push_back("process shutdown");
+        session.processPending();
+    };
+    actions.shutdownSession = [&]() {
+        T_EQ(api.logoutCalls, 1);
+        trace.push_back("shutdown");
+        T_REQUIRE(session.shutdown());
+    };
+    gb::frontend::RaRealtimeLifecycleCoordinator lifecycle;
+    lifecycle.shutdownOwner(actions);
+
+    T_REQUIRE(trace == std::vector<std::string>({
+        "enqueue logout",
+        "process barrier",
+        "process shutdown",
+        "shutdown",
+    }));
+    T_EQ(api.destroyCalls, 1);
+    transport.shutdown();
 }
 
 TEST_CASE("retroachievements", "realtime_command_queue_is_bounded_and_coalesces_key_repeat") {
@@ -3809,5 +4058,43 @@ TEST_CASE("retroachievements", "deferred_progress_waits_for_identification_and_a
     );
     T_EQ(deserializeCalls, 1);
     T_EQ(resetCalls, 0);
+    T_REQUIRE(!deferred.pending());
+}
+
+TEST_CASE("retroachievements", "committed_frame_restores_after_identification_before_do_frame") {
+    gb::frontend::RaDeferredProgressRestore deferred;
+    deferred.stage(gb::frontend::RaStoredProgress{
+        "0123456789abcdef0123456789abcdef",
+        std::string(64, 'b'),
+        {7, 8, 9},
+    });
+    gb::frontend::RaSessionSnapshot snapshot{};
+    bool restored = false;
+    int frameCalls = 0;
+    gb::frontend::RaLifecycleActions actions{};
+    actions.processPending = [&]() {
+        snapshot.connectionState = gb::frontend::RaConnectionState::Online;
+        snapshot.gameLoaded = true;
+        snapshot.romHash = "0123456789abcdef0123456789abcdef";
+    };
+    actions.applyPendingProgress = [&]() {
+        const auto result = deferred.applyIfReady(
+            snapshot,
+            [&](std::string_view, const std::vector<std::uint8_t>& payload) {
+                restored = payload == std::vector<std::uint8_t>({7, 8, 9});
+                return restored;
+            },
+            [] { return true; }
+        );
+        T_REQUIRE(result == gb::frontend::RaDeferredRestoreResult::Restored);
+    };
+    actions.doFrame = [&]() {
+        T_REQUIRE(restored);
+        ++frameCalls;
+    };
+
+    gb::frontend::RaRealtimeLifecycleCoordinator lifecycle;
+    lifecycle.committedFrames(1, actions);
+    T_EQ(frameCalls, 1);
     T_REQUIRE(!deferred.pending());
 }
