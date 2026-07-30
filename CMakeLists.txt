@@ -186,7 +186,7 @@ if (GBEMU_ENABLE_RETROACHIEVEMENTS)
     target_include_directories(gbfrontend_support PRIVATE third_party/rcheevos/src)
     target_link_libraries(gbfrontend_support PUBLIC rcheevos CURL::libcurl)
     if (WIN32)
-        target_link_libraries(gbfrontend_support PRIVATE advapi32)
+        target_link_libraries(gbfrontend_support PRIVATE advapi32 bcrypt)
     endif()
     target_compile_definitions(gbfrontend_support PUBLIC
         GBEMU_ENABLE_RETROACHIEVEMENTS=1

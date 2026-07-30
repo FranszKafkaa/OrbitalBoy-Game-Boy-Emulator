@@ -22,6 +22,18 @@ constexpr const char* requestFailedError = "Unable to complete the HTTP request.
 constexpr const char* responseTooLargeError = "HTTP response exceeded the 4 MiB limit.";
 constexpr const char* statusError = "HTTP request returned a non-success status.";
 
+const char* redirectProtocols(const RaHttpRequestPolicy& policy) {
+    return policy.redirectProtocols == RaHttpRedirectProtocols::HttpsOnly ? "https" : "http,https";
+}
+
+#if LIBCURL_VERSION_NUM < 0x075500
+long redirectProtocolMask(const RaHttpRequestPolicy& policy) {
+    return policy.redirectProtocols == RaHttpRedirectProtocols::HttpsOnly
+        ? CURLPROTO_HTTPS
+        : CURLPROTO_HTTP | CURLPROTO_HTTPS;
+}
+#endif
+
 bool startsWithIgnoringCase(const std::string& value, const char* prefix) {
     const std::size_t prefixLength = std::char_traits<char>::length(prefix);
     if (value.size() < prefixLength) {
@@ -137,10 +149,10 @@ RaHttpResponse executeWithCurl(const RaHttpRequest& request) {
         && curl_easy_setopt(curl, CURLOPT_USERAGENT, "OrbitalBoy/RetroAchievements-MVP") == CURLE_OK
 #if LIBCURL_VERSION_NUM >= 0x075500
         && curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https") == CURLE_OK
-        && curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https") == CURLE_OK
+        && curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, redirectProtocols(policy)) == CURLE_OK
 #else
         && curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS) == CURLE_OK
-        && curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS) == CURLE_OK
+        && curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, redirectProtocolMask(policy)) == CURLE_OK
 #endif
         && curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, appendCurlBody) == CURLE_OK
@@ -190,9 +202,12 @@ RaHttpExecutor resolveExecutor(RaHttpExecutor executor) {
 
 RaHttpRequestPolicy makeRaHttpRequestPolicy(const RaHttpRequest& request) {
     if (request.postData.empty()) {
-        return {RaHttpMethod::Get, 1L, 3L};
+        const auto protocols = request.channel == RaHttpChannel::Image
+            ? RaHttpRedirectProtocols::HttpsOnly
+            : RaHttpRedirectProtocols::HttpAndHttps;
+        return {RaHttpMethod::Get, 1L, 3L, protocols};
     }
-    return {RaHttpMethod::Post, 0L, 3L};
+    return {RaHttpMethod::Post, 0L, 3L, RaHttpRedirectProtocols::HttpAndHttps};
 }
 
 class RaHttpTransport::Impl {

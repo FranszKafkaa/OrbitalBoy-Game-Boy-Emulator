@@ -697,6 +697,193 @@ TEST_CASE("retroachievements", "image_cache_maps_existing_paths_onto_snapshot_wi
     transport.shutdown();
 }
 
+TEST_CASE("retroachievements", "image_cache_ignores_completion_owned_by_a_shutdown_instance") {
+    const auto firstDirectory = tests::makeTempPath("ra_image_cache_first", "");
+    const auto secondDirectory = tests::makeTempPath("ra_image_cache_second", "");
+    tests::ScopedPath firstCleanup(firstDirectory);
+    tests::ScopedPath secondCleanup(secondDirectory);
+    std::filesystem::create_directories(firstDirectory);
+    std::filesystem::create_directories(secondDirectory);
+    const std::string firstUrl = "https://example.invalid/first.png";
+    const std::string secondUrl = "https://example.invalid/second.jpg";
+    std::promise<void> releaseFirst;
+    std::shared_future<void> firstReleased = releaseFirst.get_future().share();
+    std::atomic<bool> firstStarted = false;
+    gb::frontend::RaHttpTransport transport([&](const auto& request) {
+        if (request.url == firstUrl) {
+            firstStarted = true;
+            firstReleased.wait();
+            return gb::frontend::RaHttpResponse{request.id, request.channel, 200, pngImage(), {}};
+        }
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, jpegImage(), {}};
+    });
+    gb::frontend::RetroAchievementsImageCache first(transport, firstDirectory.string());
+    first.request(firstUrl);
+    const auto startedDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!firstStarted.load() && std::chrono::steady_clock::now() < startedDeadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    T_REQUIRE(firstStarted.load());
+    first.shutdown();
+
+    gb::frontend::RetroAchievementsImageCache second(transport, secondDirectory.string());
+    second.request(secondUrl);
+    releaseFirst.set_value();
+    const auto secondPath = waitForCachedImage(second, secondUrl);
+
+    T_REQUIRE(secondPath.has_value());
+    T_EQ(std::filesystem::path(*secondPath).extension().string(), std::string(".jpg"));
+    T_REQUIRE(tests::readBinaryFile(*secondPath) == jpegImage());
+    second.shutdown();
+    transport.shutdown();
+}
+
+#if !defined(_WIN32)
+TEST_CASE("retroachievements", "image_cache_rejects_symlinked_entries_and_never_uses_predictable_temporary_names") {
+    const auto cacheDirectory = tests::makeTempPath("ra_image_cache_symlink", "");
+    tests::ScopedPath cleanup(cacheDirectory);
+    std::filesystem::create_directories(cacheDirectory);
+    const std::string url = "https://example.invalid/symlink.png";
+    const auto outsidePath = cacheDirectory / "outside.png";
+    const auto finalPath = cacheDirectory / (gb::frontend::cacheKey(url) + ".png");
+    const auto predictableTemporary = cacheDirectory / (gb::frontend::cacheKey(url) + ".png.tmp.1");
+    const std::vector<std::uint8_t> protectedBytes{'p', 'r', 'o', 't', 'e', 'c', 't', 'e', 'd'};
+    T_REQUIRE(tests::writeBinaryFile(outsidePath, protectedBytes));
+    std::filesystem::create_symlink(outsidePath, finalPath);
+    std::filesystem::create_symlink(outsidePath, predictableTemporary);
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, pngImage(), {}};
+    });
+    gb::frontend::RetroAchievementsImageCache cache(transport, cacheDirectory.string());
+
+    T_REQUIRE(!cache.localPath(url).has_value());
+    cache.request(url);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        cache.processCompleted();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    T_REQUIRE(std::filesystem::is_symlink(finalPath));
+    T_REQUIRE(std::filesystem::is_symlink(predictableTemporary));
+    T_REQUIRE(tests::readBinaryFile(outsidePath) == protectedBytes);
+    cache.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "image_cache_does_not_follow_a_symlinked_cache_directory") {
+    const auto root = tests::makeTempPath("ra_image_cache_directory_link", "");
+    tests::ScopedPath cleanup(root);
+    const auto outsideDirectory = root / "outside";
+    const auto cacheDirectory = root / "cache";
+    std::filesystem::create_directories(outsideDirectory);
+    std::filesystem::create_symlink(outsideDirectory, cacheDirectory);
+    std::atomic<int> requests = 0;
+    gb::frontend::RaHttpTransport transport([&](const auto& request) {
+        ++requests;
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, pngImage(), {}};
+    });
+    gb::frontend::RetroAchievementsImageCache cache(transport, cacheDirectory.string());
+    const std::string url = "https://example.invalid/cache-directory-link.png";
+
+    cache.request(url);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        cache.processCompleted();
+        if (cache.localPath(url).has_value() || !std::filesystem::is_empty(outsideDirectory)) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    T_EQ(requests.load(), 1);
+    T_REQUIRE(!cache.localPath(url).has_value());
+    T_REQUIRE(std::filesystem::is_empty(outsideDirectory));
+    cache.shutdown();
+    transport.shutdown();
+}
+#endif
+
+TEST_CASE("retroachievements", "image_cache_cleans_unique_temporary_after_destination_collision") {
+    const auto cacheDirectory = tests::makeTempPath("ra_image_cache_collision", "");
+    tests::ScopedPath cleanup(cacheDirectory);
+    std::filesystem::create_directories(cacheDirectory);
+    const std::string url = "https://example.invalid/collision.png";
+    const auto finalPath = cacheDirectory / (gb::frontend::cacheKey(url) + ".png");
+    T_REQUIRE(std::filesystem::create_directories(finalPath));
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, pngImage(), {}};
+    });
+    gb::frontend::RetroAchievementsImageCache cache(transport, cacheDirectory.string());
+
+    cache.request(url);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        cache.processCompleted();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    T_REQUIRE(std::filesystem::is_directory(finalPath));
+    for (const auto& entry : std::filesystem::directory_iterator(cacheDirectory)) {
+        T_REQUIRE(entry.path().filename().string().find(".tmp.") == std::string::npos);
+    }
+    cache.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "image_cache_leaves_cache_directory_file_unchanged_when_creation_fails") {
+    const auto cacheDirectory = tests::makeTempPath("ra_image_cache_create_failure", "");
+    tests::ScopedPath cleanup(cacheDirectory);
+    const std::vector<std::uint8_t> original{'n', 'o', 't', '-', 'a', '-', 'd', 'i', 'r'};
+    T_REQUIRE(tests::writeBinaryFile(cacheDirectory, original));
+    std::atomic<int> requests = 0;
+    gb::frontend::RaHttpTransport transport([&](const auto& request) {
+        ++requests;
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, pngImage(), {}};
+    });
+    gb::frontend::RetroAchievementsImageCache cache(transport, cacheDirectory.string());
+    const std::string url = "https://example.invalid/create-failure.png";
+
+    cache.request(url);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (requests.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+        cache.processCompleted();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    cache.processCompleted();
+
+    T_EQ(requests.load(), 1);
+    T_REQUIRE(!cache.localPath(url).has_value());
+    T_REQUIRE(tests::readBinaryFile(cacheDirectory) == original);
+    cache.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "image_cache_preserves_a_valid_file_when_no_refresh_is_needed") {
+    const auto cacheDirectory = tests::makeTempPath("ra_image_cache_preserve", "");
+    tests::ScopedPath cleanup(cacheDirectory);
+    std::filesystem::create_directories(cacheDirectory);
+    const std::string url = "https://example.invalid/preserve.png";
+    const auto finalPath = cacheDirectory / (gb::frontend::cacheKey(url) + ".png");
+    const auto original = pngImage();
+    T_REQUIRE(tests::writeBinaryFile(finalPath, original));
+    std::atomic<int> requests = 0;
+    gb::frontend::RaHttpTransport transport([&](const auto& request) {
+        ++requests;
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {'n', 'o', 'p', 'e'}, {}};
+    });
+    gb::frontend::RetroAchievementsImageCache cache(transport, cacheDirectory.string());
+
+    cache.request(url);
+    cache.processCompleted();
+
+    T_EQ(requests.load(), 0);
+    T_REQUIRE(cache.localPath(url).has_value());
+    T_REQUIRE(tests::readBinaryFile(finalPath) == original);
+    cache.shutdown();
+    transport.shutdown();
+}
+
 TEST_CASE("retroachievements", "http_returns_completions_only_when_drained") {
     gb::frontend::RaHttpTransport transport([](const auto& request) {
         return gb::frontend::RaHttpResponse{
@@ -723,9 +910,13 @@ TEST_CASE("retroachievements", "http_redirect_policy_follows_only_get_requests")
     const gb::frontend::RaHttpRequest postRequest{
         2, gb::frontend::RaHttpChannel::Api, "https://example.invalid/post", "password=secret"
     };
+    const gb::frontend::RaHttpRequest imageRequest{
+        3, gb::frontend::RaHttpChannel::Image, "https://example.invalid/image", {}
+    };
 
     const auto getPolicy = gb::frontend::makeRaHttpRequestPolicy(getRequest);
     const auto postPolicy = gb::frontend::makeRaHttpRequestPolicy(postRequest);
+    const auto imagePolicy = gb::frontend::makeRaHttpRequestPolicy(imageRequest);
 
     T_REQUIRE(getPolicy.method == gb::frontend::RaHttpMethod::Get);
     T_EQ(getPolicy.followLocation, 1L);
@@ -733,6 +924,10 @@ TEST_CASE("retroachievements", "http_redirect_policy_follows_only_get_requests")
     T_REQUIRE(postPolicy.method == gb::frontend::RaHttpMethod::Post);
     T_EQ(postPolicy.followLocation, 0L);
     T_EQ(postPolicy.maxRedirects, 3L);
+    T_REQUIRE(getPolicy.redirectProtocols == gb::frontend::RaHttpRedirectProtocols::HttpAndHttps);
+    T_REQUIRE(imagePolicy.method == gb::frontend::RaHttpMethod::Get);
+    T_EQ(imagePolicy.followLocation, 1L);
+    T_REQUIRE(imagePolicy.redirectProtocols == gb::frontend::RaHttpRedirectProtocols::HttpsOnly);
 }
 
 TEST_CASE("retroachievements", "http_draining_image_preserves_api_completions") {

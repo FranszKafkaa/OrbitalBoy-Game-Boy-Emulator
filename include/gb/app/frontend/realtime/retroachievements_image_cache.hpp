@@ -32,7 +32,6 @@ public:
 private:
     RaHttpTransport& transport_;
     std::string cacheDirectory_;
-    std::uint64_t nextRequestId_ = 1;
     bool stopping_ = false;
 
     struct State;

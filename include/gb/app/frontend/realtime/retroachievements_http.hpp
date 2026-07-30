@@ -35,10 +35,16 @@ enum class RaHttpMethod {
     Post,
 };
 
+enum class RaHttpRedirectProtocols {
+    HttpAndHttps,
+    HttpsOnly,
+};
+
 struct RaHttpRequestPolicy {
     RaHttpMethod method = RaHttpMethod::Get;
     long followLocation = 1L;
     long maxRedirects = 3L;
+    RaHttpRedirectProtocols redirectProtocols = RaHttpRedirectProtocols::HttpAndHttps;
 };
 
 [[nodiscard]] RaHttpRequestPolicy makeRaHttpRequestPolicy(const RaHttpRequest& request);
