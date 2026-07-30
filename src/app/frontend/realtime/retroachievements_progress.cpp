@@ -173,9 +173,15 @@ std::optional<RaStoredProgress> loadRetroAchievementsProgress(
         return std::nullopt;
     }
 
-    std::error_code sizeError;
-    const auto fileSize = std::filesystem::file_size(path, sizeError);
-    if (sizeError || fileSize != kHeaderSize + static_cast<std::uintmax_t>(payloadSize)) {
+    const std::streamoff expectedSize =
+        static_cast<std::streamoff>(kHeaderSize) + static_cast<std::streamoff>(payloadSize);
+    in.seekg(0, std::ios::end);
+    const std::streampos fileEnd = in.tellg();
+    if (!in || fileEnd != std::streampos(expectedSize)) {
+        return std::nullopt;
+    }
+    in.seekg(static_cast<std::streamoff>(kHeaderSize), std::ios::beg);
+    if (!in) {
         return std::nullopt;
     }
 

@@ -13,6 +13,10 @@
 #include <thread>
 #include <vector>
 
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#endif
+
 #include "gb/app/frontend/realtime/retroachievements_config.hpp"
 #include "gb/app/frontend/realtime/retroachievements_http.hpp"
 #include "gb/app/frontend/realtime/retroachievements_memory.hpp"
@@ -127,6 +131,43 @@ TEST_CASE("retroachievements", "progress_sidecar_round_trips_exact_versioned_for
     T_REQUIRE(loaded->payload == payload);
 }
 
+TEST_CASE("retroachievements", "progress_sidecar_replaces_existing_content") {
+    const std::string path = tempFilePath("slot.state.ra-progress");
+    tests::ScopedPath cleanup(path);
+    tests::ScopedPath temporaryCleanup(path + ".tmp");
+    const std::string firstHash = "0123456789abcdef0123456789abcdef";
+    const std::string secondHash = "fedcba9876543210fedcba9876543210";
+
+    T_REQUIRE(gb::frontend::saveRetroAchievementsProgress(path, firstHash, {1, 2, 3, 4}));
+    T_REQUIRE(gb::frontend::saveRetroAchievementsProgress(path, secondHash, {5, 6}));
+
+    T_REQUIRE(!gb::frontend::loadRetroAchievementsProgress(path, firstHash).has_value());
+    const auto loaded = gb::frontend::loadRetroAchievementsProgress(path, secondHash);
+    T_REQUIRE(loaded.has_value());
+    T_EQ(loaded->romHash, secondHash);
+    T_REQUIRE(loaded->payload == std::vector<std::uint8_t>({5, 6}));
+
+    std::vector<std::uint8_t> expected{'O', 'B', 'R', 'A', 1};
+    expected.insert(expected.end(), secondHash.begin(), secondHash.end());
+    expected.insert(expected.end(), {2, 0, 0, 0, 5, 6});
+    T_REQUIRE(tests::readBinaryFile(path) == expected);
+}
+
+TEST_CASE("retroachievements", "progress_sidecar_accepts_payload_at_one_mib_limit") {
+    const std::string path = tempFilePath("slot.state.ra-progress");
+    tests::ScopedPath cleanup(path);
+    tests::ScopedPath temporaryCleanup(path + ".tmp");
+    const std::string hash = "0123456789abcdef0123456789abcdef";
+    const std::vector<std::uint8_t> payload(1024U * 1024U, 0xA5);
+
+    T_REQUIRE(gb::frontend::saveRetroAchievementsProgress(path, hash, payload));
+    const auto loaded = gb::frontend::loadRetroAchievementsProgress(path, hash);
+    T_REQUIRE(loaded.has_value());
+    T_EQ(loaded->payload.size(), payload.size());
+    T_EQ(loaded->payload.front(), 0xA5);
+    T_EQ(loaded->payload.back(), 0xA5);
+}
+
 TEST_CASE("retroachievements", "progress_sidecar_rejects_wrong_magic") {
     const std::string path = tempFilePath("slot.state.ra-progress");
     tests::ScopedPath cleanup(path);
@@ -164,11 +205,37 @@ TEST_CASE("retroachievements", "progress_sidecar_rejects_other_rom_hash") {
     ).has_value());
 }
 
+TEST_CASE("retroachievements", "progress_sidecar_rejects_truncated_header") {
+    const std::string path = tempFilePath("slot.state.ra-progress");
+    tests::ScopedPath cleanup(path);
+    auto bytes = validProgressSidecar();
+    bytes.resize(40);
+    T_REQUIRE(tests::writeBinaryFile(path, bytes));
+
+    T_REQUIRE(!gb::frontend::loadRetroAchievementsProgress(
+        path,
+        "0123456789abcdef0123456789abcdef"
+    ).has_value());
+}
+
 TEST_CASE("retroachievements", "progress_sidecar_rejects_truncated_payload") {
     const std::string path = tempFilePath("slot.state.ra-progress");
     tests::ScopedPath cleanup(path);
     auto bytes = validProgressSidecar();
     bytes.pop_back();
+    T_REQUIRE(tests::writeBinaryFile(path, bytes));
+
+    T_REQUIRE(!gb::frontend::loadRetroAchievementsProgress(
+        path,
+        "0123456789abcdef0123456789abcdef"
+    ).has_value());
+}
+
+TEST_CASE("retroachievements", "progress_sidecar_rejects_bytes_after_declared_payload") {
+    const std::string path = tempFilePath("slot.state.ra-progress");
+    tests::ScopedPath cleanup(path);
+    auto bytes = validProgressSidecar();
+    bytes.push_back(5);
     T_REQUIRE(tests::writeBinaryFile(path, bytes));
 
     T_REQUIRE(!gb::frontend::loadRetroAchievementsProgress(
@@ -233,6 +300,43 @@ TEST_CASE("retroachievements", "progress_sidecar_removes_temporary_when_replace_
     T_REQUIRE(std::filesystem::is_directory(path));
     T_REQUIRE(!std::filesystem::exists(path + ".tmp"));
 }
+
+#if !defined(_WIN32)
+TEST_CASE("retroachievements", "progress_sidecar_validates_size_from_open_stream") {
+    const auto directory = tests::makeTempPath("ra_progress_stream_identity", "");
+    tests::ScopedPath cleanup(directory);
+    T_REQUIRE(std::filesystem::create_directories(directory));
+    const auto fifoPath = directory / "opened-sidecar";
+    const auto replacementPath = directory / "replacement-sidecar";
+    const auto sidecarPath = directory / "slot.state.ra-progress";
+    const auto nextLinkPath = directory / "next-link";
+    const auto bytes = validProgressSidecar();
+
+    T_EQ(::mkfifo(fifoPath.c_str(), 0600), 0);
+    T_REQUIRE(tests::writeBinaryFile(replacementPath, bytes));
+    std::filesystem::create_symlink(fifoPath, sidecarPath);
+
+    auto load = std::async(std::launch::async, [&] {
+        return gb::frontend::loadRetroAchievementsProgress(
+            sidecarPath.string(),
+            "0123456789abcdef0123456789abcdef"
+        );
+    });
+
+    std::ofstream openedStreamWriter(fifoPath, std::ios::binary);
+    T_REQUIRE(openedStreamWriter.is_open());
+    std::filesystem::create_symlink(replacementPath, nextLinkPath);
+    std::filesystem::rename(nextLinkPath, sidecarPath);
+    openedStreamWriter.write(
+        reinterpret_cast<const char*>(bytes.data()),
+        static_cast<std::streamsize>(bytes.size())
+    );
+    openedStreamWriter.close();
+
+    T_REQUIRE(load.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    T_REQUIRE(!load.get().has_value());
+}
+#endif
 
 TEST_CASE("retroachievements", "config_round_trips_token_without_password") {
     const auto path = tests::makeTempPath("ra_config", ".cfg");
