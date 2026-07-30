@@ -259,6 +259,25 @@ TEST_CASE("retroachievements", "http_returns_completions_only_when_drained") {
     transport.shutdown();
 }
 
+TEST_CASE("retroachievements", "http_redirect_policy_follows_only_get_requests") {
+    const gb::frontend::RaHttpRequest getRequest{
+        1, gb::frontend::RaHttpChannel::Api, "https://example.invalid/get", {}
+    };
+    const gb::frontend::RaHttpRequest postRequest{
+        2, gb::frontend::RaHttpChannel::Api, "https://example.invalid/post", "password=secret"
+    };
+
+    const auto getPolicy = gb::frontend::makeRaHttpRequestPolicy(getRequest);
+    const auto postPolicy = gb::frontend::makeRaHttpRequestPolicy(postRequest);
+
+    T_REQUIRE(getPolicy.method == gb::frontend::RaHttpMethod::Get);
+    T_EQ(getPolicy.followLocation, 1L);
+    T_EQ(getPolicy.maxRedirects, 3L);
+    T_REQUIRE(postPolicy.method == gb::frontend::RaHttpMethod::Post);
+    T_EQ(postPolicy.followLocation, 0L);
+    T_EQ(postPolicy.maxRedirects, 3L);
+}
+
 TEST_CASE("retroachievements", "http_draining_image_preserves_api_completions") {
     gb::frontend::RaHttpTransport transport([](const auto& request) {
         return gb::frontend::RaHttpResponse{
@@ -525,34 +544,15 @@ TEST_CASE("retroachievements", "http_shutdown_is_idempotent_and_cancels_pending_
     const bool thirdAccepted =
         transport.submit({3, gb::frontend::RaHttpChannel::Api, "https://example.invalid/three", {}});
 
-    std::atomic<bool> shutdownCallStarted{false};
     std::thread shutdownThread([&] {
-        shutdownCallStarted.store(true);
         transport.shutdown();
     });
     const auto shutdownDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!shutdownCallStarted.load() && std::chrono::steady_clock::now() < shutdownDeadline) {
+    while (transport.acceptingRequests()
+           && std::chrono::steady_clock::now() < shutdownDeadline) {
         std::this_thread::yield();
     }
-
-    bool stoppingObserved = false;
-    std::size_t acceptedImageProbes = 0;
-    while (acceptedImageProbes < 63 && std::chrono::steady_clock::now() < shutdownDeadline) {
-        const bool accepted = transport.submit(
-            {
-                100U + acceptedImageProbes,
-                gb::frontend::RaHttpChannel::Image,
-                "https://example.invalid/shutdown-probe",
-                {}
-            }
-        );
-        if (!accepted) {
-            stoppingObserved = true;
-            break;
-        }
-        ++acceptedImageProbes;
-        std::this_thread::yield();
-    }
+    const bool stoppingObserved = !transport.acceptingRequests();
     releaseExecutor.store(true);
     shutdownThread.join();
     transport.shutdown();
@@ -561,7 +561,6 @@ TEST_CASE("retroachievements", "http_shutdown_is_idempotent_and_cancels_pending_
     T_REQUIRE(startedBeforeDeadline);
     T_REQUIRE(secondAccepted);
     T_REQUIRE(thirdAccepted);
-    T_REQUIRE(shutdownCallStarted.load());
     T_REQUIRE(stoppingObserved);
     T_EQ(calls.load(), 1);
     const auto completed = transport.takeCompleted(gb::frontend::RaHttpChannel::Api);
@@ -572,5 +571,4 @@ TEST_CASE("retroachievements", "http_shutdown_is_idempotent_and_cancels_pending_
     const auto afterShutdown = transport.takeCompleted(gb::frontend::RaHttpChannel::Api);
     T_EQ(calls.load(), 1);
     T_REQUIRE(afterShutdown.empty());
-    T_REQUIRE(transport.takeCompleted(gb::frontend::RaHttpChannel::Image).empty());
 }

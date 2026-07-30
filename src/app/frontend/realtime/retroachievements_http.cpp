@@ -125,12 +125,13 @@ RaHttpResponse executeWithCurl(const RaHttpRequest& request) {
     }
 
     CurlResponseBuffer buffer;
+    const RaHttpRequestPolicy policy = makeRaHttpRequestPolicy(request);
     const bool configured =
         curl_easy_setopt(curl, CURLOPT_URL, request.url.c_str()) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 5000L) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 15000L) == CURLE_OK
-        && curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L) == CURLE_OK
-        && curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L) == CURLE_OK
+        && curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, policy.followLocation) == CURLE_OK
+        && curl_easy_setopt(curl, CURLOPT_MAXREDIRS, policy.maxRedirects) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_USERAGENT, "OrbitalBoy/RetroAchievements-MVP") == CURLE_OK
@@ -146,7 +147,7 @@ RaHttpResponse executeWithCurl(const RaHttpRequest& request) {
         && curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer) == CURLE_OK;
 
     bool requestConfigured = configured;
-    if (requestConfigured && request.postData.empty()) {
+    if (requestConfigured && policy.method == RaHttpMethod::Get) {
         requestConfigured = curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L) == CURLE_OK;
     } else if (requestConfigured) {
         requestConfigured =
@@ -187,6 +188,13 @@ RaHttpExecutor resolveExecutor(RaHttpExecutor executor) {
 
 } // namespace
 
+RaHttpRequestPolicy makeRaHttpRequestPolicy(const RaHttpRequest& request) {
+    if (request.postData.empty()) {
+        return {RaHttpMethod::Get, 1L, 3L};
+    }
+    return {RaHttpMethod::Post, 0L, 3L};
+}
+
 class RaHttpTransport::Impl {
 public:
     explicit Impl(RaHttpExecutor executor)
@@ -224,6 +232,11 @@ public:
         }
         outstandingByChannel_[index] -= matching.size();
         return matching;
+    }
+
+    bool acceptingRequests() const {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        return !stopping_;
     }
 
     void shutdown() {
@@ -278,7 +291,7 @@ private:
     }
 
     RaHttpExecutor executor_;
-    std::mutex queueMutex_;
+    mutable std::mutex queueMutex_;
     std::condition_variable pendingCondition_;
     std::deque<RaHttpRequest> pending_;
     std::array<std::deque<RaHttpResponse>, 2> completedByChannel_;
@@ -304,6 +317,10 @@ bool RaHttpTransport::submit(RaHttpRequest request) {
 
 std::vector<RaHttpResponse> RaHttpTransport::takeCompleted(RaHttpChannel channel) {
     return impl_->takeCompleted(channel);
+}
+
+bool RaHttpTransport::acceptingRequests() const {
+    return impl_->acceptingRequests();
 }
 
 void RaHttpTransport::shutdown() {

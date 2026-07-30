@@ -30,6 +30,19 @@ struct RaHttpResponse {
 
 using RaHttpExecutor = std::function<RaHttpResponse(const RaHttpRequest&)>;
 
+enum class RaHttpMethod {
+    Get,
+    Post,
+};
+
+struct RaHttpRequestPolicy {
+    RaHttpMethod method = RaHttpMethod::Get;
+    long followLocation = 1L;
+    long maxRedirects = 3L;
+};
+
+[[nodiscard]] RaHttpRequestPolicy makeRaHttpRequestPolicy(const RaHttpRequest& request);
+
 class RaHttpTransport {
 public:
     RaHttpTransport();
@@ -43,6 +56,7 @@ public:
 
     [[nodiscard]] bool submit(RaHttpRequest request);
     [[nodiscard]] std::vector<RaHttpResponse> takeCompleted(RaHttpChannel channel);
+    [[nodiscard]] bool acceptingRequests() const;
     void shutdown();
 
 private:
