@@ -1,4 +1,4 @@
-#include "private_file_io.hpp"
+#include "gb/app/frontend/realtime/private_file_io.hpp"
 
 #include <atomic>
 #include <cerrno>
@@ -13,6 +13,12 @@
 #else
 #include <fcntl.h>
 #include <sys/stat.h>
+#if defined(__APPLE__)
+#include <sys/stdio.h>
+#elif defined(__linux__)
+#include <linux/fs.h>
+#include <sys/syscall.h>
+#endif
 #include <unistd.h>
 #endif
 
@@ -21,13 +27,22 @@ namespace {
 
 constexpr int kTemporaryFileAttempts = 32;
 
-enum class TemporaryWriteResult {
-    Success,
-    Collision,
-    Failed,
-};
+std::filesystem::path parentDirectory(const std::filesystem::path& path) {
+    const auto parent = path.parent_path();
+    return parent.empty() ? std::filesystem::path(".") : parent;
+}
 
-std::filesystem::path temporarySiblingPath(
+void trace(
+    const PrivateFileIoHooks* hooks,
+    PrivateFileIoEvent event,
+    const std::filesystem::path& path
+) {
+    if (hooks && hooks->trace) {
+        hooks->trace(event, path);
+    }
+}
+
+std::filesystem::path defaultTemporaryPath(
     const std::filesystem::path& destination
 ) {
     static std::atomic<std::uint64_t> counter{0};
@@ -35,13 +50,27 @@ std::filesystem::path temporarySiblingPath(
     std::ostringstream suffix;
     suffix << std::hex << generator() << '.'
            << counter.fetch_add(1, std::memory_order_relaxed);
-    return destination.parent_path()
+    return parentDirectory(destination)
         / (destination.filename().string() + ".tmp." + suffix.str());
 }
 
-void removeTemporaryFile(const std::filesystem::path& temporary) {
-    std::error_code ignored;
-    std::filesystem::remove(temporary, ignored);
+std::filesystem::path temporaryPath(
+    const std::filesystem::path& destination,
+    int attempt,
+    const PrivateFileIoHooks* hooks
+) {
+    return hooks && hooks->chooseTemporaryPath
+        ? hooks->chooseTemporaryPath(destination, attempt)
+        : defaultTemporaryPath(destination);
+}
+
+bool isSibling(
+    const std::filesystem::path& path,
+    const std::filesystem::path& destination
+) {
+    return !path.filename().empty()
+        && parentDirectory(path).lexically_normal()
+            == parentDirectory(destination).lexically_normal();
 }
 
 #if defined(_WIN32)
@@ -155,70 +184,134 @@ private:
     bool valid_ = false;
 };
 
-TemporaryWriteResult writeExclusivePrivateTemporary(
-    const std::filesystem::path& path,
-    const std::uint8_t* contents,
-    std::size_t size
+bool syncDirectory(
+    const std::filesystem::path& directory,
+    const PrivateFileIoHooks* hooks
 ) {
-    const CurrentUserOnlySecurityAttributes securityAttributes;
-    if (securityAttributes.get() == nullptr) {
-        return TemporaryWriteResult::Failed;
-    }
-    HANDLE handle = CreateFileW(
-        path.wstring().c_str(),
-        GENERIC_WRITE,
-        0,
-        securityAttributes.get(),
-        CREATE_NEW,
-        FILE_ATTRIBUTE_NORMAL,
-        nullptr
+    const bool synced = !hooks || !hooks->syncDirectory
+        || hooks->syncDirectory(directory);
+    trace(
+        hooks,
+        synced
+            ? PrivateFileIoEvent::DirectorySynced
+            : PrivateFileIoEvent::DirectorySyncFailed,
+        directory
     );
-    if (handle == INVALID_HANDLE_VALUE) {
-        const DWORD error = GetLastError();
-        return error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS
-            ? TemporaryWriteResult::Collision
-            : TemporaryWriteResult::Failed;
-    }
-    std::size_t offset = 0;
-    bool wrote = true;
-    while (offset < size) {
-        const std::size_t remaining = size - offset;
-        const DWORD chunk = remaining > 0xFFFFFFFFULL
-            ? 0xFFFFFFFFU
-            : static_cast<DWORD>(remaining);
-        DWORD written = 0;
-        if (!WriteFile(
-                handle,
-                contents + offset,
-                chunk,
-                &written,
-                nullptr
-            )
-            || written == 0U) {
-            wrote = false;
-            break;
-        }
-        offset += written;
-    }
-    const bool flushed = wrote && FlushFileBuffers(handle) != 0;
-    const bool closed = CloseHandle(handle) != 0;
-    return flushed && closed
-        ? TemporaryWriteResult::Success
-        : TemporaryWriteResult::Failed;
+    return synced;
 }
 
-bool replaceWithTemporaryFile(
-    const std::filesystem::path& temporary,
-    const std::filesystem::path& destination
+bool writeWindows(
+    const std::filesystem::path& destination,
+    const std::uint8_t* contents,
+    std::size_t size,
+    const PrivateFileIoHooks* hooks
 ) {
-    return MoveFileExW(
-        temporary.wstring().c_str(),
-        destination.wstring().c_str(),
-        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
-    ) != 0;
+    const CurrentUserOnlySecurityAttributes securityAttributes;
+    if (!securityAttributes.get()) {
+        return false;
+    }
+    for (int attempt = 0; attempt < kTemporaryFileAttempts; ++attempt) {
+        const auto temporary = temporaryPath(destination, attempt, hooks);
+        if (!isSibling(temporary, destination)) {
+            return false;
+        }
+        HANDLE handle = CreateFileW(
+            temporary.wstring().c_str(),
+            GENERIC_WRITE,
+            0,
+            securityAttributes.get(),
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr
+        );
+        if (handle == INVALID_HANDLE_VALUE) {
+            const DWORD error = GetLastError();
+            if (error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS) {
+                continue;
+            }
+            return false;
+        }
+        trace(hooks, PrivateFileIoEvent::TemporaryCreated, temporary);
+        std::size_t offset = 0;
+        bool wrote = true;
+        while (offset < size) {
+            const std::size_t remaining = size - offset;
+            const DWORD chunk = remaining > 0xFFFFFFFFULL
+                ? 0xFFFFFFFFU
+                : static_cast<DWORD>(remaining);
+            DWORD written = 0;
+            if (!WriteFile(
+                    handle,
+                    contents + offset,
+                    chunk,
+                    &written,
+                    nullptr
+                )
+                || written == 0U) {
+                wrote = false;
+                break;
+            }
+            offset += written;
+        }
+        const bool flushed = wrote && FlushFileBuffers(handle) != 0;
+        if (flushed) {
+            trace(hooks, PrivateFileIoEvent::TemporarySynced, temporary);
+        }
+        const bool closed = CloseHandle(handle) != 0;
+        if (!flushed || !closed) {
+            std::error_code ignored;
+            std::filesystem::remove(temporary, ignored);
+            return false;
+        }
+        if (!MoveFileExW(
+                temporary.wstring().c_str(),
+                destination.wstring().c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+            )) {
+            std::error_code ignored;
+            std::filesystem::remove(temporary, ignored);
+            return false;
+        }
+        trace(hooks, PrivateFileIoEvent::Replaced, destination);
+        return syncDirectory(parentDirectory(destination), hooks);
+    }
+    return false;
 }
 
 #else
+
+class ScopedFd {
+public:
+    explicit ScopedFd(int descriptor = -1)
+        : descriptor_(descriptor) {}
+
+    ScopedFd(const ScopedFd&) = delete;
+    ScopedFd& operator=(const ScopedFd&) = delete;
+
+    ~ScopedFd() {
+        if (descriptor_ >= 0) {
+            ::close(descriptor_);
+        }
+    }
+
+    [[nodiscard]] int get() const {
+        return descriptor_;
+    }
+
+private:
+    int descriptor_ = -1;
+};
+
+int openDirectory(const std::filesystem::path& directory) {
+    int flags = O_RDONLY | O_DIRECTORY;
+#if defined(O_CLOEXEC)
+    flags |= O_CLOEXEC;
+#endif
+#if defined(O_NOFOLLOW)
+    flags |= O_NOFOLLOW;
+#endif
+    return ::open(directory.c_str(), flags);
+}
 
 bool writeAll(
     int descriptor,
@@ -244,38 +337,124 @@ bool writeAll(
     return true;
 }
 
-TemporaryWriteResult writeExclusivePrivateTemporary(
-    const std::filesystem::path& path,
-    const std::uint8_t* contents,
-    std::size_t size
+bool syncDirectory(
+    int descriptor,
+    const std::filesystem::path& directory,
+    const PrivateFileIoHooks* hooks
 ) {
-    const int descriptor = ::open(
-        path.c_str(),
-        O_WRONLY | O_CREAT | O_EXCL
-#if defined(O_CLOEXEC)
-            | O_CLOEXEC
-#endif
-        ,
-        S_IRUSR | S_IWUSR
+    const bool synced = hooks && hooks->syncDirectory
+        ? hooks->syncDirectory(directory)
+        : ::fsync(descriptor) == 0;
+    trace(
+        hooks,
+        synced
+            ? PrivateFileIoEvent::DirectorySynced
+            : PrivateFileIoEvent::DirectorySyncFailed,
+        directory
     );
-    if (descriptor < 0) {
-        return errno == EEXIST
-            ? TemporaryWriteResult::Collision
-            : TemporaryWriteResult::Failed;
-    }
-    const bool wrote = writeAll(descriptor, contents, size);
-    const bool flushed = wrote && ::fsync(descriptor) == 0;
-    const bool closed = ::close(descriptor) == 0;
-    return flushed && closed
-        ? TemporaryWriteResult::Success
-        : TemporaryWriteResult::Failed;
+    return synced;
 }
 
-bool replaceWithTemporaryFile(
-    const std::filesystem::path& temporary,
-    const std::filesystem::path& destination
+bool renameExclusiveAt(
+    int sourceDirectory,
+    const char* sourceName,
+    int destinationDirectory,
+    const char* destinationName
 ) {
-    return ::rename(temporary.c_str(), destination.c_str()) == 0;
+#if defined(__APPLE__)
+    return ::renameatx_np(
+        sourceDirectory,
+        sourceName,
+        destinationDirectory,
+        destinationName,
+        RENAME_EXCL
+    ) == 0;
+#elif defined(__linux__)
+    return ::syscall(
+        SYS_renameat2,
+        sourceDirectory,
+        sourceName,
+        destinationDirectory,
+        destinationName,
+        RENAME_NOREPLACE
+    ) == 0;
+#else
+    static_cast<void>(sourceDirectory);
+    static_cast<void>(sourceName);
+    static_cast<void>(destinationDirectory);
+    static_cast<void>(destinationName);
+    errno = ENOTSUP;
+    return false;
+#endif
+}
+
+bool writePosix(
+    const std::filesystem::path& destination,
+    const std::uint8_t* contents,
+    std::size_t size,
+    const PrivateFileIoHooks* hooks
+) {
+    const auto parent = parentDirectory(destination);
+    const ScopedFd directory(openDirectory(parent));
+    if (directory.get() < 0) {
+        return false;
+    }
+    for (int attempt = 0; attempt < kTemporaryFileAttempts; ++attempt) {
+        const auto temporary = temporaryPath(destination, attempt, hooks);
+        if (!isSibling(temporary, destination)) {
+            return false;
+        }
+        int flags = O_WRONLY | O_CREAT | O_EXCL;
+#if defined(O_CLOEXEC)
+        flags |= O_CLOEXEC;
+#endif
+#if defined(O_NOFOLLOW)
+        flags |= O_NOFOLLOW;
+#endif
+        const int descriptor = ::openat(
+            directory.get(),
+            temporary.filename().c_str(),
+            flags,
+            S_IRUSR | S_IWUSR
+        );
+        if (descriptor < 0) {
+            if (errno == EEXIST) {
+                continue;
+            }
+            return false;
+        }
+        trace(hooks, PrivateFileIoEvent::TemporaryCreated, temporary);
+        const bool wrote = writeAll(descriptor, contents, size);
+        const bool flushed = wrote && ::fsync(descriptor) == 0;
+        if (flushed) {
+            trace(hooks, PrivateFileIoEvent::TemporarySynced, temporary);
+        }
+        const bool closed = ::close(descriptor) == 0;
+        if (!flushed || !closed) {
+            ::unlinkat(
+                directory.get(),
+                temporary.filename().c_str(),
+                0
+            );
+            return false;
+        }
+        if (::renameat(
+                directory.get(),
+                temporary.filename().c_str(),
+                directory.get(),
+                destination.filename().c_str()
+            ) != 0) {
+            ::unlinkat(
+                directory.get(),
+                temporary.filename().c_str(),
+                0
+            );
+            return false;
+        }
+        trace(hooks, PrivateFileIoEvent::Replaced, destination);
+        return syncDirectory(directory.get(), parent, hooks);
+    }
+    return false;
 }
 
 #endif
@@ -285,9 +464,11 @@ bool replaceWithTemporaryFile(
 bool writePrivateFileAtomically(
     const std::filesystem::path& destination,
     const std::uint8_t* contents,
-    std::size_t size
+    std::size_t size,
+    const PrivateFileIoHooks* hooks
 ) {
-    if (destination.empty() || (contents == nullptr && size != 0U)) {
+    if (destination.empty() || destination.filename().empty()
+        || (contents == nullptr && size != 0U)) {
         return false;
     }
     const auto parent = destination.parent_path();
@@ -298,27 +479,125 @@ bool writePrivateFileAtomically(
             return false;
         }
     }
-    for (int attempt = 0; attempt < kTemporaryFileAttempts; ++attempt) {
-        const auto temporary = temporarySiblingPath(destination);
-        const auto writeResult = writeExclusivePrivateTemporary(
-            temporary,
-            contents,
-            size
-        );
-        if (writeResult != TemporaryWriteResult::Success) {
-            if (writeResult == TemporaryWriteResult::Collision) {
-                continue;
-            }
-            removeTemporaryFile(temporary);
-            return false;
-        }
-        if (replaceWithTemporaryFile(temporary, destination)) {
-            return true;
-        }
-        removeTemporaryFile(temporary);
+#if defined(_WIN32)
+    return writeWindows(destination, contents, size, hooks);
+#else
+    return writePosix(destination, contents, size, hooks);
+#endif
+}
+
+bool removeFileDurably(
+    const std::filesystem::path& path,
+    bool* entryChanged,
+    const PrivateFileIoHooks* hooks
+) {
+    if (entryChanged) {
+        *entryChanged = false;
+    }
+    if (path.empty() || path.filename().empty()) {
         return false;
     }
-    return false;
+    const auto parent = parentDirectory(path);
+#if defined(_WIN32)
+    std::error_code error;
+    const bool removed = std::filesystem::remove(path, error);
+    if (error) {
+        return false;
+    }
+    if (!removed) {
+        return true;
+    }
+    if (entryChanged) {
+        *entryChanged = true;
+    }
+    trace(hooks, PrivateFileIoEvent::Removed, path);
+    return syncDirectory(parent, hooks);
+#else
+    const ScopedFd directory(openDirectory(parent));
+    if (directory.get() < 0) {
+        return false;
+    }
+    if (::unlinkat(directory.get(), path.filename().c_str(), 0) != 0) {
+        return errno == ENOENT;
+    }
+    if (entryChanged) {
+        *entryChanged = true;
+    }
+    trace(hooks, PrivateFileIoEvent::Removed, path);
+    return syncDirectory(directory.get(), parent, hooks);
+#endif
+}
+
+bool renameFileDurably(
+    const std::filesystem::path& source,
+    const std::filesystem::path& destination,
+    bool* entryChanged,
+    const PrivateFileIoHooks* hooks
+) {
+    if (entryChanged) {
+        *entryChanged = false;
+    }
+    if (source.empty() || destination.empty()
+        || source.filename().empty() || destination.filename().empty()) {
+        return false;
+    }
+    const auto sourceParent = parentDirectory(source);
+    const auto destinationParent = parentDirectory(destination);
+#if defined(_WIN32)
+    if (!MoveFileExW(
+            source.wstring().c_str(),
+            destination.wstring().c_str(),
+            MOVEFILE_WRITE_THROUGH
+        )) {
+        return false;
+    }
+    if (entryChanged) {
+        *entryChanged = true;
+    }
+    trace(hooks, PrivateFileIoEvent::Renamed, destination);
+    const bool sourceSynced = syncDirectory(sourceParent, hooks);
+    const bool destinationSynced =
+        sourceParent.lexically_normal() == destinationParent.lexically_normal()
+            || syncDirectory(destinationParent, hooks);
+    return sourceSynced && destinationSynced;
+#else
+    const ScopedFd sourceDirectory(openDirectory(sourceParent));
+    if (sourceDirectory.get() < 0) {
+        return false;
+    }
+    const bool sameParent =
+        sourceParent.lexically_normal() == destinationParent.lexically_normal();
+    const ScopedFd destinationDirectory(
+        sameParent ? -1 : openDirectory(destinationParent)
+    );
+    if (!sameParent && destinationDirectory.get() < 0) {
+        return false;
+    }
+    const int destinationDescriptor = sameParent
+        ? sourceDirectory.get()
+        : destinationDirectory.get();
+    if (!renameExclusiveAt(
+            sourceDirectory.get(),
+            source.filename().c_str(),
+            destinationDescriptor,
+            destination.filename().c_str()
+        )) {
+        return false;
+    }
+    if (entryChanged) {
+        *entryChanged = true;
+    }
+    trace(hooks, PrivateFileIoEvent::Renamed, destination);
+    const bool sourceSynced =
+        syncDirectory(sourceDirectory.get(), sourceParent, hooks);
+    const bool destinationSynced = sameParent
+        || syncDirectory(
+            destinationDirectory.get(),
+            destinationParent,
+            hooks
+        );
+    return sourceSynced && destinationSynced;
+#endif
 }
 
 bool makeFileOwnerPrivate(const std::filesystem::path& path) {
@@ -336,7 +615,28 @@ bool makeFileOwnerPrivate(const std::filesystem::path& path) {
         static_cast<PSECURITY_DESCRIPTOR>(attributes->lpSecurityDescriptor)
     ) != 0;
 #else
-    return ::chmod(path.c_str(), S_IRUSR | S_IWUSR) == 0;
+    if (path.empty() || path.filename().empty()) {
+        return false;
+    }
+    const ScopedFd directory(openDirectory(parentDirectory(path)));
+    if (directory.get() < 0) {
+        return false;
+    }
+    int flags = O_RDONLY;
+#if defined(O_CLOEXEC)
+    flags |= O_CLOEXEC;
+#endif
+#if defined(O_NOFOLLOW)
+    flags |= O_NOFOLLOW;
+#endif
+    const ScopedFd file(::openat(directory.get(), path.filename().c_str(), flags));
+    if (file.get() < 0) {
+        return false;
+    }
+    struct stat status {};
+    return ::fstat(file.get(), &status) == 0
+        && S_ISREG(status.st_mode)
+        && ::fchmod(file.get(), S_IRUSR | S_IWUSR) == 0;
 #endif
 }
 

@@ -1,5 +1,7 @@
 #include "gb/app/frontend/realtime/retroachievements_lifecycle.hpp"
 
+#include "gb/app/frontend/realtime/secure_string.hpp"
+
 #include <algorithm>
 #include <utility>
 
@@ -22,8 +24,9 @@ RaRuntimeCommand::RaRuntimeCommand(
 )
     : type(typeValue),
       username(std::move(usernameValue)),
-      password(std::move(passwordValue)),
       saveSlot(saveSlotValue) {
+    password.swap(passwordValue);
+    (void)secureEraseStringStorage(passwordValue);
 }
 
 RaRuntimeCommand::~RaRuntimeCommand() {
@@ -45,7 +48,6 @@ RaRuntimeCommand& RaRuntimeCommand::operator=(RaRuntimeCommand&& other) noexcept
         saveSlot = other.saveSlot;
         repeatCount = other.repeatCount;
         username.clear();
-        password.clear();
         username.swap(other.username);
         password.swap(other.password);
     }
@@ -53,18 +55,7 @@ RaRuntimeCommand& RaRuntimeCommand::operator=(RaRuntimeCommand&& other) noexcept
 }
 
 void RaRuntimeCommand::wipeSecret(const RaSecretWipeObserver& observer) {
-    const std::size_t logicalSize = password.size();
-    if (logicalSize == 0U) {
-        return;
-    }
-    volatile char* bytes = password.data();
-    for (std::size_t index = 0; index < logicalSize; ++index) {
-        bytes[index] = '\0';
-    }
-    if (observer) {
-        observer(password.data(), logicalSize);
-    }
-    password.clear();
+    (void)secureEraseStringStorage(password, observer);
 }
 
 RaRuntimeCommandQueue::RaRuntimeCommandQueue(

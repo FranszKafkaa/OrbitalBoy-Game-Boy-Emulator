@@ -1,5 +1,7 @@
 #include "gb/app/frontend/realtime/retroachievements_ui.hpp"
 
+#include "gb/app/frontend/realtime/secure_string.hpp"
+
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
 
 #include <algorithm>
@@ -104,17 +106,6 @@ bool isScrollableTab(RaProfileTab tab) {
 
 int profileTabIndex(RaProfileTab tab) {
     return static_cast<int>(tab);
-}
-
-void securelyClearString(std::string& text) {
-    const std::size_t allocatedBytes = text.capacity();
-    text.resize(allocatedBytes, '\0');
-    volatile char* bytes = text.empty() ? nullptr : text.data();
-    for (std::size_t index = 0; index < allocatedBytes; ++index) {
-        bytes[index] = '\0';
-    }
-    std::string empty;
-    text.swap(empty);
 }
 
 #ifdef GBEMU_USE_SDL2
@@ -401,7 +392,7 @@ RaLoginModalLayout raLoginModalLayout(int outputW, int outputH) {
 }
 
 void openRaLoginModal(RaLoginModalState& state, std::string username) {
-    securelyClearString(state.password);
+    (void)secureEraseStringStorage(state.password);
     state.open = true;
     state.focusedField = RaLoginField::Username;
     state.username = std::move(username);
@@ -413,7 +404,7 @@ void closeRaLoginModal(RaLoginModalState& state) {
     state.open = false;
     state.requesting = false;
     state.errorText.clear();
-    securelyClearString(state.password);
+    (void)secureEraseStringStorage(state.password);
 }
 
 void appendRaLoginText(RaLoginModalState& state, std::string_view text) {

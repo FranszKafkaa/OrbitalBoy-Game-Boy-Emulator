@@ -91,6 +91,7 @@ set(GBEMU_REALTIME_SUPPORT_SOURCES
     src/app/frontend/realtime/link_transport.cpp
     src/app/frontend/realtime/network_config.cpp
     src/app/frontend/realtime/private_file_io.cpp
+    src/app/frontend/realtime/secure_string.cpp
     src/app/frontend/realtime/retroachievements_config.cpp
     src/app/frontend/realtime/retroachievements_memory.cpp
     src/app/frontend/realtime/top_menu.cpp
@@ -169,6 +170,9 @@ endif()
 add_library(gbfrontend_support ${GBEMU_FRONTEND_SUPPORT_SOURCES})
 target_include_directories(gbfrontend_support PUBLIC include)
 target_link_libraries(gbfrontend_support PUBLIC gbcore)
+if (WIN32)
+    target_link_libraries(gbfrontend_support PRIVATE advapi32)
+endif()
 if (SDL2_FOUND)
     target_link_libraries(gbfrontend_support PUBLIC SDL2::SDL2)
     target_compile_definitions(gbfrontend_support PUBLIC GBEMU_USE_SDL2=1 SDL_MAIN_HANDLED=1)
@@ -189,7 +193,7 @@ if (GBEMU_ENABLE_RETROACHIEVEMENTS)
     target_include_directories(gbfrontend_support PRIVATE third_party/rcheevos/src)
     target_link_libraries(gbfrontend_support PUBLIC rcheevos CURL::libcurl)
     if (WIN32)
-        target_link_libraries(gbfrontend_support PRIVATE advapi32 bcrypt)
+        target_link_libraries(gbfrontend_support PRIVATE bcrypt)
     endif()
     target_compile_definitions(gbfrontend_support PUBLIC
         GBEMU_ENABLE_RETROACHIEVEMENTS=1

@@ -40,6 +40,7 @@
 #include "gb/app/runtime_paths.hpp"
 #endif
 #include "gb/app/frontend/realtime/runlab_control_queue.hpp"
+#include "gb/app/frontend/realtime/secure_string.hpp"
 #include "gb/app/frontend/realtime/runlab_session.hpp"
 #include "gb/app/frontend/realtime/sdl_session_view.hpp"
 #include "gb/app/frontend/realtime/session_models.hpp"
@@ -1322,11 +1323,7 @@ int RealtimeSession::run() {
                     std::move(raConfig.token)
                 );
             }
-            volatile char* tokenBytes = raConfig.token.data();
-            for (std::size_t index = 0; index < raConfig.token.size(); ++index) {
-                tokenBytes[index] = '\0';
-            }
-            raConfig.token.clear();
+            (void)secureEraseStringStorage(raConfig.token);
             raConfig.username.clear();
         };
         raActions.loadGame = [&]() {
@@ -2662,7 +2659,7 @@ int RealtimeSession::run() {
                     enqueueRaCommand({
                         RaRuntimeCommandType::Login,
                         raLoginModal.username,
-                        std::move(raLoginModal.password),
+                        moveStringAndEraseSource(raLoginModal.password),
                         0,
                     });
                     uiMessage = "LOGIN RETROACHIEVEMENTS";

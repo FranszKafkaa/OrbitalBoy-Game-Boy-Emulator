@@ -1,6 +1,7 @@
 #include "gb/app/frontend/realtime/retroachievements_config.hpp"
 
-#include "private_file_io.hpp"
+#include "gb/app/frontend/realtime/private_file_io.hpp"
+#include "gb/app/frontend/realtime/secure_string.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -17,23 +18,14 @@ namespace gb::frontend {
 namespace {
 
 constexpr std::size_t kMaxStoredValueBytes = 4U * 1024U;
+constexpr std::size_t kMaxConfigFileBytes = 4U * 1024U;
 constexpr int kQuarantineAttempts = 32;
 
 void wipeString(
     std::string& value,
     const RaConfigWipeObserver& observer = {}
 ) {
-    const std::size_t size = value.size();
-    volatile char* bytes = value.empty()
-        ? nullptr
-        : reinterpret_cast<volatile char*>(value.data());
-    for (std::size_t index = 0; index < size; ++index) {
-        bytes[index] = '\0';
-    }
-    if (observer && size != 0U) {
-        observer(value.data(), size);
-    }
-    value.clear();
+    (void)secureEraseStringStorage(value, observer);
 }
 
 bool isSafeStoredValue(std::string_view value) {
@@ -146,10 +138,16 @@ bool quarantineConfig(
         if (std::filesystem::exists(quarantine, existsError) || existsError) {
             continue;
         }
-        std::error_code renameError;
-        std::filesystem::rename(source, quarantine, renameError);
-        if (!renameError) {
+        bool entryChanged = false;
+        if (detail::renameFileDurably(
+                source,
+                quarantine,
+                &entryChanged
+            )) {
             return true;
+        }
+        if (entryChanged) {
+            return false;
         }
     }
     return false;
@@ -161,7 +159,16 @@ RaConfig loadRetroAchievementsConfig(
     const std::string& path,
     RaConfigWipeObserver wipeObserver
 ) {
-    std::ifstream in(path, std::ios::binary);
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in) {
+        return {};
+    }
+    const std::streampos end = in.tellg();
+    if (end < 0
+        || static_cast<std::uint64_t>(end) > kMaxConfigFileBytes) {
+        return {};
+    }
+    in.seekg(0, std::ios::beg);
     if (!in) {
         return {};
     }
@@ -240,6 +247,10 @@ bool saveRetroAchievementsConfig(
         return false;
     }
     std::string serialized = serializeConfig(config);
+    if (serialized.size() > kMaxConfigFileBytes) {
+        wipeString(serialized);
+        return false;
+    }
     const bool saved = detail::writePrivateFileAtomically(
         std::filesystem::path(path),
         std::string_view(serialized)
@@ -267,9 +278,12 @@ bool invalidateRetroAchievementsConfig(
     if (!std::filesystem::exists(status)) {
         return true;
     }
-    std::error_code removeError;
-    if (std::filesystem::remove(source, removeError)) {
+    bool entryChanged = false;
+    if (detail::removeFileDurably(source, &entryChanged)) {
         return true;
+    }
+    if (entryChanged) {
+        return false;
     }
     if (!std::filesystem::is_regular_file(status)) {
         return false;
@@ -277,9 +291,12 @@ bool invalidateRetroAchievementsConfig(
 
     const RaConfig emptyConfig{1, {}, {}, false, true};
     if (saveRetroAchievementsConfig(path, emptyConfig)) {
-        removeError.clear();
-        if (std::filesystem::remove(source, removeError)) {
+        entryChanged = false;
+        if (detail::removeFileDurably(source, &entryChanged)) {
             return true;
+        }
+        if (entryChanged) {
+            return false;
         }
         return quarantineConfig(source, false);
     }

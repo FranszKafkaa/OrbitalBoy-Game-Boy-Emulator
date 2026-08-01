@@ -54,7 +54,8 @@ public:
     // while its stable buffer is still alive and already contains only zeroes.
     virtual void onLoginSecretWiped(
         const char* logicalBuffer,
-        std::size_t logicalSize
+        std::size_t logicalSize,
+        std::size_t storageSize
     );
     virtual void logout(rc_client_t* client);
     [[nodiscard]] virtual const rc_client_user_t* getUserInfo(

@@ -13,6 +13,7 @@
 
 #include "gb/app/frontend/realtime/retroachievements_http.hpp"
 #include "gb/app/frontend/realtime/retroachievements_memory.hpp"
+#include "gb/app/frontend/realtime/secure_string.hpp"
 #include "gb/core/gameboy.hpp"
 
 namespace gb::frontend {
@@ -77,10 +78,12 @@ rc_client_async_handle_t* RaClientApi::beginLoginWithToken(
 
 void RaClientApi::onLoginSecretWiped(
     const char* logicalBuffer,
-    std::size_t logicalSize
+    std::size_t logicalSize,
+    std::size_t storageSize
 ) {
     static_cast<void>(logicalBuffer);
     static_cast<void>(logicalSize);
+    static_cast<void>(storageSize);
 }
 
 void RaClientApi::logout(rc_client_t* client) {
@@ -280,18 +283,8 @@ std::string copyText(const char* text) {
     return text ? text : "";
 }
 
-void wipeSecretBytes(std::string& secret) {
-    volatile char* bytes = secret.empty()
-        ? nullptr
-        : reinterpret_cast<volatile char*>(secret.data());
-    for (std::size_t index = 0; index < secret.size(); ++index) {
-        bytes[index] = '\0';
-    }
-}
-
 void eraseSecret(std::string& secret) {
-    wipeSecretBytes(secret);
-    secret.clear();
+    (void)secureEraseStringStorage(secret);
 }
 
 std::string lowercaseAscii(std::string_view value) {
@@ -433,7 +426,10 @@ public:
     void enqueue(std::unique_ptr<Command> command) {
         std::lock_guard lock(commandMutex);
         if (shutdownRequested) {
-            eraseSecret(command->secret);
+            if (command->type == CommandType::PasswordLogin
+                || command->type == CommandType::TokenLogin) {
+                notifySecretWiped(*command);
+            }
             return;
         }
         commands.push_back(std::move(command));
@@ -484,12 +480,16 @@ public:
 
     void notifySecretWiped(Command& command) {
         const std::size_t logicalSize = command.secret.size();
-        char* const logicalBuffer = logicalSize == 0
-            ? nullptr
-            : command.secret.data();
-        wipeSecretBytes(command.secret);
-        api->onLoginSecretWiped(logicalBuffer, logicalSize);
-        command.secret.clear();
+        (void)secureEraseStringStorage(
+            command.secret,
+            [&](const char* storage, std::size_t storageSize) {
+                api->onLoginSecretWiped(
+                    storage,
+                    logicalSize,
+                    storageSize
+                );
+            }
+        );
     }
 
     void beginLogin(
@@ -1237,7 +1237,10 @@ public:
             }
             shutdownRequested = true;
             for (auto& command : commands) {
-                eraseSecret(command->secret);
+                if (command->type == CommandType::PasswordLogin
+                    || command->type == CommandType::TokenLogin) {
+                    notifySecretWiped(*command);
+                }
             }
             commands.clear();
         }

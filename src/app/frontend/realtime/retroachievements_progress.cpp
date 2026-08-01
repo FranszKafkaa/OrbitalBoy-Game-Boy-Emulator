@@ -1,6 +1,6 @@
 #include "gb/app/frontend/realtime/retroachievements_progress.hpp"
 
-#include "private_file_io.hpp"
+#include "gb/app/frontend/realtime/private_file_io.hpp"
 
 #include <algorithm>
 #include <array>
