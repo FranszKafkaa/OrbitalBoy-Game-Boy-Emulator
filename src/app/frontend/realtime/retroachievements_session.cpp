@@ -1008,6 +1008,19 @@ public:
         });
     }
 
+    void handleClientEvent(const rc_client_event_t& event) {
+        if (shutdownRequested) {
+            return;
+        }
+        if (event.type == RC_CLIENT_EVENT_DISCONNECTED) {
+            markOfflineForTransportFailure();
+        } else if (event.type == RC_CLIENT_EVENT_RECONNECTED) {
+            markOnlineAfterReconnect();
+        } else if (event.type == RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED) {
+            achievementTriggered(event);
+        }
+    }
+
     void handleServerCall(
         const rc_api_request_t* request,
         rc_client_server_callback_t callback,
@@ -1066,6 +1079,8 @@ public:
 
         if (!response.error.empty()) {
             markOfflineForTransportFailure();
+        } else {
+            markOnlineAfterReconnect();
         }
 
         const char* body = response.body.empty()
@@ -1081,6 +1096,13 @@ public:
                     : RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR),
         };
         pending.callback(&serverResponse, pending.callbackData);
+        volatile std::uint8_t* bytes = response.body.empty()
+            ? nullptr
+            : response.body.data();
+        for (std::size_t index = 0; index < response.body.size(); ++index) {
+            bytes[index] = 0;
+        }
+        std::vector<std::uint8_t>{}.swap(response.body);
     }
 
     void cancelServerCalls() {
@@ -1115,6 +1137,24 @@ public:
             RaUiEventType::Offline,
             "RetroAchievements offline",
             state.errorText,
+            0,
+            {},
+        });
+    }
+
+    void markOnlineAfterReconnect() {
+        if (state.connectionState != RaConnectionState::Offline) {
+            return;
+        }
+        state.connectionState = RaConnectionState::Online;
+        ++state.connectionGeneration;
+        state.statusText = "Conectado ao RetroAchievements.";
+        state.errorText.clear();
+        publishSnapshot();
+        addEvent({
+            RaUiEventType::Reconnected,
+            "RetroAchievements reconectado",
+            "A conexão foi restabelecida.",
             0,
             {},
         });
@@ -1459,7 +1499,7 @@ void RetroAchievementsSession::eventThunk(
 ) {
     RetroAchievementsSession* session = sessionForClient(client);
     if (session && event && session->impl_->onOwnerThread()) {
-        session->impl_->achievementTriggered(*event);
+        session->impl_->handleClientEvent(*event);
     }
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
@@ -27,6 +28,8 @@ public:
     void request(std::string url);
     void processCompleted();
     [[nodiscard]] std::optional<std::string> localPath(std::string_view url) const;
+    [[nodiscard]] std::size_t filesystemProbeCount() const;
+    void retryFailed();
     void shutdown();
 
 private:
@@ -41,6 +44,11 @@ private:
 void applyCachedImagePaths(
     RaSessionSnapshot& snapshot,
     const RetroAchievementsImageCache& cache
+);
+void applyCachedImagePathsForUrls(
+    RaSessionSnapshot& snapshot,
+    const RetroAchievementsImageCache& cache,
+    const std::vector<std::string>& urls
 );
 
 } // namespace gb::frontend

@@ -139,6 +139,7 @@ void RaDeferredProgressRestore::stage(
 ) {
     progress_ = std::move(progress);
     resetPending_ = !progress_.has_value();
+    waitingSince_.reset();
 }
 
 bool RaDeferredProgressRestore::pending() const {
@@ -162,6 +163,7 @@ RaDeferredRestoreResult RaDeferredProgressRestore::applyIfReady(
         && deserialize(progress_->romHash, progress_->payload);
     progress_.reset();
     resetPending_ = false;
+    waitingSince_.reset();
     if (restored) {
         return RaDeferredRestoreResult::Restored;
     }
@@ -169,6 +171,33 @@ RaDeferredRestoreResult RaDeferredProgressRestore::applyIfReady(
         (void)reset();
     }
     return RaDeferredRestoreResult::Reset;
+}
+
+RaDeferredRestoreResult RaDeferredProgressRestore::prepareCommittedFrame(
+    const RaSessionSnapshot& snapshot,
+    std::chrono::milliseconds now,
+    const Deserialize& deserialize,
+    const Reset& reset,
+    std::chrono::milliseconds timeout
+) {
+    const auto result = applyIfReady(snapshot, deserialize, reset);
+    if (result != RaDeferredRestoreResult::Waiting) {
+        return result;
+    }
+    if (!waitingSince_.has_value() || now < *waitingSince_) {
+        waitingSince_ = now;
+        return result;
+    }
+    if (now - *waitingSince_ <= timeout) {
+        return result;
+    }
+    progress_.reset();
+    resetPending_ = false;
+    waitingSince_.reset();
+    if (reset) {
+        (void)reset();
+    }
+    return RaDeferredRestoreResult::TimedOutReset;
 }
 
 void RaRealtimeLifecycleCoordinator::start(
@@ -185,8 +214,16 @@ void RaRealtimeLifecycleCoordinator::observeSnapshot(
     const RaSessionSnapshot& snapshot,
     RaLifecycleActions& actions
 ) {
+    if (!connectionGeneration_.has_value()
+        || *connectionGeneration_ != snapshot.connectionGeneration) {
+        if (connectionGeneration_.has_value()) {
+            gameLoadRequested_ = false;
+        }
+        connectionGeneration_ = snapshot.connectionGeneration;
+    }
     if (snapshot.connectionState == RaConnectionState::LoggedOut
-        || snapshot.connectionState == RaConnectionState::LoggingIn) {
+        || snapshot.connectionState == RaConnectionState::LoggingIn
+        || snapshot.connectionState == RaConnectionState::Offline) {
         gameLoadRequested_ = false;
     }
     if (snapshot.connectionState == RaConnectionState::Online

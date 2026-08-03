@@ -1239,29 +1239,55 @@ int RealtimeSession::run() {
         std::string raTimelineRomHash{};
         RaDeferredProgressRestore raDeferredProgress{};
         bool raDeferredTimelineReset = false;
+        const auto handlePendingProgressResult = [&](RaDeferredRestoreResult result) {
+            if (result == RaDeferredRestoreResult::Waiting
+                || result == RaDeferredRestoreResult::NotPending) {
+                return result;
+            }
+            if (result == RaDeferredRestoreResult::TimedOutReset) {
+                workerUiMessages.post(
+                    "TIMEOUT RA; PROGRESSO RESETADO E EMULACAO RETOMADA", 300
+                );
+            } else if (result == RaDeferredRestoreResult::Reset) {
+                workerUiMessages.post("STATE SEM PROGRESSO RA", 180);
+            } else if (result == RaDeferredRestoreResult::Restored) {
+                workerUiMessages.post("PROGRESSO RA RESTAURADO", 150);
+            }
+            if (raDeferredTimelineReset) {
+                timeline.reset(gb);
+                raDeferredTimelineReset = false;
+            }
+            return result;
+        };
         const auto applyPendingProgressIfReady = [&]() {
             if (!raSession) {
-                return false;
+                return RaDeferredRestoreResult::NotPending;
             }
-            const auto result = raDeferredProgress.applyIfReady(
+            return handlePendingProgressResult(raDeferredProgress.applyIfReady(
                 raSession->snapshot(),
                 [&](std::string_view hash, const std::vector<std::uint8_t>& payload) {
                     return raSession->deserializeProgress(hash, payload);
                 },
                 [&]() { return raSession->resetProgress(); }
+            ));
+        };
+        const auto preparePendingProgressForFrame = [&]() {
+            if (!raSession) {
+                return RaDeferredRestoreResult::NotPending;
+            }
+            const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()
             );
-            if (result == RaDeferredRestoreResult::Reset) {
-                workerUiMessages.post("STATE SEM PROGRESSO RA", 180);
-            } else if (result == RaDeferredRestoreResult::Restored) {
-                workerUiMessages.post("PROGRESSO RA RESTAURADO", 150);
-            }
-            if ((result == RaDeferredRestoreResult::Reset
-                 || result == RaDeferredRestoreResult::Restored)
-                && raDeferredTimelineReset) {
-                timeline.reset(gb);
-                raDeferredTimelineReset = false;
-            }
-            return result == RaDeferredRestoreResult::Restored;
+            return handlePendingProgressResult(
+                raDeferredProgress.prepareCommittedFrame(
+                    raSession->snapshot(),
+                    now,
+                    [&](std::string_view hash, const std::vector<std::uint8_t>& payload) {
+                        return raSession->deserializeProgress(hash, payload);
+                    },
+                    [&]() { return raSession->resetProgress(); }
+                )
+            );
         };
         raActions.loadConfig = [&]() {
             raConfig = loadRetroAchievementsConfig(raConfigPath);
@@ -1535,6 +1561,13 @@ int RealtimeSession::run() {
                     break;
                 case RaRuntimeCommandType::TimelineForward:
                     if (!timeline.stepForward(gb)) {
+                        if (preparePendingProgressForFrame()
+                            == RaDeferredRestoreResult::Waiting) {
+                            workerUiMessages.post(
+                                "TIMELINE AGUARDANDO PROGRESSO RA", 120
+                            );
+                            break;
+                        }
                         gb.runFrame();
                         captureRaTimelineThisFrame = true;
                         raLifecycle.committedFrames(1, raActions);
@@ -1636,6 +1669,17 @@ int RealtimeSession::run() {
                     std::lock_guard<std::mutex> gbLock(gbMutex);
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
                     processRaCommandsLocked();
+                    if (preparePendingProgressForFrame()
+                        == RaDeferredRestoreResult::Waiting) {
+                        raLifecycle.pausedPoll(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch()
+                            ),
+                            raActions
+                        );
+                        publishRaState();
+                        continue;
+                    }
 #endif
                     const auto processSerialTransferLocked = [&]() {
                         gb::u8 outData = 0;
@@ -2544,26 +2588,28 @@ int RealtimeSession::run() {
             raEvents.swap(raPublishedEvents);
         }
         raImageCache.processCompleted();
-        const auto requestRaImage = [&](const std::string& url) {
-            if (!url.empty()) {
-                raImageCache.request(url);
-            }
-        };
-        requestRaImage(raUiSnapshot.profile.user.avatarUrl);
-        requestRaImage(raUiSnapshot.currentGame.badgeUrl);
-        for (const auto& achievement : raUiSnapshot.currentAchievements) {
-            requestRaImage(achievement.badgeUrl);
+        int raImageOutputW = 0;
+        int raImageOutputH = 0;
+        SDL_GetRendererOutputSize(renderer, &raImageOutputW, &raImageOutputH);
+        const auto raVisibleUrls = raVisibleImageUrls(
+            raUiSnapshot,
+            raProfilePanel,
+            raImageOutputW,
+            raImageOutputH
+        );
+        for (const auto& url : raVisibleUrls) {
+            raImageCache.request(url);
         }
-        for (const auto& game : raUiSnapshot.profile.library) {
-            requestRaImage(game.badgeUrl);
-        }
-        applyCachedImagePaths(raUiSnapshot, raImageCache);
+        applyCachedImagePathsForUrls(raUiSnapshot, raImageCache, raVisibleUrls);
         const auto raUiNowMs = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()
             ).count()
         );
         for (auto& event : raEvents) {
+            if (event.type == RaUiEventType::Reconnected) {
+                raImageCache.retryFailed();
+            }
             if (event.type == RaUiEventType::AchievementUnlocked) {
                 const auto found = std::find_if(
                     raUiSnapshot.currentAchievements.begin(),

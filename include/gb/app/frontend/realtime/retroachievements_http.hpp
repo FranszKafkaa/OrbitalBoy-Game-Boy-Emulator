@@ -1,12 +1,15 @@
 #pragma once
 
 #include <cstdint>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace gb::frontend {
+
+inline constexpr std::chrono::milliseconds kRaHttpRequestTimeout{15000};
 
 enum class RaHttpChannel {
     Api,

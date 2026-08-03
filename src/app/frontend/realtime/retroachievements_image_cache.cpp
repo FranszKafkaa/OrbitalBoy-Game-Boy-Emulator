@@ -383,7 +383,11 @@ void applyPath(std::string_view url, std::string& path, const RetroAchievementsI
 
 struct RetroAchievementsImageCache::State {
     std::unordered_set<std::string> inflightUrls;
+    std::unordered_set<std::string> failedUrls;
+    std::unordered_set<std::string> probedUrls;
+    std::unordered_map<std::string, std::string> localPaths;
     std::unordered_map<std::uint64_t, std::string> urlByRequestId;
+    std::size_t filesystemProbes = 0;
 };
 
 std::optional<std::uint64_t> allocateImageRequestId() {
@@ -441,7 +445,10 @@ RetroAchievementsImageCache::~RetroAchievementsImageCache() {
 }
 
 void RetroAchievementsImageCache::request(std::string url) {
-    if (stopping_ || !isHttpsUrl(url) || localPath(url).has_value()) {
+    if (stopping_ || !isHttpsUrl(url)
+        || state_->inflightUrls.find(url) != state_->inflightUrls.end()
+        || state_->failedUrls.find(url) != state_->failedUrls.end()
+        || localPath(url).has_value()) {
         return;
     }
     if (!state_->inflightUrls.insert(url).second) {
@@ -470,18 +477,43 @@ void RetroAchievementsImageCache::processCompleted() {
         state_->urlByRequestId.erase(request);
         state_->inflightUrls.erase(url);
         if (!response.error.empty()) {
+            state_->failedUrls.insert(url);
             continue;
         }
-        writeImageAtomically(cacheDirectory_, url, response.body);
+        if (writeImageAtomically(cacheDirectory_, url, response.body)) {
+            if (const auto path = cachedPathFor(cacheDirectory_, url); path.has_value()) {
+                state_->localPaths[url] = path->string();
+            }
+        } else {
+            state_->failedUrls.insert(url);
+        }
     }
 }
 
 std::optional<std::string> RetroAchievementsImageCache::localPath(std::string_view url) const {
+    const std::string key(url);
+    if (const auto found = state_->localPaths.find(key);
+        found != state_->localPaths.end()) {
+        return found->second;
+    }
+    if (!state_->probedUrls.insert(key).second) {
+        return std::nullopt;
+    }
+    ++state_->filesystemProbes;
     const auto path = cachedPathFor(cacheDirectory_, url);
     if (!path.has_value()) {
         return std::nullopt;
     }
+    state_->localPaths.emplace(key, path->string());
     return path->string();
+}
+
+std::size_t RetroAchievementsImageCache::filesystemProbeCount() const {
+    return state_->filesystemProbes;
+}
+
+void RetroAchievementsImageCache::retryFailed() {
+    state_->failedUrls.clear();
 }
 
 void RetroAchievementsImageCache::shutdown() {
@@ -501,6 +533,27 @@ void applyCachedImagePaths(RaSessionSnapshot& snapshot, const RetroAchievementsI
     }
     for (RaAchievementSummary& achievement : snapshot.currentAchievements) {
         applyPath(achievement.badgeUrl, achievement.badgePath, cache);
+    }
+}
+
+void applyCachedImagePathsForUrls(
+    RaSessionSnapshot& snapshot,
+    const RetroAchievementsImageCache& cache,
+    const std::vector<std::string>& urls
+) {
+    const std::unordered_set<std::string> visible(urls.begin(), urls.end());
+    const auto applyVisible = [&](std::string_view url, std::string& path) {
+        if (visible.find(std::string(url)) != visible.end()) {
+            applyPath(url, path, cache);
+        }
+    };
+    applyVisible(snapshot.profile.user.avatarUrl, snapshot.profile.user.avatarPath);
+    applyVisible(snapshot.currentGame.badgeUrl, snapshot.currentGame.badgePath);
+    for (RaGameProgressSummary& game : snapshot.profile.library) {
+        applyVisible(game.badgeUrl, game.badgePath);
+    }
+    for (RaAchievementSummary& achievement : snapshot.currentAchievements) {
+        applyVisible(achievement.badgeUrl, achievement.badgePath);
     }
 }
 

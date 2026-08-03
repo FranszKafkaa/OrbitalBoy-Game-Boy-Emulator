@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "gb/app/frontend/realtime/retroachievements_models.hpp"
+#include "gb/app/frontend/realtime/retroachievements_http.hpp"
 #include "gb/app/frontend/realtime/retroachievements_progress.hpp"
 #include "gb/app/frontend/realtime/secure_string.hpp"
 
@@ -80,6 +81,7 @@ enum class RaDeferredRestoreResult {
     Waiting,
     Restored,
     Reset,
+    TimedOutReset,
 };
 
 class RaDeferredProgressRestore {
@@ -97,10 +99,19 @@ public:
         const Deserialize& deserialize,
         const Reset& reset
     );
+    RaDeferredRestoreResult prepareCommittedFrame(
+        const RaSessionSnapshot& snapshot,
+        std::chrono::milliseconds now,
+        const Deserialize& deserialize,
+        const Reset& reset,
+        std::chrono::milliseconds timeout =
+            kRaHttpRequestTimeout + std::chrono::seconds(1)
+    );
 
 private:
     std::optional<RaStoredProgress> progress_{};
     bool resetPending_ = false;
+    std::optional<std::chrono::milliseconds> waitingSince_{};
 };
 
 struct RaLifecycleActions {
@@ -142,6 +153,7 @@ public:
 
 private:
     bool gameLoadRequested_ = false;
+    std::optional<std::uint64_t> connectionGeneration_{};
     bool ownerStopped_ = false;
     bool uiStopped_ = false;
     std::optional<std::chrono::milliseconds> lastIdle_{};

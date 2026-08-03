@@ -1,9 +1,11 @@
 #include "gb/app/frontend/realtime/retroachievements_http.hpp"
+#include "gb/app/frontend/realtime/secure_string.hpp"
 
 #include <curl/curl.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <deque>
@@ -59,6 +61,14 @@ std::size_t channelIndex(RaHttpChannel channel) {
     return channel == RaHttpChannel::Image ? 1U : 0U;
 }
 
+void secureEraseBody(std::vector<std::uint8_t>& body) {
+    volatile std::uint8_t* bytes = body.empty() ? nullptr : body.data();
+    for (std::size_t index = 0; index < body.size(); ++index) {
+        bytes[index] = 0;
+    }
+    std::vector<std::uint8_t>{}.swap(body);
+}
+
 RaHttpResponse makeErrorResponse(const RaHttpRequest& request, const char* error) {
     return RaHttpResponse{request.id, request.channel, 0, {}, error};
 }
@@ -75,7 +85,7 @@ RaHttpResponse normalizeResponse(const RaHttpRequest& request, RaHttpResponse re
     }
 
     if (!response.error.empty()) {
-        response.body.clear();
+        secureEraseBody(response.body);
     }
     return response;
 }
@@ -123,7 +133,16 @@ bool initializeCurl() {
     return result == CURLE_OK;
 }
 
-RaHttpResponse executeWithCurl(const RaHttpRequest& request) {
+int curlProgress(void* userData, curl_off_t, curl_off_t, curl_off_t, curl_off_t) noexcept {
+    return static_cast<std::atomic<bool>*>(userData)->load(std::memory_order_relaxed)
+        ? 1
+        : 0;
+}
+
+RaHttpResponse executeWithCurl(
+    const RaHttpRequest& request,
+    std::atomic<bool>* stopping
+) {
     RaHttpResponse response{request.id, request.channel, 0, {}, {}};
     if (!initializeCurl()) {
         response.error = requestFailedError;
@@ -141,12 +160,16 @@ RaHttpResponse executeWithCurl(const RaHttpRequest& request) {
     const bool configured =
         curl_easy_setopt(curl, CURLOPT_URL, request.url.c_str()) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 5000L) == CURLE_OK
-        && curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 15000L) == CURLE_OK
+        && curl_easy_setopt(
+            curl, CURLOPT_TIMEOUT_MS, static_cast<long>(kRaHttpRequestTimeout.count())
+        ) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, policy.followLocation) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_MAXREDIRS, policy.maxRedirects) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L) == CURLE_OK
-        && curl_easy_setopt(curl, CURLOPT_USERAGENT, "OrbitalBoy/RetroAchievements-MVP") == CURLE_OK
+        && curl_easy_setopt(
+            curl, CURLOPT_USERAGENT, "OrbitalBoy/1.0 (RetroAchievements; rcheevos)"
+        ) == CURLE_OK
 #if LIBCURL_VERSION_NUM >= 0x075500
         && curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https") == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, redirectProtocols(policy)) == CURLE_OK
@@ -155,6 +178,9 @@ RaHttpResponse executeWithCurl(const RaHttpRequest& request) {
         && curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, redirectProtocolMask(policy)) == CURLE_OK
 #endif
         && curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L) == CURLE_OK
+        && curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L) == CURLE_OK
+        && curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curlProgress) == CURLE_OK
+        && curl_easy_setopt(curl, CURLOPT_XFERINFODATA, stopping) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, appendCurlBody) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer) == CURLE_OK;
 
@@ -186,16 +212,12 @@ RaHttpResponse executeWithCurl(const RaHttpRequest& request) {
         response.body = std::move(buffer.body);
     }
 
+    if (!response.error.empty()) {
+        secureEraseBody(buffer.body);
+    }
+
     curl_easy_cleanup(curl);
     return response;
-}
-
-RaHttpExecutor resolveExecutor(RaHttpExecutor executor) {
-    if (executor) {
-        return executor;
-    }
-    initializeCurl();
-    return executeWithCurl;
 }
 
 } // namespace
@@ -213,8 +235,15 @@ RaHttpRequestPolicy makeRaHttpRequestPolicy(const RaHttpRequest& request) {
 class RaHttpTransport::Impl {
 public:
     explicit Impl(RaHttpExecutor executor)
-        : executor_(std::move(executor))
-        , worker_([this] { run(); }) {
+        : executor_(std::move(executor)) {
+        if (!executor_) {
+            initializeCurl();
+            executor_ = [this](const RaHttpRequest& request) {
+                return executeWithCurl(request, &stopRequested_);
+            };
+        }
+        workers_[0] = std::thread([this] { run(RaHttpChannel::Api); });
+        workers_[1] = std::thread([this] { run(RaHttpChannel::Image); });
     }
 
     ~Impl() {
@@ -228,10 +257,10 @@ public:
             if (stopping_ || outstandingByChannel_[index] >= maximumOutstandingPerChannel) {
                 return false;
             }
-            pending_.push_back(std::move(request));
+            pendingByChannel_[index].push_back(std::move(request));
             ++outstandingByChannel_[index];
         }
-        pendingCondition_.notify_one();
+        pendingCondition_.notify_all();
         return true;
     }
 
@@ -259,34 +288,49 @@ public:
         {
             std::lock_guard<std::mutex> queueLock(queueMutex_);
             stopping_ = true;
-            for (const auto& request : pending_) {
-                --outstandingByChannel_[channelIndex(request.channel)];
+            stopRequested_.store(true, std::memory_order_relaxed);
+            for (std::size_t index = 0; index < pendingByChannel_.size(); ++index) {
+                for (auto& request : pendingByChannel_[index]) {
+                    (void)secureEraseStringStorage(request.postData);
+                }
+                outstandingByChannel_[index] -= pendingByChannel_[index].size();
+                pendingByChannel_[index].clear();
             }
-            pending_.clear();
         }
-        pendingCondition_.notify_one();
-        if (worker_.joinable()) {
-            worker_.join();
+        pendingCondition_.notify_all();
+        for (auto& worker : workers_) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+        std::lock_guard<std::mutex> queueLock(queueMutex_);
+        for (std::size_t index = 0; index < completedByChannel_.size(); ++index) {
+            for (auto& response : completedByChannel_[index]) {
+                secureEraseBody(response.body);
+            }
+            outstandingByChannel_[index] -= completedByChannel_[index].size();
+            completedByChannel_[index].clear();
         }
     }
 
 private:
-    void run() {
+    void run(RaHttpChannel channel) {
+        const std::size_t index = channelIndex(channel);
         for (;;) {
             RaHttpRequest request;
             {
                 std::unique_lock<std::mutex> lock(queueMutex_);
-                pendingCondition_.wait(lock, [this] {
-                    return stopping_ || !pending_.empty();
+                pendingCondition_.wait(lock, [this, index] {
+                    return stopping_ || !pendingByChannel_[index].empty();
                 });
-                if (pending_.empty()) {
+                if (pendingByChannel_[index].empty()) {
                     if (stopping_) {
                         return;
                     }
                     continue;
                 }
-                request = std::move(pending_.front());
-                pending_.pop_front();
+                request = std::move(pendingByChannel_[index].front());
+                pendingByChannel_[index].pop_front();
             }
 
             RaHttpResponse response;
@@ -299,6 +343,7 @@ private:
                     response = makeErrorResponse(request, requestFailedError);
                 }
             }
+            (void)secureEraseStringStorage(request.postData);
 
             std::lock_guard<std::mutex> lock(queueMutex_);
             completedByChannel_[channelIndex(response.channel)].push_back(std::move(response));
@@ -308,20 +353,21 @@ private:
     RaHttpExecutor executor_;
     mutable std::mutex queueMutex_;
     std::condition_variable pendingCondition_;
-    std::deque<RaHttpRequest> pending_;
+    std::array<std::deque<RaHttpRequest>, 2> pendingByChannel_;
     std::array<std::deque<RaHttpResponse>, 2> completedByChannel_;
     std::array<std::size_t, 2> outstandingByChannel_{};
     bool stopping_ = false;
+    std::atomic<bool> stopRequested_{false};
     std::mutex shutdownMutex_;
-    std::thread worker_;
+    std::array<std::thread, 2> workers_;
 };
 
 RaHttpTransport::RaHttpTransport()
-    : impl_(std::make_unique<Impl>(resolveExecutor(RaHttpExecutor{}))) {
+    : impl_(std::make_unique<Impl>(RaHttpExecutor{})) {
 }
 
 RaHttpTransport::RaHttpTransport(RaHttpExecutor executor)
-    : impl_(std::make_unique<Impl>(resolveExecutor(std::move(executor)))) {
+    : impl_(std::make_unique<Impl>(std::move(executor))) {
 }
 
 RaHttpTransport::~RaHttpTransport() = default;

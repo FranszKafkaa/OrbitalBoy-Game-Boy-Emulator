@@ -22,7 +22,11 @@
 #include <vector>
 
 #if !defined(_WIN32)
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #include "gb/app/frontend/realtime/retroachievements_config.hpp"
@@ -124,6 +128,45 @@ TEST_CASE("retroachievements", "client_can_remain_in_casual_mode") {
     T_REQUIRE(client != nullptr);
     rc_client_set_hardcore_enabled(client, 0);
     T_REQUIRE(!rc_client_get_hardcore_enabled(client));
+    rc_client_destroy(client);
+}
+
+TEST_CASE("retroachievements", "vendored_rcheevos_completes_synthetic_casual_login") {
+    struct SyntheticLogin {
+        bool serverCalled = false;
+        int result = RC_INVALID_STATE;
+    } state;
+    const auto server = [](const rc_api_request_t* request,
+                           rc_client_server_callback_t callback,
+                           void* callbackData,
+                           rc_client_t* client) {
+        auto& login = *static_cast<SyntheticLogin*>(rc_client_get_userdata(client));
+        login.serverCalled = request && request->url && request->post_data;
+        static constexpr char body[] =
+            "{\"Success\":true,\"User\":\"Marcelo\",\"Token\":\"token\","
+            "\"Score\":123,\"SoftcoreScore\":45,\"Messages\":0}";
+        const rc_api_server_response_t response{body, sizeof(body) - 1U, 200};
+        callback(&response, callbackData);
+    };
+    rc_client_t* client = rc_client_create(readMemory, server);
+    T_REQUIRE(client != nullptr);
+    rc_client_set_userdata(client, &state);
+    rc_client_set_hardcore_enabled(client, 0);
+    rc_client_begin_login_with_password(
+        client,
+        "Marcelo",
+        "synthetic-password",
+        [](int result, const char*, rc_client_t*, void* callbackData) {
+            static_cast<SyntheticLogin*>(callbackData)->result = result;
+        },
+        &state
+    );
+    T_REQUIRE(state.serverCalled);
+    T_EQ(state.result, RC_OK);
+    T_REQUIRE(!rc_client_get_hardcore_enabled(client));
+    const rc_client_user_t* user = rc_client_get_user_info(client);
+    T_REQUIRE(user != nullptr);
+    T_EQ(std::string(user->username), std::string("Marcelo"));
     rc_client_destroy(client);
 }
 
@@ -1359,6 +1402,66 @@ TEST_CASE("retroachievements", "image_cache_ignores_completion_owned_by_a_shutdo
     transport.shutdown();
 }
 
+TEST_CASE("retroachievements", "image_cache_does_not_reprobe_or_retry_failed_url_each_frame") {
+    const auto cacheDirectory = tests::makeTempPath("ra_image_negative_cache", "");
+    tests::ScopedPath cleanup(cacheDirectory);
+    std::filesystem::create_directories(cacheDirectory);
+    std::atomic<int> requests{0};
+    gb::frontend::RaHttpTransport transport([&](const auto& request) {
+        ++requests;
+        return gb::frontend::RaHttpResponse{
+            request.id, request.channel, 503, {}, "offline",
+        };
+    });
+    gb::frontend::RetroAchievementsImageCache cache(transport, cacheDirectory.string());
+    const std::string url = "https://example.invalid/missing.png";
+    for (int frame = 0; frame < 20; ++frame) {
+        cache.request(url);
+        cache.processCompleted();
+        (void)cache.localPath(url);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    T_EQ(requests.load(), 1);
+    T_EQ(cache.filesystemProbeCount(), 1U);
+    cache.retryFailed();
+    cache.request(url);
+    const auto retryDeadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (requests.load() < 2 && std::chrono::steady_clock::now() < retryDeadline) {
+        cache.processCompleted();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    T_EQ(requests.load(), 2);
+    cache.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "image_path_application_probes_only_requested_urls") {
+    const auto cacheDirectory = tests::makeTempPath("ra_image_visible_probe", "");
+    tests::ScopedPath cleanup(cacheDirectory);
+    std::filesystem::create_directories(cacheDirectory);
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{
+            request.id, request.channel, 404, {}, "missing",
+        };
+    });
+    gb::frontend::RetroAchievementsImageCache cache(transport, cacheDirectory.string());
+    gb::frontend::RaSessionSnapshot snapshot{};
+    snapshot.profile.library.resize(100);
+    for (std::size_t index = 0; index < snapshot.profile.library.size(); ++index) {
+        snapshot.profile.library[index].badgeUrl =
+            "https://example.invalid/game-" + std::to_string(index) + ".png";
+    }
+    const std::vector<std::string> visible{
+        snapshot.profile.library[3].badgeUrl,
+        snapshot.profile.library[4].badgeUrl,
+    };
+    gb::frontend::applyCachedImagePathsForUrls(snapshot, cache, visible);
+    T_EQ(cache.filesystemProbeCount(), 2U);
+    cache.shutdown();
+    transport.shutdown();
+}
+
 #if !defined(_WIN32)
 TEST_CASE("retroachievements", "image_cache_rejects_symlinked_entries_and_never_uses_predictable_temporary_names") {
     const auto cacheDirectory = tests::makeTempPath("ra_image_cache_symlink", "");
@@ -1571,6 +1674,42 @@ TEST_CASE("retroachievements", "http_draining_image_preserves_api_completions") 
     transport.shutdown();
 }
 
+TEST_CASE("retroachievements", "http_api_completes_while_image_worker_is_blocked") {
+    std::atomic<bool> imageStarted{false};
+    std::atomic<bool> releaseImage{false};
+    gb::frontend::RaHttpTransport transport([&](const auto& request) {
+        if (request.channel == gb::frontend::RaHttpChannel::Image) {
+            imageStarted.store(true);
+            while (!releaseImage.load()) {
+                std::this_thread::yield();
+            }
+        }
+        return gb::frontend::RaHttpResponse{
+            request.id, request.channel, 200, {'o', 'k'}, {}
+        };
+    });
+    for (std::uint64_t id = 1; id <= 64; ++id) {
+        T_REQUIRE(transport.submit({
+            id,
+            gb::frontend::RaHttpChannel::Image,
+            "https://example.invalid/image-" + std::to_string(id),
+            {},
+        }));
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!imageStarted.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    T_REQUIRE(imageStarted.load());
+    T_REQUIRE(transport.submit({100, gb::frontend::RaHttpChannel::Api,
+                                "https://example.invalid/api", {}}));
+    const auto api = waitAndDrain(transport, gb::frontend::RaHttpChannel::Api);
+    releaseImage.store(true);
+    T_EQ(api.size(), 1U);
+    T_EQ(api.front().id, 100U);
+    transport.shutdown();
+}
+
 TEST_CASE("retroachievements", "http_submit_executes_only_on_its_worker") {
     std::atomic<bool> executorStarted{false};
     std::atomic<bool> releaseExecutor{false};
@@ -1708,7 +1847,7 @@ TEST_CASE("retroachievements", "http_completed_responses_hold_capacity_until_cha
         {66, gb::frontend::RaHttpChannel::Api, "https://example.invalid/api", {}}
     ));
 
-    T_EQ(transport.takeCompleted(gb::frontend::RaHttpChannel::Api).size(), 64U);
+    T_EQ(waitAndDrain(transport, gb::frontend::RaHttpChannel::Api, 64).size(), 64U);
     T_REQUIRE(transport.submit(
         {67, gb::frontend::RaHttpChannel::Api, "https://example.invalid/api", {}}
     ));
@@ -1837,14 +1976,64 @@ TEST_CASE("retroachievements", "http_shutdown_is_idempotent_and_cancels_pending_
     T_REQUIRE(stoppingObserved);
     T_EQ(calls.load(), 1);
     const auto completed = transport.takeCompleted(gb::frontend::RaHttpChannel::Api);
-    T_EQ(completed.size(), 1U);
-    T_EQ(completed.front().id, 1U);
+    T_REQUIRE(completed.empty());
 
     T_REQUIRE(!transport.submit({4, gb::frontend::RaHttpChannel::Api, "https://example.invalid/four", {}}));
     const auto afterShutdown = transport.takeCompleted(gb::frontend::RaHttpChannel::Api);
     T_EQ(calls.load(), 1);
     T_REQUIRE(afterShutdown.empty());
 }
+
+#if !defined(_WIN32)
+TEST_CASE("retroachievements", "http_shutdown_aborts_active_curl_transfer") {
+    const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+    T_REQUIRE(server >= 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    if (::bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+        const int bindError = errno;
+        ::close(server);
+        T_REQUIRE(bindError == EACCES || bindError == EPERM);
+        return;
+    }
+    T_EQ(::listen(server, 1), 0);
+    socklen_t addressSize = sizeof(address);
+    T_EQ(::getsockname(server, reinterpret_cast<sockaddr*>(&address), &addressSize), 0);
+    std::atomic<bool> accepted{false};
+    std::atomic<bool> stopServer{false};
+    std::thread serverThread([&] {
+        const int client = ::accept(server, nullptr, nullptr);
+        if (client >= 0) {
+            accepted.store(true);
+            std::array<char, 1024> request{};
+            (void)::recv(client, request.data(), request.size(), 0);
+            while (!stopServer.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            ::close(client);
+        }
+    });
+
+    gb::frontend::RaHttpTransport transport;
+    const std::string url = "http://127.0.0.1:"
+        + std::to_string(ntohs(address.sin_port)) + "/slow";
+    T_REQUIRE(transport.submit({1, gb::frontend::RaHttpChannel::Api, url, {}}));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!accepted.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    T_REQUIRE(accepted.load());
+    const auto started = std::chrono::steady_clock::now();
+    transport.shutdown();
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    stopServer.store(true);
+    serverThread.join();
+    ::close(server);
+    T_REQUIRE(elapsed < std::chrono::seconds(2));
+}
+#endif
 
 namespace {
 
@@ -2375,6 +2564,13 @@ public:
         T_REQUIRE(eventHandler != nullptr);
         rc_client_event_t event{};
         event.type = RC_CLIENT_EVENT_LEADERBOARD_STARTED;
+        eventHandler(&event, handle);
+    }
+
+    void emitConnectionEvent(int type) {
+        T_REQUIRE(eventHandler != nullptr);
+        rc_client_event_t event{};
+        event.type = type;
         eventHandler(&event, handle);
     }
 
@@ -2995,6 +3191,73 @@ TEST_CASE("retroachievements", "session_transport_failure_goes_offline_on_owner_
     transport.shutdown();
 }
 
+TEST_CASE("retroachievements", "session_recovers_online_from_client_event_and_successful_api") {
+    std::atomic<int> calls{0};
+    gb::GameBoy gameBoy;
+    gb::frontend::RaHttpTransport transport([&](const auto& request) {
+        if (calls.fetch_add(1) == 0) {
+            return gb::frontend::RaHttpResponse{
+                request.id, request.channel, 0, {}, "offline",
+            };
+        }
+        return gb::frontend::RaHttpResponse{
+            request.id, request.channel, 200, {'o', 'k'}, {},
+        };
+    });
+    FakeRaClientApi api;
+    auto session = makeSession(gameBoy, transport, api);
+    session.enqueueTokenLogin("Marcelo", "token");
+    session.processPending();
+    api.completeLogin(RC_OK);
+
+    api.emitConnectionEvent(RC_CLIENT_EVENT_DISCONNECTED);
+    T_REQUIRE(session.snapshot().connectionState == gb::frontend::RaConnectionState::Offline);
+    api.emitConnectionEvent(RC_CLIENT_EVENT_RECONNECTED);
+    T_REQUIRE(session.snapshot().connectionState == gb::frontend::RaConnectionState::Online);
+    auto events = session.takeEvents();
+    T_REQUIRE(events.back().type == gb::frontend::RaUiEventType::Reconnected);
+
+    api.emitConnectionEvent(RC_CLIENT_EVENT_DISCONNECTED);
+    api.issueServerRequest("https://example.invalid/recover-first-fails");
+    processUntil(session, [&] { return calls.load() >= 1; });
+    api.issueServerRequest("https://example.invalid/recover-second-succeeds");
+    processUntil(session, [&] {
+        return session.snapshot().connectionState == gb::frontend::RaConnectionState::Online;
+    });
+    T_REQUIRE(session.snapshot().connectionState == gb::frontend::RaConnectionState::Online);
+    events = session.takeEvents();
+    T_REQUIRE(!events.empty());
+    T_REQUIRE(events.back().type == gb::frontend::RaUiEventType::Reconnected);
+    session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "lifecycle_retries_game_load_once_after_reconnection") {
+    gb::frontend::RaRealtimeLifecycleCoordinator lifecycle;
+    gb::frontend::RaLifecycleActions actions{};
+    int loads = 0;
+    actions.loadGame = [&] { ++loads; };
+    gb::frontend::RaSessionSnapshot snapshot{};
+    snapshot.connectionState = gb::frontend::RaConnectionState::Online;
+    lifecycle.observeSnapshot(snapshot, actions);
+    lifecycle.observeSnapshot(snapshot, actions);
+    T_EQ(loads, 1);
+    snapshot.connectionState = gb::frontend::RaConnectionState::Offline;
+    lifecycle.observeSnapshot(snapshot, actions);
+    lifecycle.observeSnapshot(snapshot, actions);
+    lifecycle.observeSnapshot(snapshot, actions);
+    T_EQ(loads, 1);
+    snapshot.connectionState = gb::frontend::RaConnectionState::Online;
+    lifecycle.observeSnapshot(snapshot, actions);
+    lifecycle.observeSnapshot(snapshot, actions);
+    T_EQ(loads, 2);
+
+    snapshot.connectionGeneration = 1;
+    lifecycle.observeSnapshot(snapshot, actions);
+    lifecycle.observeSnapshot(snapshot, actions);
+    T_EQ(loads, 3);
+}
+
 TEST_CASE("retroachievements", "session_transport_backpressure_completes_rejection_without_pending_callback") {
     std::atomic<bool> executorStarted{false};
     std::atomic<bool> releaseExecutor{false};
@@ -3473,16 +3736,15 @@ TEST_CASE("retroachievements", "session_finishes_partial_profile_after_console_h
     api.completeLogin(RC_OK);
     processUntil(session, [&] {
         const auto snapshot = session.snapshot();
-        return snapshot.connectionState == gb::frontend::RaConnectionState::Offline
-            && !snapshot.errorText.empty();
+        return snapshot.connectionState == gb::frontend::RaConnectionState::Online
+            && snapshot.profile.library.size() == 1U;
     });
 
     const auto snapshot = session.snapshot();
-    T_REQUIRE(snapshot.connectionState == gb::frontend::RaConnectionState::Offline);
+    T_REQUIRE(snapshot.connectionState == gb::frontend::RaConnectionState::Online);
     T_EQ(snapshot.profile.library.size(), 1U);
     T_EQ(snapshot.profile.library.front().gameId, 7U);
     T_EQ(snapshot.profile.library.front().title, std::string("Orbital Boy"));
-    T_REQUIRE(!snapshot.errorText.empty());
     T_REQUIRE(session.shutdown());
     transport.shutdown();
 }
@@ -3949,6 +4211,32 @@ TEST_CASE("retroachievements", "profile_renderer_requests_textures_only_for_visi
     SDL_FreeSurface(surface);
 }
 
+TEST_CASE("retroachievements", "profile_network_requests_only_visible_and_critical_images") {
+    gb::frontend::RaSessionSnapshot snapshot{};
+    snapshot.profile.user.avatarUrl = "https://example.invalid/avatar.png";
+    snapshot.currentGame.badgeUrl = "https://example.invalid/game.png";
+    snapshot.currentAchievements.resize(100);
+    snapshot.profile.library.resize(100);
+    for (std::size_t index = 0; index < 100; ++index) {
+        snapshot.currentAchievements[index].badgeUrl =
+            "https://example.invalid/a" + std::to_string(index) + ".png";
+        snapshot.profile.library[index].badgeUrl =
+            "https://example.invalid/g" + std::to_string(index) + ".png";
+    }
+    gb::frontend::RaProfilePanelState panel{};
+    auto urls = gb::frontend::raVisibleImageUrls(snapshot, panel, 640, 480);
+    T_EQ(urls.size(), 2U);
+
+    gb::frontend::openRaProfilePanel(panel, gb::frontend::RaProfileTab::CurrentGame);
+    urls = gb::frontend::raVisibleImageUrls(snapshot, panel, 640, 480);
+    const auto layout = gb::frontend::raProfilePanelLayout(640, 480);
+    const auto visible = gb::frontend::raVisibleProfileRows(
+        panel.tab, snapshot.currentAchievements.size(), panel.scroll, layout.content.h
+    );
+    T_EQ(urls.size(), 2U + visible.end - visible.begin);
+    T_REQUIRE(urls.size() < snapshot.currentAchievements.size());
+}
+
 TEST_CASE("retroachievements", "image_texture_cache_is_bounded_and_lru") {
     const std::string pathA = tempFilePath("ra_texture_lru_a.bmp");
     const std::string pathB = tempFilePath("ra_texture_lru_b.bmp");
@@ -4161,6 +4449,68 @@ TEST_CASE("retroachievements", "realtime_lifecycle_preserves_owner_operation_ord
     for (std::size_t index = 0; index < expected.size(); ++index) {
         T_EQ(trace[index], expected[index]);
     }
+}
+
+TEST_CASE("retroachievements", "deferred_restore_gates_frames_until_restore_or_timeout_reset") {
+    gb::frontend::RaDeferredProgressRestore restore;
+    restore.stage(gb::frontend::RaStoredProgress{
+        "0123456789abcdef0123456789abcdef", {}, {1, 2, 3},
+    });
+    gb::frontend::RaSessionSnapshot snapshot{};
+    std::vector<std::string> trace;
+    const auto deserialize = [&](std::string_view, const std::vector<std::uint8_t>&) {
+        trace.push_back("restore");
+        return true;
+    };
+    const auto reset = [&]() {
+        trace.push_back("reset");
+        return true;
+    };
+
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        T_REQUIRE(
+            restore.prepareCommittedFrame(
+                snapshot, std::chrono::milliseconds(attempt * 10), deserialize, reset
+            ) == gb::frontend::RaDeferredRestoreResult::Waiting
+        );
+        trace.push_back("blocked");
+    }
+    snapshot.gameLoaded = true;
+    snapshot.romHash = "0123456789abcdef0123456789abcdef";
+    T_REQUIRE(
+        restore.prepareCommittedFrame(
+            snapshot, std::chrono::milliseconds(40), deserialize, reset
+        ) == gb::frontend::RaDeferredRestoreResult::Restored
+    );
+    trace.push_back("frame");
+    T_REQUIRE(trace == std::vector<std::string>({
+        "blocked", "blocked", "blocked", "restore", "frame",
+    }));
+
+    restore.stage(gb::frontend::RaStoredProgress{
+        "fedcba9876543210fedcba9876543210", {}, {4, 5, 6},
+    });
+    snapshot = {};
+    T_REQUIRE(
+        restore.prepareCommittedFrame(
+            snapshot, std::chrono::milliseconds(100), deserialize, reset,
+            gb::frontend::kRaHttpRequestTimeout + std::chrono::seconds(1)
+        ) == gb::frontend::RaDeferredRestoreResult::Waiting
+    );
+    T_REQUIRE(
+        restore.prepareCommittedFrame(
+            snapshot, std::chrono::milliseconds(5100), deserialize, reset,
+            gb::frontend::kRaHttpRequestTimeout + std::chrono::seconds(1)
+        ) == gb::frontend::RaDeferredRestoreResult::Waiting
+    );
+    T_REQUIRE(
+        restore.prepareCommittedFrame(
+            snapshot, std::chrono::milliseconds(16101), deserialize, reset,
+            gb::frontend::kRaHttpRequestTimeout + std::chrono::seconds(1)
+        ) == gb::frontend::RaDeferredRestoreResult::TimedOutReset
+    );
+    T_REQUIRE(!restore.pending());
+    T_EQ(trace.back(), std::string("reset"));
 }
 
 TEST_CASE("retroachievements", "realtime_command_batch_executes_login_logout_as_owner_barriers") {

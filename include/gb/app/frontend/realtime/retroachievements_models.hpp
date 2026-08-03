@@ -21,6 +21,7 @@ enum class RaUiEventType {
     AchievementUnlocked,
     GameLoaded,
     Offline,
+    Reconnected,
 };
 
 struct RaUserSummary {
@@ -77,6 +78,7 @@ struct RaSessionSnapshot {
     RaGameSummary currentGame;
     std::vector<RaAchievementSummary> currentAchievements;
     std::string romHash;
+    std::uint64_t connectionGeneration = 0;
     bool gameLoaded = false;
 };
 

@@ -715,6 +715,49 @@ RaVisibleRowRange raVisibleProfileRows(
     };
 }
 
+std::vector<std::string> raVisibleImageUrls(
+    const RaSessionSnapshot& snapshot,
+    const RaProfilePanelState& panel,
+    int outputW,
+    int outputH
+) {
+    std::vector<std::string> urls;
+    const auto append = [&](const std::string& url) {
+        if (!url.empty()
+            && std::find(urls.begin(), urls.end(), url) == urls.end()) {
+            urls.push_back(url);
+        }
+    };
+    append(snapshot.profile.user.avatarUrl);
+    append(snapshot.currentGame.badgeUrl);
+    if (!panel.open || panel.tab == RaProfileTab::Summary) {
+        return urls;
+    }
+    const auto layout = raProfilePanelLayout(outputW, outputH);
+    if (panel.tab == RaProfileTab::CurrentGame) {
+        const auto visible = raVisibleProfileRows(
+            panel.tab,
+            snapshot.currentAchievements.size(),
+            panel.scroll,
+            layout.content.h
+        );
+        for (std::size_t index = visible.begin; index < visible.end; ++index) {
+            append(snapshot.currentAchievements[index].badgeUrl);
+        }
+    } else {
+        const auto visible = raVisibleProfileRows(
+            panel.tab,
+            snapshot.profile.library.size(),
+            panel.scroll,
+            layout.content.h
+        );
+        for (std::size_t index = visible.begin; index < visible.end; ++index) {
+            append(snapshot.profile.library[index].badgeUrl);
+        }
+    }
+    return urls;
+}
+
 RaToastLayout raToastLayout(int outputW, int outputH) {
     const int safeW = std::max(1, outputW);
     const int safeH = std::max(1, outputH);

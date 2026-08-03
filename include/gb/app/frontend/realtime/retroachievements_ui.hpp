@@ -180,6 +180,12 @@ RaVisibleRowRange raVisibleProfileRows(
     int scroll,
     int viewportHeight
 );
+std::vector<std::string> raVisibleImageUrls(
+    const RaSessionSnapshot& snapshot,
+    const RaProfilePanelState& panel,
+    int outputW,
+    int outputH
+);
 
 struct RaToastEntry {
     RaUiEvent event;
