@@ -12,6 +12,7 @@
 
 #include "gb/app/frontend/realtime/retroachievements_config.hpp"
 #include "gb/app/frontend/realtime/retroachievements_models.hpp"
+#include "gb/app/frontend/realtime/secure_string.hpp"
 
 namespace gb {
 class GameBoy;
@@ -38,6 +39,7 @@ public:
 
     virtual rc_client_async_handle_t* beginLoginWithPassword(
         rc_client_t* client,
+        // The implementation may observe but must not retain these strings.
         const char* username,
         const char* password,
         rc_client_callback_t callback,
@@ -45,6 +47,7 @@ public:
     );
     virtual rc_client_async_handle_t* beginLoginWithToken(
         rc_client_t* client,
+        // The implementation may observe but must not retain these strings.
         const char* username,
         const char* token,
         rc_client_callback_t callback,
@@ -153,8 +156,10 @@ public:
     RetroAchievementsSession(RetroAchievementsSession&&) = delete;
     RetroAchievementsSession& operator=(RetroAchievementsSession&&) = delete;
 
-    void enqueueLogin(std::string username, std::string password);
-    void enqueueTokenLogin(std::string username, std::string token);
+    void enqueueLogin(std::string username, std::string_view password);
+    void enqueueLogin(std::string username, RaSecretString password);
+    void enqueueTokenLogin(std::string username, std::string_view token);
+    void enqueueTokenLogin(std::string username, RaSecretString token);
     void enqueueLogout();
     void enqueueLoadGame(std::uint32_t consoleId, std::string romPath);
 

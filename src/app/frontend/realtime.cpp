@@ -1285,9 +1285,6 @@ int RealtimeSession::run() {
                         updated.showNotifications,
                         std::memory_order_release
                     );
-                    if (saveRetroAchievementsConfig(raConfigPath, updated)) {
-                        return true;
-                    }
                     if (updated.username.empty() && updated.token.empty()) {
                         bool sensitiveQuarantine = false;
                         const bool invalidated =
@@ -1309,6 +1306,9 @@ int RealtimeSession::run() {
                         }
                         return invalidated;
                     }
+                    if (saveRetroAchievementsConfig(raConfigPath, updated)) {
+                        return true;
+                    }
                     workerUiMessages.post("ERRO AO SALVAR LOGIN RA", 240);
                     return false;
                 }
@@ -1318,12 +1318,14 @@ int RealtimeSession::run() {
         raActions.tokenLogin = [&]() {
             if (raSession && raConfig.autoLogin
                 && !raConfig.username.empty() && !raConfig.token.empty()) {
+                RaSecretString token;
+                raConfig.transferTokenTo(token);
                 raSession->enqueueTokenLogin(
                     std::move(raConfig.username),
-                    std::move(raConfig.token)
+                    std::move(token)
                 );
             }
-            (void)secureEraseStringStorage(raConfig.token);
+            raConfig.clearToken();
             raConfig.username.clear();
         };
         raActions.loadGame = [&]() {
@@ -2656,12 +2658,14 @@ int RealtimeSession::run() {
                     outputH
                 );
                 if (action == RaLoginModalAction::Submit) {
-                    enqueueRaCommand({
+                    RaRuntimeCommand login{
                         RaRuntimeCommandType::Login,
                         raLoginModal.username,
-                        moveStringAndEraseSource(raLoginModal.password),
+                        {},
                         0,
-                    });
+                    };
+                    login.password.assignAndErase(raLoginModal.password);
+                    enqueueRaCommand(std::move(login));
                     uiMessage = "LOGIN RETROACHIEVEMENTS";
                     uiMessageFrames = 90;
                 } else if (action == RaLoginModalAction::Close) {

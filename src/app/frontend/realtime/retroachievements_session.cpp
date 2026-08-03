@@ -283,10 +283,6 @@ std::string copyText(const char* text) {
     return text ? text : "";
 }
 
-void eraseSecret(std::string& secret) {
-    (void)secureEraseStringStorage(secret);
-}
-
 std::string lowercaseAscii(std::string_view value) {
     std::string lowered;
     lowered.reserve(value.size());
@@ -329,13 +325,9 @@ public:
     struct Command {
         CommandType type = CommandType::Logout;
         std::string username;
-        std::string secret;
+        RaSecretString secret;
         std::string romPath;
         std::uint32_t consoleId = 0;
-
-        ~Command() {
-            eraseSecret(secret);
-        }
     };
 
     struct PendingServerCall {
@@ -382,7 +374,7 @@ public:
           config(std::move(configValue)),
           persistConfig(std::move(persistConfigValue)),
           ownerThread(std::this_thread::get_id()) {
-        eraseSecret(config.token);
+        config.clearToken();
         config.username.clear();
         if (clientApi) {
             api = clientApi;
@@ -480,8 +472,7 @@ public:
 
     void notifySecretWiped(Command& command) {
         const std::size_t logicalSize = command.secret.size();
-        (void)secureEraseStringStorage(
-            command.secret,
+        command.secret.clear(
             [&](const char* storage, std::size_t storageSize) {
                 api->onLoginSecretWiped(
                     storage,
@@ -494,7 +485,7 @@ public:
 
     void beginLogin(
         const std::string& username,
-        const std::string& secret,
+        const RaSecretString& secret,
         bool tokenLogin
     ) {
         const std::uint64_t generation = ++loginGeneration;
@@ -547,7 +538,7 @@ public:
                 ? "Não foi possível conectar ao RetroAchievements. Tente novamente."
                 : "Usuário, senha ou token inválido no RetroAchievements.";
             if (!isTransientLoginFailure(result)) {
-                eraseSecret(config.token);
+                config.clearToken();
                 if (!persist()) {
                     state.errorText =
                         "Login recusado e não foi possível atualizar as credenciais locais.";
@@ -566,10 +557,12 @@ public:
 
         copyUser(*user);
         config.username = copyText(user->username);
-        eraseSecret(config.token);
-        config.token = copyText(user->token);
+        config.clearToken();
+        config.assignToken(
+            user->token ? std::string_view(user->token) : std::string_view{}
+        );
         const bool configPersisted = persist();
-        eraseSecret(config.token);
+        config.clearToken();
         config.username.clear();
         state.connectionState = RaConnectionState::Online;
         state.statusText = configPersisted
@@ -595,7 +588,7 @@ public:
         ++profileGeneration;
         api->logout(client);
         config.username.clear();
-        eraseSecret(config.token);
+        config.clearToken();
         const bool configPersisted = persist();
 
         state = {};
@@ -1246,7 +1239,7 @@ public:
         }
 
         cancelServerCalls();
-        eraseSecret(config.token);
+        config.clearToken();
         config.username.clear();
         if (client) {
             api->destroy(client);
@@ -1327,25 +1320,41 @@ RetroAchievementsSession::~RetroAchievementsSession() = default;
 
 void RetroAchievementsSession::enqueueLogin(
     std::string username,
-    std::string password
+    std::string_view password
+) {
+    RaSecretString secret;
+    secret.assign(password);
+    enqueueLogin(std::move(username), std::move(secret));
+}
+
+void RetroAchievementsSession::enqueueLogin(
+    std::string username,
+    RaSecretString password
 ) {
     auto command = std::make_unique<Impl::Command>();
     command->type = Impl::CommandType::PasswordLogin;
     command->username = std::move(username);
-    command->secret.swap(password);
-    eraseSecret(password);
+    command->secret = std::move(password);
     impl_->enqueue(std::move(command));
 }
 
 void RetroAchievementsSession::enqueueTokenLogin(
     std::string username,
-    std::string token
+    std::string_view token
+) {
+    RaSecretString secret;
+    secret.assign(token);
+    enqueueTokenLogin(std::move(username), std::move(secret));
+}
+
+void RetroAchievementsSession::enqueueTokenLogin(
+    std::string username,
+    RaSecretString token
 ) {
     auto command = std::make_unique<Impl::Command>();
     command->type = Impl::CommandType::TokenLogin;
     command->username = std::move(username);
-    command->secret.swap(token);
-    eraseSecret(token);
+    command->secret = std::move(token);
     impl_->enqueue(std::move(command));
 }
 

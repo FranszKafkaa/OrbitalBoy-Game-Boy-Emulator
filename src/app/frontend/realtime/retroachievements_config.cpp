@@ -155,6 +155,103 @@ bool quarantineConfig(
 
 } // namespace
 
+RaConfig::RaConfig(
+    int versionValue,
+    std::string_view usernameValue,
+    std::string_view tokenValue,
+    bool autoLoginValue,
+    bool showNotificationsValue,
+    RaConfigWipeObserver wipeObserver
+)
+    : version(versionValue),
+      username(usernameValue),
+      autoLogin(autoLoginValue),
+      showNotifications(showNotificationsValue),
+      wipeObserver_(std::move(wipeObserver)) {
+    if (!tokenValue.empty()) {
+        token.assign(tokenValue.data(), tokenValue.size());
+    }
+}
+
+RaConfig::~RaConfig() {
+    clearToken();
+}
+
+RaConfig::RaConfig(const RaConfig& other)
+    : version(other.version),
+      username(other.username),
+      autoLogin(other.autoLogin),
+      showNotifications(other.showNotifications),
+      wipeObserver_(other.wipeObserver_) {
+    if (!other.token.empty()) {
+        token.assign(other.token.data(), other.token.size());
+    }
+}
+
+RaConfig& RaConfig::operator=(const RaConfig& other) {
+    if (this != &other) {
+        clearToken();
+        version = other.version;
+        username = other.username;
+        autoLogin = other.autoLogin;
+        showNotifications = other.showNotifications;
+        wipeObserver_ = other.wipeObserver_;
+        if (!other.token.empty()) {
+            token.assign(other.token.data(), other.token.size());
+        }
+    }
+    return *this;
+}
+
+RaConfig::RaConfig(RaConfig&& other)
+    : version(other.version),
+      username(std::move(other.username)),
+      autoLogin(other.autoLogin),
+      showNotifications(other.showNotifications),
+      wipeObserver_(other.wipeObserver_) {
+    if (!other.token.empty()) {
+        token.assign(other.token.data(), other.token.size());
+    }
+    other.clearToken();
+}
+
+RaConfig& RaConfig::operator=(RaConfig&& other) {
+    if (this != &other) {
+        clearToken();
+        version = other.version;
+        username = std::move(other.username);
+        autoLogin = other.autoLogin;
+        showNotifications = other.showNotifications;
+        wipeObserver_ = other.wipeObserver_;
+        if (!other.token.empty()) {
+            token.assign(other.token.data(), other.token.size());
+        }
+        other.clearToken();
+    }
+    return *this;
+}
+
+void RaConfig::assignToken(std::string_view value) {
+    clearToken();
+    if (!value.empty()) {
+        token.assign(value.data(), value.size());
+    }
+}
+
+void RaConfig::assignTokenAndErase(std::string& source) {
+    assignToken(std::string_view(source.data(), source.size()));
+    wipeString(source, wipeObserver_);
+}
+
+void RaConfig::transferTokenTo(RaSecretString& destination) {
+    destination.assign(std::string_view(token.data(), token.size()));
+    clearToken();
+}
+
+void RaConfig::clearToken() {
+    wipeString(token, wipeObserver_);
+}
+
 RaConfig loadRetroAchievementsConfig(
     const std::string& path,
     RaConfigWipeObserver wipeObserver
@@ -173,7 +270,7 @@ RaConfig loadRetroAchievementsConfig(
         return {};
     }
 
-    RaConfig config{};
+    RaConfig config{1, {}, {}, true, true, wipeObserver};
     bool hasValidVersion = false;
     std::string line;
     while (std::getline(in, line)) {
@@ -237,9 +334,10 @@ RaConfig loadRetroAchievementsConfig(
     return config;
 }
 
-bool saveRetroAchievementsConfig(
+bool saveRetroAchievementsConfigWithHooks(
     const std::string& path,
-    const RaConfig& config
+    const RaConfig& config,
+    const detail::PrivateFileIoHooks* hooks
 ) {
     if (path.empty() || config.version != 1
         || !isSafeStoredValue(config.username)
@@ -253,15 +351,24 @@ bool saveRetroAchievementsConfig(
     }
     const bool saved = detail::writePrivateFileAtomically(
         std::filesystem::path(path),
-        std::string_view(serialized)
+        std::string_view(serialized),
+        hooks
     );
     wipeString(serialized);
     return saved;
 }
 
+bool saveRetroAchievementsConfig(
+    const std::string& path,
+    const RaConfig& config
+) {
+    return saveRetroAchievementsConfigWithHooks(path, config, nullptr);
+}
+
 bool invalidateRetroAchievementsConfig(
     const std::string& path,
-    bool* quarantinedSensitiveData
+    bool* quarantinedSensitiveData,
+    const detail::PrivateFileIoHooks* hooks
 ) {
     if (quarantinedSensitiveData) {
         *quarantinedSensitiveData = false;
@@ -278,21 +385,14 @@ bool invalidateRetroAchievementsConfig(
     if (!std::filesystem::exists(status)) {
         return true;
     }
-    bool entryChanged = false;
-    if (detail::removeFileDurably(source, &entryChanged)) {
-        return true;
-    }
-    if (entryChanged) {
-        return false;
-    }
     if (!std::filesystem::is_regular_file(status)) {
         return false;
     }
 
     const RaConfig emptyConfig{1, {}, {}, false, true};
-    if (saveRetroAchievementsConfig(path, emptyConfig)) {
-        entryChanged = false;
-        if (detail::removeFileDurably(source, &entryChanged)) {
+    if (saveRetroAchievementsConfigWithHooks(path, emptyConfig, hooks)) {
+        bool entryChanged = false;
+        if (detail::removeFileDurably(source, &entryChanged, hooks)) {
             return true;
         }
         if (entryChanged) {

@@ -10,6 +10,7 @@
 
 #include "gb/app/frontend/realtime/retroachievements_models.hpp"
 #include "gb/app/frontend/realtime/retroachievements_progress.hpp"
+#include "gb/app/frontend/realtime/secure_string.hpp"
 
 namespace gb::frontend {
 
@@ -29,20 +30,20 @@ struct RaRuntimeCommand {
     RaRuntimeCommand(
         RaRuntimeCommandType typeValue = RaRuntimeCommandType::Logout,
         std::string usernameValue = {},
-        std::string passwordValue = {},
+        std::string_view passwordValue = {},
         int saveSlotValue = 0
     );
     ~RaRuntimeCommand();
     RaRuntimeCommand(const RaRuntimeCommand&) = delete;
     RaRuntimeCommand& operator=(const RaRuntimeCommand&) = delete;
-    RaRuntimeCommand(RaRuntimeCommand&& other) noexcept;
-    RaRuntimeCommand& operator=(RaRuntimeCommand&& other) noexcept;
+    RaRuntimeCommand(RaRuntimeCommand&& other);
+    RaRuntimeCommand& operator=(RaRuntimeCommand&& other);
 
     void wipeSecret(const RaSecretWipeObserver& observer = {});
 
     RaRuntimeCommandType type = RaRuntimeCommandType::Logout;
     std::string username{};
-    std::string password{};
+    RaSecretString password{};
     int saveSlot = 0;
     std::size_t repeatCount = 1;
 };

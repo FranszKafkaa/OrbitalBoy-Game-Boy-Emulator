@@ -355,6 +355,26 @@ bool syncDirectory(
     return synced;
 }
 
+void cleanupTemporary(
+    int directoryDescriptor,
+    const std::filesystem::path& parent,
+    const std::filesystem::path& temporary,
+    int originalError,
+    const PrivateFileIoHooks* hooks
+) {
+    if (::unlinkat(
+            directoryDescriptor,
+            temporary.filename().c_str(),
+            0
+        ) == 0) {
+        trace(hooks, PrivateFileIoEvent::TemporaryRemoved, temporary);
+        (void)syncDirectory(directoryDescriptor, parent, hooks);
+    } else {
+        trace(hooks, PrivateFileIoEvent::TemporaryRemoveFailed, temporary);
+    }
+    errno = originalError;
+}
+
 bool renameExclusiveAt(
     int sourceDirectory,
     const char* sourceName,
@@ -425,29 +445,44 @@ bool writePosix(
         }
         trace(hooks, PrivateFileIoEvent::TemporaryCreated, temporary);
         const bool wrote = writeAll(descriptor, contents, size);
+        int operationError = wrote ? 0 : errno;
         const bool flushed = wrote && ::fsync(descriptor) == 0;
+        if (wrote && !flushed) {
+            operationError = errno;
+        }
         if (flushed) {
             trace(hooks, PrivateFileIoEvent::TemporarySynced, temporary);
         }
         const bool closed = ::close(descriptor) == 0;
+        if (!closed && operationError == 0) {
+            operationError = errno;
+        }
         if (!flushed || !closed) {
-            ::unlinkat(
+            cleanupTemporary(
                 directory.get(),
-                temporary.filename().c_str(),
-                0
+                parent,
+                temporary,
+                operationError == 0 ? EIO : operationError,
+                hooks
             );
             return false;
         }
-        if (::renameat(
+        const bool replaceAllowed = !hooks || !hooks->allowReplace
+            || hooks->allowReplace(temporary, destination);
+        const bool replaced = replaceAllowed && ::renameat(
                 directory.get(),
                 temporary.filename().c_str(),
                 directory.get(),
                 destination.filename().c_str()
-            ) != 0) {
-            ::unlinkat(
+            ) == 0;
+        if (!replaced) {
+            const int replaceError = errno == 0 ? EIO : errno;
+            cleanupTemporary(
                 directory.get(),
-                temporary.filename().c_str(),
-                0
+                parent,
+                temporary,
+                replaceError,
+                hooks
             );
             return false;
         }

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <array>
 #include <chrono>
+#include <cerrno>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -285,6 +286,39 @@ TEST_CASE("retroachievements", "private_file_reports_directory_sync_failure_afte
         == gb::frontend::detail::PrivateFileIoEvent::Replaced);
     T_REQUIRE(trace.back()
         == gb::frontend::detail::PrivateFileIoEvent::DirectorySyncFailed);
+}
+
+TEST_CASE("retroachievements", "private_file_failure_removes_temp_syncs_directory_and_preserves_errno") {
+    const auto directory = tests::makeTempPath("ra_private_cleanup", "");
+    tests::ScopedPath cleanup(directory);
+    T_REQUIRE(std::filesystem::create_directories(directory));
+    const auto destination = directory / "settings";
+    const auto temporary = directory / "chosen-temp";
+    std::vector<gb::frontend::detail::PrivateFileIoEvent> trace;
+    gb::frontend::detail::PrivateFileIoHooks hooks{};
+    hooks.chooseTemporaryPath = [&](const auto&, int) { return temporary; };
+    hooks.allowReplace = [](const auto&, const auto&) {
+        errno = EIO;
+        return false;
+    };
+    hooks.trace = [&](auto event, const auto&) { trace.push_back(event); };
+    hooks.syncDirectory = [](const auto&) { return true; };
+
+    errno = 0;
+    T_REQUIRE(!gb::frontend::detail::writePrivateFileAtomically(
+        destination,
+        std::string_view("secret"),
+        &hooks
+    ));
+    T_EQ(errno, EIO);
+    T_REQUIRE(!std::filesystem::exists(destination));
+    T_REQUIRE(!std::filesystem::exists(temporary));
+    T_REQUIRE(trace == std::vector<gb::frontend::detail::PrivateFileIoEvent>({
+        gb::frontend::detail::PrivateFileIoEvent::TemporaryCreated,
+        gb::frontend::detail::PrivateFileIoEvent::TemporarySynced,
+        gb::frontend::detail::PrivateFileIoEvent::TemporaryRemoved,
+        gb::frontend::detail::PrivateFileIoEvent::DirectorySynced,
+    }));
 }
 
 TEST_CASE("retroachievements", "private_file_remove_and_rename_sync_directory_entries") {
@@ -816,31 +850,107 @@ TEST_CASE("retroachievements", "secure_string_wipes_full_short_string_storage") 
     T_REQUIRE(secret.empty());
 }
 
-TEST_CASE("retroachievements", "secure_string_move_wipes_full_source_storage") {
+TEST_CASE("retroachievements", "secret_string_move_wipes_source_and_destructor_wipes_destination") {
     std::string source = "tiny";
     const std::size_t originalCapacity = source.capacity();
-    std::size_t observedStorage = 0;
-    bool observedZeroes = false;
+    std::vector<std::size_t> wipes;
+    bool allZeroes = true;
+    const auto observer = [&](const char* bytes, std::size_t storageSize) {
+        wipes.push_back(storageSize);
+        allZeroes = allZeroes && bytes != nullptr
+            && std::all_of(
+                bytes,
+                bytes + storageSize,
+                [](char byte) { return byte == '\0'; }
+            );
+    };
 
-    std::string destination = gb::frontend::moveStringAndEraseSource(
-        source,
-        [&](const char* bytes, std::size_t storageSize) {
-            observedStorage = storageSize;
-            observedZeroes = bytes != nullptr
-                && std::all_of(
-                    bytes,
-                    bytes + storageSize,
-                    [](char byte) { return byte == '\0'; }
-                );
-        }
-    );
+    {
+        gb::frontend::RaSecretString first(observer);
+        first.assignAndErase(source);
+        T_REQUIRE(source.empty());
+        T_REQUIRE(!wipes.empty());
+        const std::size_t afterSourceTransfer = wipes.size();
 
-    T_EQ(destination, std::string("tiny"));
+        gb::frontend::RaSecretString destination(std::move(first));
+        T_EQ(destination.view(), std::string_view("tiny"));
+        T_REQUIRE(first.empty());
+        T_REQUIRE(wipes.size() > afterSourceTransfer);
+    }
+
     T_REQUIRE(source.empty());
-    T_REQUIRE(observedStorage >= originalCapacity);
-    T_REQUIRE(observedStorage > destination.size());
-    T_REQUIRE(observedZeroes);
-    T_REQUIRE(gb::frontend::secureEraseStringStorage(destination));
+    T_REQUIRE(wipes.size() >= 3U);
+    T_REQUIRE(std::all_of(
+        wipes.begin(),
+        wipes.end(),
+        [&](std::size_t size) { return size >= originalCapacity; }
+    ));
+    T_REQUIRE(allZeroes);
+}
+
+TEST_CASE("retroachievements", "config_return_assignment_and_destruction_wipe_short_token_storage") {
+    const auto path = tests::makeTempPath("ra_config_special_members", ".cfg");
+    tests::ScopedPath cleanup(path);
+    T_REQUIRE(gb::frontend::saveRetroAchievementsConfig(
+        path.string(),
+        {1, "Marcelo", "short-token", true, true}
+    ));
+    std::vector<std::size_t> wipes;
+    bool allZeroes = true;
+    const auto observer = [&](const char* bytes, std::size_t storageSize) {
+        wipes.push_back(storageSize);
+        allZeroes = allZeroes && bytes != nullptr
+            && std::all_of(
+                bytes,
+                bytes + storageSize,
+                [](char byte) { return byte == '\0'; }
+            );
+    };
+
+    std::size_t beforeDestruction = 0;
+    {
+        gb::frontend::RaConfig assigned{
+            1, "Old", "old-token", true, true, observer
+        };
+        gb::frontend::RaConfig loaded =
+            gb::frontend::loadRetroAchievementsConfig(path.string(), observer);
+        const std::size_t beforeAssignment = wipes.size();
+        assigned = std::move(loaded);
+        T_EQ(assigned.token, std::string("short-token"));
+        T_REQUIRE(loaded.token.empty());
+        T_REQUIRE(wipes.size() >= beforeAssignment + 2U);
+
+        gb::frontend::RaConfig copied = assigned;
+        T_EQ(copied.token, assigned.token);
+        beforeDestruction = wipes.size();
+    }
+
+    T_REQUIRE(wipes.size() >= beforeDestruction + 2U);
+    T_REQUIRE(allZeroes);
+}
+
+TEST_CASE("retroachievements", "config_transfers_token_to_secret_output_and_wipes_source") {
+    std::vector<std::size_t> wipes;
+    const auto observer = [&](const char* bytes, std::size_t storageSize) {
+        T_REQUIRE(bytes != nullptr);
+        T_REQUIRE(std::all_of(
+            bytes,
+            bytes + storageSize,
+            [](char byte) { return byte == '\0'; }
+        ));
+        wipes.push_back(storageSize);
+    };
+    gb::frontend::RaConfig config{
+        1, "Marcelo", "sso-token", true, true, observer
+    };
+    gb::frontend::RaSecretString output(observer);
+
+    config.transferTokenTo(output);
+
+    T_REQUIRE(config.token.empty());
+    T_EQ(output.view(), std::string_view("sso-token"));
+    T_REQUIRE(!wipes.empty());
+    T_REQUIRE(wipes.back() > output.size());
 }
 
 TEST_CASE("retroachievements", "config_replaces_existing_content") {
@@ -983,6 +1093,33 @@ TEST_CASE("retroachievements", "config_invalidation_removes_stale_credentials") 
     T_REQUIRE(gb::frontend::invalidateRetroAchievementsConfig(path.string()));
     T_REQUIRE(!std::filesystem::exists(path));
 }
+
+#if !defined(_WIN32)
+TEST_CASE("retroachievements", "config_invalidation_publishes_empty_config_before_remove") {
+    const auto path = tests::makeTempPath("ra_config_safe_invalidate", ".cfg");
+    tests::ScopedPath cleanup(path);
+    T_REQUIRE(gb::frontend::saveRetroAchievementsConfig(
+        path.string(),
+        {1, "Marcelo", "old-token", true, true}
+    ));
+    std::vector<gb::frontend::detail::PrivateFileIoEvent> trace;
+    gb::frontend::detail::PrivateFileIoHooks hooks{};
+    hooks.trace = [&](auto event, const auto&) { trace.push_back(event); };
+    hooks.syncDirectory = [](const auto&) { return true; };
+
+    T_REQUIRE(gb::frontend::invalidateRetroAchievementsConfig(
+        path.string(), nullptr, &hooks
+    ));
+    T_REQUIRE(trace == std::vector<gb::frontend::detail::PrivateFileIoEvent>({
+        gb::frontend::detail::PrivateFileIoEvent::TemporaryCreated,
+        gb::frontend::detail::PrivateFileIoEvent::TemporarySynced,
+        gb::frontend::detail::PrivateFileIoEvent::Replaced,
+        gb::frontend::detail::PrivateFileIoEvent::DirectorySynced,
+        gb::frontend::detail::PrivateFileIoEvent::Removed,
+        gb::frontend::detail::PrivateFileIoEvent::DirectorySynced,
+    }));
+}
+#endif
 
 TEST_CASE("retroachievements", "ui_models_own_session_values") {
     gb::frontend::RaSessionSnapshot snapshot{};
@@ -1815,7 +1952,6 @@ public:
         ++passwordLoginCalls;
         lastLoginUsername = username ? username : "";
         lastPassword = password ? password : "";
-        loginSecretBuffer = password;
         loginSecretSize = password ? std::strlen(password) : 0;
         loginCallback = callback;
         loginCallbackUserdata = callbackUserdata;
@@ -1833,7 +1969,6 @@ public:
         ++tokenLoginCalls;
         lastLoginUsername = username ? username : "";
         lastToken = token ? token : "";
-        loginSecretBuffer = token;
         loginSecretSize = token ? std::strlen(token) : 0;
         loginCallback = callback;
         loginCallbackUserdata = callbackUserdata;
@@ -1847,8 +1982,7 @@ public:
     ) override {
         recordCall();
         ++secretWipeNotifications;
-        secretWipeMatchedLoginBuffer = logicalBuffer == loginSecretBuffer
-            && logicalSize == loginSecretSize;
+        secretWipeMatchedLoginBuffer = logicalSize == loginSecretSize;
         secretWipeWasZeroed = logicalBuffer
             && std::all_of(
                 logicalBuffer,
@@ -2413,7 +2547,6 @@ public:
     std::string lastLoginUsername;
     std::string lastPassword;
     std::string lastToken;
-    const char* loginSecretBuffer = nullptr;
     std::size_t loginSecretSize = 0;
     std::uint32_t lastGameConsole = 0;
     std::string lastGamePath;

@@ -19,29 +19,28 @@ void callIfSet(const std::function<void()>& action) {
 RaRuntimeCommand::RaRuntimeCommand(
     RaRuntimeCommandType typeValue,
     std::string usernameValue,
-    std::string passwordValue,
+    std::string_view passwordValue,
     int saveSlotValue
 )
     : type(typeValue),
       username(std::move(usernameValue)),
       saveSlot(saveSlotValue) {
-    password.swap(passwordValue);
-    (void)secureEraseStringStorage(passwordValue);
+    password.assign(passwordValue);
 }
 
 RaRuntimeCommand::~RaRuntimeCommand() {
     wipeSecret();
 }
 
-RaRuntimeCommand::RaRuntimeCommand(RaRuntimeCommand&& other) noexcept
+RaRuntimeCommand::RaRuntimeCommand(RaRuntimeCommand&& other)
     : type(other.type),
+      password(std::move(other.password)),
       saveSlot(other.saveSlot),
       repeatCount(other.repeatCount) {
     username.swap(other.username);
-    password.swap(other.password);
 }
 
-RaRuntimeCommand& RaRuntimeCommand::operator=(RaRuntimeCommand&& other) noexcept {
+RaRuntimeCommand& RaRuntimeCommand::operator=(RaRuntimeCommand&& other) {
     if (this != &other) {
         wipeSecret();
         type = other.type;
@@ -49,13 +48,13 @@ RaRuntimeCommand& RaRuntimeCommand::operator=(RaRuntimeCommand&& other) noexcept
         repeatCount = other.repeatCount;
         username.clear();
         username.swap(other.username);
-        password.swap(other.password);
+        password = std::move(other.password);
     }
     return *this;
 }
 
 void RaRuntimeCommand::wipeSecret(const RaSecretWipeObserver& observer) {
-    (void)secureEraseStringStorage(password, observer);
+    password.clear(observer);
 }
 
 RaRuntimeCommandQueue::RaRuntimeCommandQueue(

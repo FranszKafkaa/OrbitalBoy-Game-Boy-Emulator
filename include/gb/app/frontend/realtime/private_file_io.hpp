@@ -12,6 +12,8 @@ namespace gb::frontend::detail {
 enum class PrivateFileIoEvent {
     TemporaryCreated,
     TemporarySynced,
+    TemporaryRemoved,
+    TemporaryRemoveFailed,
     Replaced,
     Removed,
     Renamed,
@@ -28,6 +30,10 @@ struct PrivateFileIoHooks {
         PrivateFileIoEvent event,
         const std::filesystem::path& path
     )> trace;
+    std::function<bool(
+        const std::filesystem::path& temporary,
+        const std::filesystem::path& destination
+    )> allowReplace;
     std::function<bool(const std::filesystem::path& directory)> syncDirectory;
 };
 
