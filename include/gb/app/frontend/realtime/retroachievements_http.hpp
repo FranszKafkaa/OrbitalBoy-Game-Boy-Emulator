@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace gb::frontend {
@@ -51,6 +52,7 @@ struct RaHttpRequestPolicy {
 };
 
 [[nodiscard]] RaHttpRequestPolicy makeRaHttpRequestPolicy(const RaHttpRequest& request);
+[[nodiscard]] std::string_view retroAchievementsUserAgent() noexcept;
 
 class RaHttpTransport {
 public:

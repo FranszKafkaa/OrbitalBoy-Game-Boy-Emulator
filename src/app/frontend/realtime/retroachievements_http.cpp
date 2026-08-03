@@ -15,6 +15,18 @@
 
 namespace gb::frontend {
 
+std::string_view retroAchievementsUserAgent() noexcept {
+#if defined(_WIN32)
+    return "OrbitalBoy/1.0 (Windows) rcheevos/12.4.0";
+#elif defined(__APPLE__)
+    return "OrbitalBoy/1.0 (macOS) rcheevos/12.4.0";
+#elif defined(__linux__)
+    return "OrbitalBoy/1.0 (Linux) rcheevos/12.4.0";
+#else
+    return "OrbitalBoy/1.0 (Unknown) rcheevos/12.4.0";
+#endif
+}
+
 namespace {
 
 constexpr std::size_t maximumResponseSize = 4U * 1024U * 1024U;
@@ -167,9 +179,7 @@ RaHttpResponse executeWithCurl(
         && curl_easy_setopt(curl, CURLOPT_MAXREDIRS, policy.maxRedirects) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L) == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L) == CURLE_OK
-        && curl_easy_setopt(
-            curl, CURLOPT_USERAGENT, "OrbitalBoy/1.0 (RetroAchievements; rcheevos)"
-        ) == CURLE_OK
+        && curl_easy_setopt(curl, CURLOPT_USERAGENT, retroAchievementsUserAgent().data()) == CURLE_OK
 #if LIBCURL_VERSION_NUM >= 0x075500
         && curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https") == CURLE_OK
         && curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, redirectProtocols(policy)) == CURLE_OK

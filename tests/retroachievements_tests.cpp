@@ -4840,6 +4840,19 @@ TEST_CASE("retroachievements", "deferred_progress_waits_for_identification_and_a
     T_REQUIRE(!deferred.pending());
 }
 
+TEST_CASE("retroachievements", "http_user_agent_identifies_platform_and_rcheevos_version") {
+#if defined(_WIN32)
+    constexpr const char* expected = "OrbitalBoy/1.0 (Windows) rcheevos/12.4.0";
+#elif defined(__APPLE__)
+    constexpr const char* expected = "OrbitalBoy/1.0 (macOS) rcheevos/12.4.0";
+#elif defined(__linux__)
+    constexpr const char* expected = "OrbitalBoy/1.0 (Linux) rcheevos/12.4.0";
+#else
+    constexpr const char* expected = "OrbitalBoy/1.0 (Unknown) rcheevos/12.4.0";
+#endif
+    T_EQ(std::string(gb::frontend::retroAchievementsUserAgent()), std::string(expected));
+}
+
 TEST_CASE("retroachievements", "committed_frame_restores_after_identification_before_do_frame") {
     gb::frontend::RaDeferredProgressRestore deferred;
     deferred.stage(gb::frontend::RaStoredProgress{
