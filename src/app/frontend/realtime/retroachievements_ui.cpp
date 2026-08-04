@@ -968,7 +968,11 @@ bool isRaLoginPasteShortcut(SDL_Keycode key, SDL_Keymod modifiers) {
 #else
     constexpr SDL_Keymod kPasteModifier = KMOD_CTRL;
 #endif
-    return key == SDLK_v && (modifiers & kPasteModifier) != 0;
+    const Uint16 modifierBits = static_cast<Uint16>(modifiers);
+    const Uint16 pasteModifierBits = static_cast<Uint16>(kPasteModifier);
+    return key == SDLK_v
+        && (modifierBits & pasteModifierBits) != 0U
+        && (modifierBits & static_cast<Uint16>(~pasteModifierBits)) == 0U;
 }
 
 RaLoginModalAction handleRaLoginModalEvent(
@@ -984,7 +988,7 @@ RaLoginModalAction handleRaLoginModalEvent(
         appendRaLoginText(state, event.text.text);
         return RaLoginModalAction::None;
     }
-    if (event.type == SDL_KEYDOWN && event.key.repeat == 0
+    if (event.type == SDL_KEYDOWN && event.key.repeat == 0 && !state.requesting
         && isRaLoginPasteShortcut(
             event.key.keysym.sym,
             static_cast<SDL_Keymod>(event.key.keysym.mod)

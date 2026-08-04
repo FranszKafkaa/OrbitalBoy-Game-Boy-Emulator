@@ -4165,13 +4165,39 @@ TEST_CASE("retroachievements", "profile_visible_row_range_excludes_offscreen_row
 #ifdef GBEMU_USE_SDL2
 TEST_CASE("retroachievements", "login_clipboard_shortcut_matches_platform") {
 #if defined(__APPLE__)
-    T_REQUIRE(gb::frontend::isRaLoginPasteShortcut(SDLK_v, KMOD_GUI));
-    T_REQUIRE(!gb::frontend::isRaLoginPasteShortcut(SDLK_v, KMOD_CTRL));
+    constexpr SDL_Keymod kPasteModifier = KMOD_GUI;
+    constexpr SDL_Keymod kOppositeModifier = KMOD_CTRL;
 #else
-    T_REQUIRE(gb::frontend::isRaLoginPasteShortcut(SDLK_v, KMOD_CTRL));
-    T_REQUIRE(!gb::frontend::isRaLoginPasteShortcut(SDLK_v, KMOD_GUI));
+    constexpr SDL_Keymod kPasteModifier = KMOD_CTRL;
+    constexpr SDL_Keymod kOppositeModifier = KMOD_GUI;
 #endif
-    T_REQUIRE(!gb::frontend::isRaLoginPasteShortcut(SDLK_c, KMOD_CTRL));
+    T_REQUIRE(gb::frontend::isRaLoginPasteShortcut(SDLK_v, kPasteModifier));
+    T_REQUIRE(!gb::frontend::isRaLoginPasteShortcut(SDLK_v, kOppositeModifier));
+    T_REQUIRE(!gb::frontend::isRaLoginPasteShortcut(
+        SDLK_v,
+        static_cast<SDL_Keymod>(kPasteModifier | KMOD_SHIFT)
+    ));
+    T_REQUIRE(!gb::frontend::isRaLoginPasteShortcut(
+        SDLK_v,
+        static_cast<SDL_Keymod>(kPasteModifier | KMOD_ALT)
+    ));
+    T_REQUIRE(!gb::frontend::isRaLoginPasteShortcut(
+        SDLK_v,
+        static_cast<SDL_Keymod>(kPasteModifier | kOppositeModifier)
+    ));
+    T_REQUIRE(!gb::frontend::isRaLoginPasteShortcut(
+        SDLK_v,
+        static_cast<SDL_Keymod>(kPasteModifier | KMOD_NUM)
+    ));
+    T_REQUIRE(!gb::frontend::isRaLoginPasteShortcut(
+        SDLK_v,
+        static_cast<SDL_Keymod>(kPasteModifier | KMOD_CAPS)
+    ));
+    T_REQUIRE(!gb::frontend::isRaLoginPasteShortcut(
+        SDLK_v,
+        static_cast<SDL_Keymod>(kPasteModifier | KMOD_MODE)
+    ));
+    T_REQUIRE(!gb::frontend::isRaLoginPasteShortcut(SDLK_c, kPasteModifier));
     T_REQUIRE(!gb::frontend::isRaLoginPasteShortcut(SDLK_v, KMOD_NONE));
 }
 
@@ -4205,6 +4231,41 @@ TEST_CASE("retroachievements", "login_clipboard_event_pastes_password_without_re
     paste.key.repeat = 1;
     gb::frontend::handleRaLoginModalEvent(state, paste, 640, 480);
     T_EQ(state.password, std::string("clipboard-secret"));
+    T_EQ(SDL_SetClipboardText(""), 0);
+    if (!videoWasInitialized) {
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        T_REQUIRE(SDL_SetHint(SDL_HINT_VIDEODRIVER, nullptr) == SDL_TRUE);
+    }
+}
+
+TEST_CASE("retroachievements", "login_clipboard_event_ignores_requesting_state") {
+    const bool videoWasInitialized = (SDL_WasInit(SDL_INIT_VIDEO) & SDL_INIT_VIDEO) != 0U;
+    if (!videoWasInitialized) {
+        T_REQUIRE(SDL_SetHint(SDL_HINT_VIDEODRIVER, "dummy") == SDL_TRUE);
+        T_EQ(SDL_InitSubSystem(SDL_INIT_VIDEO), 0);
+    }
+    T_EQ(SDL_SetClipboardText("clipboard-must-not-be-read"), 0);
+
+    gb::frontend::RaLoginModalState state{};
+    gb::frontend::openRaLoginModal(state);
+    state.focusedField = gb::frontend::RaLoginField::Password;
+    state.password = "protected";
+    state.requesting = true;
+    SDL_Event paste{};
+    paste.type = SDL_KEYDOWN;
+    paste.key.repeat = 0;
+    paste.key.keysym.sym = SDLK_v;
+#if defined(__APPLE__)
+    paste.key.keysym.mod = KMOD_GUI;
+#else
+    paste.key.keysym.mod = KMOD_CTRL;
+#endif
+    T_REQUIRE(
+        gb::frontend::handleRaLoginModalEvent(state, paste, 640, 480)
+        == gb::frontend::RaLoginModalAction::None
+    );
+    T_EQ(state.password, std::string("protected"));
+    T_REQUIRE(state.requesting);
     T_EQ(SDL_SetClipboardText(""), 0);
     if (!videoWasInitialized) {
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
