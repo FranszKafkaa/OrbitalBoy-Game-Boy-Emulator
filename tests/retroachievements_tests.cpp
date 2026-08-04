@@ -4002,6 +4002,40 @@ TEST_CASE("retroachievements", "login_modal_never_truncates_a_utf8_code_point_at
     T_EQ(state.password.size(), 1020U);
 }
 
+TEST_CASE("retroachievements", "login_clipboard_pastes_only_safe_utf8_into_focused_field") {
+    gb::frontend::RaLoginModalState state{};
+    gb::frontend::openRaLoginModal(state);
+    state.focusedField = gb::frontend::RaLoginField::Username;
+    gb::frontend::pasteRaLoginText(state, "Marcelo\n\t");
+    T_EQ(state.username, std::string("Marcelo"));
+    std::string invalidUtf8 = " ok";
+    invalidUtf8.push_back(static_cast<char>(0xFF));
+    invalidUtf8 += "z";
+    gb::frontend::pasteRaLoginText(state, invalidUtf8);
+    T_EQ(state.username, std::string("Marcelo okz"));
+
+    state.focusedField = gb::frontend::RaLoginField::Password;
+    gb::frontend::pasteRaLoginText(state, u8"senha ç\r\n");
+    T_EQ(state.password, std::string(u8"senha ç"));
+    T_EQ(gb::frontend::maskedRaPassword(state), std::string("*******"));
+}
+
+TEST_CASE("retroachievements", "login_clipboard_respects_state_and_utf8_limits") {
+    gb::frontend::RaLoginModalState state{};
+    gb::frontend::openRaLoginModal(state);
+    state.focusedField = gb::frontend::RaLoginField::Password;
+    state.password.assign(1023, 'a');
+    gb::frontend::pasteRaLoginText(state, u8"ç");
+    T_EQ(state.password.size(), 1023U);
+
+    state.requesting = true;
+    gb::frontend::pasteRaLoginText(state, "ignored");
+    T_EQ(state.password.size(), 1023U);
+    gb::frontend::closeRaLoginModal(state);
+    gb::frontend::pasteRaLoginText(state, "ignored");
+    T_REQUIRE(state.password.empty());
+}
+
 TEST_CASE("retroachievements", "online_snapshot_closes_login_and_signals_text_input_shutdown") {
     gb::frontend::RaLoginModalState state{};
     gb::frontend::openRaLoginModal(state);
@@ -4129,6 +4163,55 @@ TEST_CASE("retroachievements", "profile_visible_row_range_excludes_offscreen_row
 }
 
 #ifdef GBEMU_USE_SDL2
+TEST_CASE("retroachievements", "login_clipboard_shortcut_matches_platform") {
+#if defined(__APPLE__)
+    T_REQUIRE(gb::frontend::isRaLoginPasteShortcut(SDLK_v, KMOD_GUI));
+    T_REQUIRE(!gb::frontend::isRaLoginPasteShortcut(SDLK_v, KMOD_CTRL));
+#else
+    T_REQUIRE(gb::frontend::isRaLoginPasteShortcut(SDLK_v, KMOD_CTRL));
+    T_REQUIRE(!gb::frontend::isRaLoginPasteShortcut(SDLK_v, KMOD_GUI));
+#endif
+    T_REQUIRE(!gb::frontend::isRaLoginPasteShortcut(SDLK_c, KMOD_CTRL));
+    T_REQUIRE(!gb::frontend::isRaLoginPasteShortcut(SDLK_v, KMOD_NONE));
+}
+
+TEST_CASE("retroachievements", "login_clipboard_event_pastes_password_without_repeating") {
+    const bool videoWasInitialized = (SDL_WasInit(SDL_INIT_VIDEO) & SDL_INIT_VIDEO) != 0U;
+    if (!videoWasInitialized) {
+        T_REQUIRE(SDL_SetHint(SDL_HINT_VIDEODRIVER, "dummy") == SDL_TRUE);
+        T_EQ(SDL_InitSubSystem(SDL_INIT_VIDEO), 0);
+    }
+    T_EQ(SDL_SetClipboardText("clipboard-secret"), 0);
+
+    gb::frontend::RaLoginModalState state{};
+    gb::frontend::openRaLoginModal(state);
+    state.focusedField = gb::frontend::RaLoginField::Password;
+    SDL_Event paste{};
+    paste.type = SDL_KEYDOWN;
+    paste.key.repeat = 0;
+    paste.key.keysym.sym = SDLK_v;
+#if defined(__APPLE__)
+    paste.key.keysym.mod = KMOD_GUI;
+#else
+    paste.key.keysym.mod = KMOD_CTRL;
+#endif
+    T_REQUIRE(
+        gb::frontend::handleRaLoginModalEvent(state, paste, 640, 480)
+        == gb::frontend::RaLoginModalAction::None
+    );
+    T_EQ(state.password, std::string("clipboard-secret"));
+    T_EQ(gb::frontend::maskedRaPassword(state), std::string("****************"));
+
+    paste.key.repeat = 1;
+    gb::frontend::handleRaLoginModalEvent(state, paste, 640, 480);
+    T_EQ(state.password, std::string("clipboard-secret"));
+    T_EQ(SDL_SetClipboardText(""), 0);
+    if (!videoWasInitialized) {
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        T_REQUIRE(SDL_SetHint(SDL_HINT_VIDEODRIVER, nullptr) == SDL_TRUE);
+    }
+}
+
 TEST_CASE("retroachievements", "login_ui_never_stops_text_input_owned_by_caller") {
     SDL_StartTextInput();
     T_REQUIRE(SDL_IsTextInputActive() == SDL_TRUE);

@@ -107,6 +107,7 @@ RaLoginModalLayout raLoginModalLayout(int outputW, int outputH);
 void openRaLoginModal(RaLoginModalState& state, std::string username = {});
 void closeRaLoginModal(RaLoginModalState& state);
 void appendRaLoginText(RaLoginModalState& state, std::string_view text);
+void pasteRaLoginText(RaLoginModalState& state, std::string_view text);
 void backspaceRaLoginText(RaLoginModalState& state);
 std::string maskedRaPassword(const RaLoginModalState& state);
 bool canSubmitRaLogin(const RaLoginModalState& state);
@@ -244,6 +245,7 @@ private:
 #endif
 };
 
+bool isRaLoginPasteShortcut(SDL_Keycode key, SDL_Keymod modifiers);
 RaLoginModalAction handleRaLoginModalEvent(
     RaLoginModalState& state,
     const SDL_Event& event,

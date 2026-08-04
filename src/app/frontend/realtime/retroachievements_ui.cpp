@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iterator>
 #include <string>
 #include <utility>
@@ -98,6 +99,38 @@ std::size_t validUtf8SequenceLength(std::string_view text, std::size_t index) {
         }
     }
     return length;
+}
+
+void appendRaLoginTextImpl(
+    RaLoginModalState& state,
+    std::string_view text,
+    bool rejectControls
+) {
+    if (!state.open || state.requesting || text.empty()) {
+        return;
+    }
+    std::string& field = state.focusedField == RaLoginField::Username
+        ? state.username
+        : state.password;
+    const std::size_t limit = state.focusedField == RaLoginField::Username ? 256U : 1024U;
+    for (std::size_t index = 0; index < text.size();) {
+        const std::size_t length = validUtf8SequenceLength(text, index);
+        if (length == 0) {
+            ++index;
+            continue;
+        }
+        const unsigned char byte = static_cast<unsigned char>(text[index]);
+        if (rejectControls && length == 1 && (byte < 0x20U || byte == 0x7FU)) {
+            index += length;
+            continue;
+        }
+        if (length > limit - std::min(field.size(), limit)) {
+            break;
+        }
+        field.append(text.substr(index, length));
+        index += length;
+    }
+    state.errorText.clear();
 }
 
 bool isScrollableTab(RaProfileTab tab) {
@@ -408,26 +441,11 @@ void closeRaLoginModal(RaLoginModalState& state) {
 }
 
 void appendRaLoginText(RaLoginModalState& state, std::string_view text) {
-    if (!state.open || state.requesting || text.empty()) {
-        return;
-    }
-    std::string& field = state.focusedField == RaLoginField::Username
-        ? state.username
-        : state.password;
-    const std::size_t limit = state.focusedField == RaLoginField::Username ? 256U : 1024U;
-    for (std::size_t index = 0; index < text.size();) {
-        const std::size_t length = validUtf8SequenceLength(text, index);
-        if (length == 0) {
-            ++index;
-            continue;
-        }
-        if (length > limit - std::min(field.size(), limit)) {
-            break;
-        }
-        field.append(text.substr(index, length));
-        index += length;
-    }
-    state.errorText.clear();
+    appendRaLoginTextImpl(state, text, false);
+}
+
+void pasteRaLoginText(RaLoginModalState& state, std::string_view text) {
+    appendRaLoginTextImpl(state, text, true);
 }
 
 void backspaceRaLoginText(RaLoginModalState& state) {
@@ -944,6 +962,15 @@ void RaImageTextureCache::shutdown() {
 #endif
 }
 
+bool isRaLoginPasteShortcut(SDL_Keycode key, SDL_Keymod modifiers) {
+#if defined(__APPLE__)
+    constexpr SDL_Keymod kPasteModifier = KMOD_GUI;
+#else
+    constexpr SDL_Keymod kPasteModifier = KMOD_CTRL;
+#endif
+    return key == SDLK_v && (modifiers & kPasteModifier) != 0;
+}
+
 RaLoginModalAction handleRaLoginModalEvent(
     RaLoginModalState& state,
     const SDL_Event& event,
@@ -955,6 +982,26 @@ RaLoginModalAction handleRaLoginModalEvent(
     }
     if (event.type == SDL_TEXTINPUT) {
         appendRaLoginText(state, event.text.text);
+        return RaLoginModalAction::None;
+    }
+    if (event.type == SDL_KEYDOWN && event.key.repeat == 0
+        && isRaLoginPasteShortcut(
+            event.key.keysym.sym,
+            static_cast<SDL_Keymod>(event.key.keysym.mod)
+        )) {
+        char* clipboard = SDL_GetClipboardText();
+        if (clipboard != nullptr) {
+            const bool wipingPasswordClipboard = state.focusedField == RaLoginField::Password;
+            pasteRaLoginText(state, clipboard);
+            if (wipingPasswordClipboard) {
+                const std::size_t clipboardSize = std::strlen(clipboard);
+                volatile char* clipboardBytes = clipboard;
+                for (std::size_t index = 0; index < clipboardSize; ++index) {
+                    clipboardBytes[index] = '\0';
+                }
+            }
+            SDL_free(clipboard);
+        }
         return RaLoginModalAction::None;
     }
     if (event.type == SDL_KEYDOWN && event.key.repeat == 0
