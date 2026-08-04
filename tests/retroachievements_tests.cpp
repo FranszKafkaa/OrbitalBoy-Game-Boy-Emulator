@@ -60,6 +60,64 @@ uint32_t readMemory(uint32_t, uint8_t*, uint32_t, rc_client_t*) {
 void callServer(const rc_api_request_t*, rc_client_server_callback_t, void*, rc_client_t*) {
 }
 
+#ifdef GBEMU_USE_SDL2
+class ScopedDummyClipboard {
+public:
+    ScopedDummyClipboard() {
+        const char* currentDriver = SDL_GetCurrentVideoDriver();
+        if (currentDriver != nullptr) {
+            usesDummyDriver_ = std::strcmp(currentDriver, "dummy") == 0;
+            return;
+        }
+
+        const char* configuredDriver = SDL_GetHint(SDL_HINT_VIDEODRIVER);
+        if (configuredDriver == nullptr) {
+            resetVideoHint_ = SDL_SetHint(SDL_HINT_VIDEODRIVER, "dummy") == SDL_TRUE;
+            if (!resetVideoHint_) {
+                return;
+            }
+        } else if (std::strcmp(configuredDriver, "dummy") != 0) {
+            return;
+        }
+
+        if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
+            return;
+        }
+        ownsVideoSubsystem_ = true;
+        currentDriver = SDL_GetCurrentVideoDriver();
+        usesDummyDriver_ = currentDriver != nullptr
+            && std::strcmp(currentDriver, "dummy") == 0;
+    }
+
+    ~ScopedDummyClipboard() {
+        if (clipboardWritten_ && usesDummyDriver_) {
+            (void)SDL_SetClipboardText("");
+        }
+        if (ownsVideoSubsystem_) {
+            SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        }
+        if (resetVideoHint_) {
+            (void)SDL_SetHint(SDL_HINT_VIDEODRIVER, nullptr);
+        }
+    }
+
+    [[nodiscard]] bool usesDummyDriver() const {
+        return usesDummyDriver_;
+    }
+
+    int setText(const char* text) {
+        clipboardWritten_ = true;
+        return SDL_SetClipboardText(text);
+    }
+
+private:
+    bool ownsVideoSubsystem_ = false;
+    bool resetVideoHint_ = false;
+    bool usesDummyDriver_ = false;
+    bool clipboardWritten_ = false;
+};
+#endif
+
 std::string readTextFile(const std::filesystem::path& path) {
     std::ifstream in(path);
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
@@ -4202,12 +4260,11 @@ TEST_CASE("retroachievements", "login_clipboard_shortcut_matches_platform") {
 }
 
 TEST_CASE("retroachievements", "login_clipboard_event_pastes_password_without_repeating") {
-    const bool videoWasInitialized = (SDL_WasInit(SDL_INIT_VIDEO) & SDL_INIT_VIDEO) != 0U;
-    if (!videoWasInitialized) {
-        T_REQUIRE(SDL_SetHint(SDL_HINT_VIDEODRIVER, "dummy") == SDL_TRUE);
-        T_EQ(SDL_InitSubSystem(SDL_INIT_VIDEO), 0);
+    ScopedDummyClipboard clipboard;
+    if (!clipboard.usesDummyDriver()) {
+        return;
     }
-    T_EQ(SDL_SetClipboardText("clipboard-secret"), 0);
+    T_EQ(clipboard.setText("clipboard-secret"), 0);
 
     gb::frontend::RaLoginModalState state{};
     gb::frontend::openRaLoginModal(state);
@@ -4231,20 +4288,14 @@ TEST_CASE("retroachievements", "login_clipboard_event_pastes_password_without_re
     paste.key.repeat = 1;
     gb::frontend::handleRaLoginModalEvent(state, paste, 640, 480);
     T_EQ(state.password, std::string("clipboard-secret"));
-    T_EQ(SDL_SetClipboardText(""), 0);
-    if (!videoWasInitialized) {
-        SDL_QuitSubSystem(SDL_INIT_VIDEO);
-        T_REQUIRE(SDL_SetHint(SDL_HINT_VIDEODRIVER, nullptr) == SDL_TRUE);
-    }
 }
 
 TEST_CASE("retroachievements", "login_clipboard_event_ignores_requesting_state") {
-    const bool videoWasInitialized = (SDL_WasInit(SDL_INIT_VIDEO) & SDL_INIT_VIDEO) != 0U;
-    if (!videoWasInitialized) {
-        T_REQUIRE(SDL_SetHint(SDL_HINT_VIDEODRIVER, "dummy") == SDL_TRUE);
-        T_EQ(SDL_InitSubSystem(SDL_INIT_VIDEO), 0);
+    ScopedDummyClipboard clipboard;
+    if (!clipboard.usesDummyDriver()) {
+        return;
     }
-    T_EQ(SDL_SetClipboardText("clipboard-must-not-be-read"), 0);
+    T_EQ(clipboard.setText("clipboard-must-not-be-read"), 0);
 
     gb::frontend::RaLoginModalState state{};
     gb::frontend::openRaLoginModal(state);
@@ -4266,11 +4317,6 @@ TEST_CASE("retroachievements", "login_clipboard_event_ignores_requesting_state")
     );
     T_EQ(state.password, std::string("protected"));
     T_REQUIRE(state.requesting);
-    T_EQ(SDL_SetClipboardText(""), 0);
-    if (!videoWasInitialized) {
-        SDL_QuitSubSystem(SDL_INIT_VIDEO);
-        T_REQUIRE(SDL_SetHint(SDL_HINT_VIDEODRIVER, nullptr) == SDL_TRUE);
-    }
 }
 
 TEST_CASE("retroachievements", "login_ui_never_stops_text_input_owned_by_caller") {
