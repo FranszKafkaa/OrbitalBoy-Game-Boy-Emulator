@@ -75,11 +75,11 @@ void RcheevosAchievementRuntime::idle() {
     session_.idle();
 }
 
-RaSessionSnapshot RcheevosAchievementRuntime::snapshot() const {
+SessionSnapshot RcheevosAchievementRuntime::snapshot() const {
     return session_.snapshot();
 }
 
-std::vector<RaUiEvent> RcheevosAchievementRuntime::takeEvents() {
+std::vector<UiEvent> RcheevosAchievementRuntime::takeEvents() {
     return session_.takeEvents();
 }
 

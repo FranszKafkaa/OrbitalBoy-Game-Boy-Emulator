@@ -125,6 +125,7 @@ set(GBEMU_TEST_SOURCES
     tests/state_and_options_tests.cpp
     tests/frontend_feature_tests.cpp
     tests/achievements/runtime/achievement_runtime_tests.cpp
+    tests/achievements/runtime/achievement_models_tests.cpp
 )
 
 if (WIN32 AND GBEMU_USE_SDL2)
@@ -268,6 +269,18 @@ if (GBEMU_BUILD_MCP)
 endif()
 
 if (BUILD_TESTING)
+    add_executable(gbachievement_models_tests
+        tests/test_main.cpp
+        tests/achievements/runtime/achievement_models_tests.cpp
+    )
+    target_include_directories(gbachievement_models_tests PRIVATE include)
+    if (MSVC)
+        target_compile_options(gbachievement_models_tests PRIVATE /W4 /EHsc)
+    else()
+        target_compile_options(gbachievement_models_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME gbachievement_models_tests COMMAND gbachievement_models_tests)
+
     add_executable(gbemu_tests
         ${GBEMU_TEST_SOURCES}
     )

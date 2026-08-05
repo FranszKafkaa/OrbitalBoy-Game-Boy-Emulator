@@ -5,14 +5,12 @@
 #include <string_view>
 #include <vector>
 
-#include "gb/app/frontend/realtime/retroachievements_models.hpp"
+#include "gb/achievements/runtime/models.hpp"
 #include "gb/app/frontend/realtime/secure_string.hpp"
 
 namespace gb::achievements {
 
 using RaSecretString = gb::frontend::RaSecretString;
-using RaSessionSnapshot = gb::frontend::RaSessionSnapshot;
-using RaUiEvent = gb::frontend::RaUiEvent;
 
 class AchievementRuntime {
 public:
@@ -26,8 +24,8 @@ public:
     virtual void processPending() = 0;
     virtual void doFrame() = 0;
     virtual void idle() = 0;
-    [[nodiscard]] virtual RaSessionSnapshot snapshot() const = 0;
-    [[nodiscard]] virtual std::vector<RaUiEvent> takeEvents() = 0;
+    [[nodiscard]] virtual SessionSnapshot snapshot() const = 0;
+    [[nodiscard]] virtual std::vector<UiEvent> takeEvents() = 0;
 
     [[nodiscard]] virtual std::vector<std::uint8_t> serializeProgress() const = 0;
     [[nodiscard]] virtual bool deserializeProgress(

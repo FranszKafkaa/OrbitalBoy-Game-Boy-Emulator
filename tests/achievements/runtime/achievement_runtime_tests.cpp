@@ -45,10 +45,10 @@ public:
     void idle() override {
         ++idleCount;
     }
-    [[nodiscard]] gb::achievements::RaSessionSnapshot snapshot() const override {
+    [[nodiscard]] gb::achievements::SessionSnapshot snapshot() const override {
         return {};
     }
-    [[nodiscard]] std::vector<gb::achievements::RaUiEvent> takeEvents() override {
+    [[nodiscard]] std::vector<gb::achievements::UiEvent> takeEvents() override {
         return {};
     }
     [[nodiscard]] std::vector<std::uint8_t> serializeProgress() const override {
@@ -96,7 +96,7 @@ TEST_CASE("achievements_runtime", "public_runtime_contract_supports_polymorphic_
     runtime->processPending();
     runtime->doFrame();
     runtime->idle();
-    T_REQUIRE(runtime->snapshot().connectionState == gb::frontend::RaConnectionState::Disabled);
+    T_REQUIRE(runtime->snapshot().connectionState == gb::achievements::ConnectionState::Disabled);
     T_REQUIRE(runtime->takeEvents().empty());
     T_REQUIRE((runtime->serializeProgress() == std::vector<std::uint8_t>{1U, 2U}));
     T_REQUIRE(runtime->deserializeProgress("hash", {1U, 2U}));
@@ -123,7 +123,7 @@ TEST_CASE("achievements_runtime", "default_factory_returns_runtime_for_gameboy")
         gb::achievements::makeDefaultAchievementRuntime(gameBoy, transport);
 
     T_REQUIRE(runtime != nullptr);
-    T_REQUIRE(runtime->snapshot().connectionState == gb::frontend::RaConnectionState::LoggedOut);
+    T_REQUIRE(runtime->snapshot().connectionState == gb::achievements::ConnectionState::LoggedOut);
 
     runtime->enqueueLogout();
     runtime->processPending();
@@ -144,7 +144,7 @@ TEST_CASE("achievements_runtime", "default_factory_accepts_generic_memory_reader
         );
 
     T_REQUIRE(runtime != nullptr);
-    T_REQUIRE(runtime->snapshot().connectionState == gb::frontend::RaConnectionState::LoggedOut);
+    T_REQUIRE(runtime->snapshot().connectionState == gb::achievements::ConnectionState::LoggedOut);
     T_REQUIRE(runtime->serializeProgress().empty());
     T_REQUIRE(runtime->shutdown());
     transport.shutdown();

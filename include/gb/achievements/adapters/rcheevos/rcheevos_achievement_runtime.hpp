@@ -30,8 +30,8 @@ public:
     void processPending() override;
     void doFrame() override;
     void idle() override;
-    [[nodiscard]] RaSessionSnapshot snapshot() const override;
-    [[nodiscard]] std::vector<RaUiEvent> takeEvents() override;
+    [[nodiscard]] SessionSnapshot snapshot() const override;
+    [[nodiscard]] std::vector<UiEvent> takeEvents() override;
     [[nodiscard]] std::vector<std::uint8_t> serializeProgress() const override;
     [[nodiscard]] bool deserializeProgress(
         std::string_view romHash,
