@@ -47,10 +47,10 @@ class WipeRecorder {
 public:
     void observe(const std::uint8_t* bytes, std::size_t size) {
         std::lock_guard<std::mutex> lock(mutex_);
-        allBytesWereZero_ = allBytesWereZero_ && (size == 0U || (bytes != nullptr
+        allBytesWereZero_ = allBytesWereZero_ && (bytes != nullptr
             && std::all_of(bytes, bytes + size, [](std::uint8_t byte) {
                 return byte == 0U;
-            })));
+            }));
         sizes_.push_back(size);
         condition_.notify_all();
     }
@@ -76,6 +76,15 @@ public:
         });
     }
 
+    [[nodiscard]] bool waitForNonZeroCount(std::size_t count) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return condition_.wait_for(lock, std::chrono::seconds(2), [&] {
+            return static_cast<std::size_t>(std::count_if(
+                sizes_.begin(), sizes_.end(), [](std::size_t size) { return size != 0U; }
+            )) >= count;
+        });
+    }
+
     [[nodiscard]] bool sawSize(std::size_t size) const {
         std::lock_guard<std::mutex> lock(mutex_);
         return std::find(sizes_.begin(), sizes_.end(), size) != sizes_.end();
@@ -84,6 +93,22 @@ public:
     [[nodiscard]] bool allBytesWereZero() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return allBytesWereZero_;
+    }
+
+    [[nodiscard]] std::size_t count() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return sizes_.size();
+    }
+
+    [[nodiscard]] std::size_t nonZeroCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return static_cast<std::size_t>(std::count_if(
+            sizes_.begin(), sizes_.end(), [](std::size_t size) { return size != 0U; }));
+    }
+
+    [[nodiscard]] std::size_t zeroCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return static_cast<std::size_t>(std::count(sizes_.begin(), sizes_.end(), 0U));
     }
 
 private:
@@ -304,19 +329,21 @@ TEST_CASE("achievements_http_transport", "wipes_active_post_data_after_executor_
         [&](const std::uint8_t* bytes, std::size_t size) { wipes.observe(bytes, size); }
     );
 
-    T_REQUIRE(transport.submit({1U, HttpChannel::Api, "https://example.invalid/active", "active-post"}));
+    T_REQUIRE(transport.submit({1U, HttpChannel::Api, "https://example.invalid/active",
+                                std::string(96U, 'a')}));
     {
         std::unique_lock<std::mutex> lock(mutex);
         T_REQUIRE(condition.wait_for(lock, std::chrono::seconds(2), [&] { return entered; }));
         release = true;
     }
     condition.notify_all();
-    T_REQUIRE(wipes.waitForWipe());
+    T_REQUIRE(wipes.waitForNonZeroCount(1U));
     T_REQUIRE(wipes.allBytesWereZero());
+    T_EQ(wipes.zeroCount(), 0U);
     transport.shutdown();
 }
 
-TEST_CASE("achievements_http_transport", "wipes_post_storage_after_each_accepted_handoff") {
+TEST_CASE("achievements_http_transport", "keeps_post_data_in_a_stable_node_until_active_cleanup") {
     std::mutex mutex;
     std::condition_variable condition;
     bool entered = false;
@@ -333,20 +360,26 @@ TEST_CASE("achievements_http_transport", "wipes_post_storage_after_each_accepted
         [&](const std::uint8_t* bytes, std::size_t size) { wipes.observe(bytes, size); }
     );
 
-    T_REQUIRE(transport.submit({1U, HttpChannel::Api, "https://example.invalid/handoff", "handoff-post"}));
+    T_REQUIRE(transport.submit({1U, HttpChannel::Api, "https://example.invalid/handoff",
+                                std::string(96U, 'h')}));
     {
         std::unique_lock<std::mutex> lock(mutex);
         T_REQUIRE(condition.wait_for(lock, std::chrono::seconds(2), [&] { return entered; }));
     }
-    T_REQUIRE(wipes.waitForCount(2U));
+    const auto wipesBeforeExecutorReturns = wipes.count();
+    const auto nonZeroWipesBeforeExecutorReturns = wipes.nonZeroCount();
     {
         std::lock_guard<std::mutex> lock(mutex);
         release = true;
     }
     condition.notify_all();
-    T_REQUIRE(wipes.waitForCount(3U));
-    T_REQUIRE(wipes.allBytesWereZero());
+    T_REQUIRE(wipes.waitForNonZeroCount(nonZeroWipesBeforeExecutorReturns + 1U));
     transport.shutdown();
+
+    T_REQUIRE(wipesBeforeExecutorReturns <= 1U);
+    T_EQ(wipesBeforeExecutorReturns, nonZeroWipesBeforeExecutorReturns);
+    T_EQ(wipes.zeroCount(), 0U);
+    T_REQUIRE(wipes.allBytesWereZero());
 }
 
 TEST_CASE("achievements_http_transport", "wipes_pending_post_data_during_shutdown") {
@@ -371,9 +404,11 @@ TEST_CASE("achievements_http_transport", "wipes_pending_post_data_during_shutdow
         std::unique_lock<std::mutex> lock(mutex);
         T_REQUIRE(condition.wait_for(lock, std::chrono::seconds(2), [&] { return entered; }));
     }
-    T_REQUIRE(transport.submit({2U, HttpChannel::Api, "https://example.invalid/pending", "pending-post"}));
+    T_REQUIRE(transport.submit({2U, HttpChannel::Api, "https://example.invalid/pending",
+                                std::string(96U, 'p')}));
+    const auto nonZeroWipesBeforeShutdown = wipes.nonZeroCount();
     auto shutdown = std::async(std::launch::async, [&] { transport.shutdown(); });
-    T_REQUIRE(wipes.waitForWipe());
+    T_REQUIRE(wipes.waitForNonZeroCount(nonZeroWipesBeforeShutdown + 1U));
     {
         std::lock_guard<std::mutex> lock(mutex);
         release = true;
@@ -382,6 +417,7 @@ TEST_CASE("achievements_http_transport", "wipes_pending_post_data_during_shutdow
     T_REQUIRE(shutdown.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
     shutdown.get();
     T_REQUIRE(wipes.allBytesWereZero());
+    T_EQ(wipes.zeroCount(), 0U);
 }
 
 TEST_CASE("achievements_http_transport", "wipes_successful_completed_response_during_shutdown") {
@@ -402,6 +438,7 @@ TEST_CASE("achievements_http_transport", "wipes_successful_completed_response_du
 
     T_REQUIRE(wipes.sawSize(2U));
     T_REQUIRE(wipes.allBytesWereZero());
+    T_EQ(wipes.zeroCount(), 0U);
 }
 
 TEST_CASE("achievements_http_transport", "wipes_non_success_and_oversized_response_bodies") {
@@ -427,6 +464,7 @@ TEST_CASE("achievements_http_transport", "wipes_non_success_and_oversized_respon
     T_REQUIRE(wipes.sawSize(4U));
     T_REQUIRE(wipes.sawSize(4U * 1024U * 1024U + 1U));
     T_REQUIRE(wipes.allBytesWereZero());
+    T_EQ(wipes.zeroCount(), 0U);
     transport.shutdown();
 }
 
@@ -441,8 +479,9 @@ TEST_CASE("achievements_http_transport", "wipes_rejected_post_data_after_shutdow
     transport.shutdown();
 
     T_REQUIRE(!transport.submit({1U, HttpChannel::Api, "https://example.invalid/rejected", "shutdown-post"}));
-    T_REQUIRE(wipes.waitForWipe());
+    T_REQUIRE(wipes.waitForNonZeroCount(1U));
     T_REQUIRE(wipes.allBytesWereZero());
+    T_EQ(wipes.zeroCount(), 0U);
 }
 
 TEST_CASE("achievements_http_transport", "wipes_rejected_post_data_at_channel_limit") {
@@ -470,7 +509,7 @@ TEST_CASE("achievements_http_transport", "wipes_rejected_post_data_at_channel_li
         T_REQUIRE(condition.wait_for(lock, std::chrono::seconds(2), [&] { return entered; }));
     }
     T_REQUIRE(!transport.submit({65U, HttpChannel::Api, "https://example.invalid/rejected", "limit-post"}));
-    T_REQUIRE(wipes.waitForWipe());
+    T_REQUIRE(wipes.waitForNonZeroCount(1U));
     {
         std::lock_guard<std::mutex> lock(mutex);
         release = true;
@@ -478,6 +517,7 @@ TEST_CASE("achievements_http_transport", "wipes_rejected_post_data_at_channel_li
     condition.notify_all();
     transport.shutdown();
     T_REQUIRE(wipes.allBytesWereZero());
+    T_EQ(wipes.zeroCount(), 0U);
 }
 
 TEST_CASE("achievements_http_transport", "contains_reentrant_and_throwing_wipe_observers") {
@@ -519,23 +559,14 @@ TEST_CASE("achievements_http_transport", "contains_reentrant_and_throwing_wipe_o
 }
 
 TEST_CASE("achievements_http_transport", "allows_worker_wipe_observer_to_request_shutdown") {
-    std::mutex mutex;
-    std::condition_variable condition;
-    bool entered = false;
-    bool release = false;
     HttpTransport* transportPointer = nullptr;
-    std::atomic<int> observerCalls{0};
     std::atomic<bool> shutdownReturned{false};
     HttpTransport transport(
         [&](const HttpRequest& request) {
-            std::unique_lock<std::mutex> lock(mutex);
-            entered = true;
-            condition.notify_all();
-            condition.wait(lock, [&] { return release; });
-            return HttpResponse{request.id, request.channel, 200L, {}, {}};
+            return HttpResponse{request.id, request.channel, 500L, {'b', 'a', 'd'}, {}};
         },
-        [&](const std::uint8_t*, std::size_t) {
-            if (observerCalls.fetch_add(1) == 1 && transportPointer != nullptr) {
+        [&](const std::uint8_t*, std::size_t size) {
+            if (size == 3U && transportPointer != nullptr) {
                 transportPointer->shutdown();
                 shutdownReturned.store(true);
             }
@@ -543,17 +574,107 @@ TEST_CASE("achievements_http_transport", "allows_worker_wipe_observer_to_request
     );
     transportPointer = &transport;
 
-    T_REQUIRE(transport.submit({1U, HttpChannel::Api, "https://example.invalid/worker", "worker-post"}));
-    {
-        std::unique_lock<std::mutex> lock(mutex);
-        T_REQUIRE(condition.wait_for(lock, std::chrono::seconds(2), [&] { return entered; }));
-        release = true;
-    }
-    condition.notify_all();
+    T_REQUIRE(transport.submit({1U, HttpChannel::Api, "https://example.invalid/worker", {}}));
+    T_REQUIRE(waitUntil([&] { return shutdownReturned.load(); }));
     transport.shutdown();
 
     T_REQUIRE(shutdownReturned.load());
     T_REQUIRE(!transport.acceptingRequests());
+}
+
+TEST_CASE("achievements_http_transport", "allows_worker_shutdown_observer_to_overlap_external_shutdown") {
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool entered = false;
+    bool release = false;
+    HttpTransport* transportPointer = nullptr;
+    std::atomic<bool> workerShutdownReturned{false};
+    std::atomic<bool> externalStarted{false};
+    WipeRecorder wipes;
+    HttpTransport transport(
+        [&](const HttpRequest& request) {
+            std::unique_lock<std::mutex> lock(mutex);
+            entered = true;
+            condition.notify_all();
+            condition.wait(lock, [&] { return release; });
+            return HttpResponse{request.id, request.channel, 500L, {'b', 'a', 'd'}, {}};
+        },
+        [&](const std::uint8_t* bytes, std::size_t size) {
+            wipes.observe(bytes, size);
+            if (size == 3U && transportPointer != nullptr) {
+                transportPointer->shutdown();
+                workerShutdownReturned.store(true);
+            }
+        }
+    );
+    transportPointer = &transport;
+
+    T_REQUIRE(transport.submit({1U, HttpChannel::Api, "https://example.invalid/overlap", {}}));
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        T_REQUIRE(condition.wait_for(lock, std::chrono::seconds(2), [&] { return entered; }));
+    }
+    auto externalShutdown = std::async(std::launch::async, [&] {
+        externalStarted.store(true);
+        transport.shutdown();
+    });
+    T_REQUIRE(waitUntil([&] { return externalStarted.load() && !transport.acceptingRequests(); }));
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        release = true;
+    }
+    condition.notify_all();
+
+    T_REQUIRE(externalShutdown.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    externalShutdown.get();
+    T_REQUIRE(workerShutdownReturned.load());
+    T_REQUIRE(wipes.sawSize(3U));
+    T_REQUIRE(wipes.allBytesWereZero());
+    T_EQ(wipes.zeroCount(), 0U);
+}
+
+TEST_CASE("achievements_http_transport", "serializes_simultaneous_external_shutdown_callers") {
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool entered = false;
+    bool release = false;
+    std::atomic<int> throwingCleanupCalls{0};
+    HttpTransport transport(
+        [&](const HttpRequest& request) {
+            std::unique_lock<std::mutex> lock(mutex);
+            entered = true;
+            condition.notify_all();
+            condition.wait(lock, [&] { return release; });
+            return HttpResponse{request.id, request.channel, 200L, {'o', 'k'}, {}};
+        },
+        [&](const std::uint8_t*, std::size_t size) {
+            if (size == 2U) {
+                ++throwingCleanupCalls;
+                throw std::runtime_error("observer cleanup failure");
+            }
+        }
+    );
+
+    T_REQUIRE(transport.submit({1U, HttpChannel::Api, "https://example.invalid/two-callers", {}}));
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        T_REQUIRE(condition.wait_for(lock, std::chrono::seconds(2), [&] { return entered; }));
+    }
+    auto first = std::async(std::launch::async, [&] { transport.shutdown(); });
+    auto second = std::async(std::launch::async, [&] { transport.shutdown(); });
+    T_REQUIRE(waitUntil([&] { return !transport.acceptingRequests(); }));
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        release = true;
+    }
+    condition.notify_all();
+
+    T_REQUIRE(first.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    T_REQUIRE(second.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    first.get();
+    second.get();
+    T_REQUIRE(!transport.acceptingRequests());
+    T_EQ(throwingCleanupCalls.load(), 1);
 }
 
 } // namespace
