@@ -125,7 +125,6 @@ set(GBEMU_TEST_SOURCES
     tests/state_and_options_tests.cpp
     tests/frontend_feature_tests.cpp
     tests/achievements/security/secret_string_compatibility_tests.cpp
-    tests/achievements/security/secret_string_tests.cpp
     tests/achievements/runtime/achievement_runtime_tests.cpp
     tests/achievements/runtime/achievement_models_tests.cpp
 )
@@ -271,6 +270,19 @@ if (GBEMU_BUILD_MCP)
 endif()
 
 if (BUILD_TESTING)
+    add_executable(gbachievements_security_tests
+        tests/test_main.cpp
+        tests/achievements/security/secret_string_tests.cpp
+        src/achievements/security/secret_string.cpp
+    )
+    target_include_directories(gbachievements_security_tests PRIVATE include)
+    if (MSVC)
+        target_compile_options(gbachievements_security_tests PRIVATE /W4 /EHsc)
+    else()
+        target_compile_options(gbachievements_security_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME gbachievements_security_tests COMMAND gbachievements_security_tests)
+
     add_executable(gbachievement_models_tests
         tests/test_main.cpp
         tests/achievements/runtime/achievement_models_tests.cpp
