@@ -2,10 +2,12 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstdint>
 #include <functional>
 #include <future>
 #include <mutex>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -15,6 +17,46 @@
 #include "gb/achievements/protocol/http_transport.hpp"
 
 #include "../../test_framework.hpp"
+
+namespace http_transport_allocation_failure_test {
+
+thread_local bool failNextAllocation = false;
+std::atomic<bool> failureObserved{false};
+
+} // namespace http_transport_allocation_failure_test
+
+void* operator new(std::size_t size) {
+    using namespace http_transport_allocation_failure_test;
+    if (failNextAllocation) {
+        failNextAllocation = false;
+        failureObserved.store(true, std::memory_order_relaxed);
+        throw std::bad_alloc();
+    }
+    if (void* storage = std::malloc(size == 0U ? 1U : size)) {
+        return storage;
+    }
+    throw std::bad_alloc();
+}
+
+void* operator new[](std::size_t size) {
+    return ::operator new(size);
+}
+
+void operator delete(void* storage) noexcept {
+    std::free(storage);
+}
+
+void operator delete[](void* storage) noexcept {
+    std::free(storage);
+}
+
+void operator delete(void* storage, std::size_t) noexcept {
+    std::free(storage);
+}
+
+void operator delete[](void* storage, std::size_t) noexcept {
+    std::free(storage);
+}
 
 namespace {
 
@@ -252,6 +294,73 @@ TEST_CASE("achievements_http_transport", "limits_each_channel_to_sixty_four_outs
     }
     condition.notify_all();
     transport.shutdown();
+}
+
+TEST_CASE("achievements_http_transport", "releases_slot_when_completion_storage_allocation_fails") {
+    using namespace http_transport_allocation_failure_test;
+    failureObserved.store(false, std::memory_order_relaxed);
+    std::atomic<std::size_t> executions{0U};
+    std::atomic<bool> blockLaterRequests{false};
+    std::atomic<bool> failedBodyWasWiped{false};
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool release = false;
+    HttpTransport transport(
+        [&](const HttpRequest& request) {
+            failNextAllocation = false;
+            if (blockLaterRequests.load(std::memory_order_relaxed)) {
+                std::unique_lock<std::mutex> lock(mutex);
+                condition.wait(lock, [&] { return release; });
+            }
+            ++executions;
+            HttpResponse response{request.id, request.channel, 200L,
+                                  std::vector<std::uint8_t>(37U, 0x5AU), {}};
+            if (!failureObserved.load(std::memory_order_relaxed)) {
+                failNextAllocation = true;
+            }
+            return response;
+        },
+        [&](const std::uint8_t* bytes, std::size_t size) {
+            if (size == 37U) {
+                failedBodyWasWiped.store(
+                    bytes != nullptr
+                        && std::all_of(bytes, bytes + size, [](std::uint8_t byte) {
+                            return byte == 0U;
+                        }),
+                    std::memory_order_relaxed
+                );
+            }
+        }
+    );
+
+    for (std::uint64_t id = 0U; id < 64U; ++id) {
+        T_REQUIRE(transport.submit({id, HttpChannel::Api,
+                                    "https://example.invalid/allocation-failure", {}}));
+    }
+    std::size_t completedCount = 0U;
+    T_REQUIRE(waitUntil([&] {
+        completedCount += transport.takeCompleted(HttpChannel::Api).size();
+        return executions.load(std::memory_order_relaxed) == 64U && completedCount == 63U;
+    }));
+    T_REQUIRE(failureObserved.load(std::memory_order_relaxed));
+    T_REQUIRE(failedBodyWasWiped.load(std::memory_order_relaxed));
+
+    blockLaterRequests.store(true, std::memory_order_relaxed);
+    std::size_t acceptedAfterFailure = 0U;
+    for (std::uint64_t id = 64U; id < 128U; ++id) {
+        if (transport.submit({id, HttpChannel::Api,
+                              "https://example.invalid/after-allocation-failure", {}})) {
+            ++acceptedAfterFailure;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        release = true;
+    }
+    condition.notify_all();
+    transport.shutdown();
+
+    T_EQ(acceptedAfterFailure, 64U);
 }
 
 TEST_CASE("achievements_http_transport", "wipes_failed_response_and_pending_post_data_during_shutdown") {

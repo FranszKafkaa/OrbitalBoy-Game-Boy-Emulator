@@ -7,6 +7,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <exception>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -44,7 +45,7 @@ std::size_t channelIndex(HttpChannel channel) {
     return channel == HttpChannel::Image ? 1U : 0U;
 }
 
-void secureEraseBody(std::vector<std::uint8_t>& body, const HttpWipeObserver& observer) {
+void secureEraseBody(std::vector<std::uint8_t>& body, const HttpWipeObserver& observer) noexcept {
     volatile std::uint8_t* bytes = body.empty() ? nullptr : body.data();
     for (std::size_t index = 0; index < body.size(); ++index) {
         bytes[index] = 0U;
@@ -58,7 +59,7 @@ void secureEraseBody(std::vector<std::uint8_t>& body, const HttpWipeObserver& ob
     std::vector<std::uint8_t>{}.swap(body);
 }
 
-void secureErasePostData(std::string& postData, const HttpWipeObserver& observer) {
+void secureErasePostData(std::string& postData, const HttpWipeObserver& observer) noexcept {
     (void)secureEraseStringStorage(postData, [&observer](const char* bytes, std::size_t size) {
         if (observer) {
             try {
@@ -155,7 +156,7 @@ public:
             workers_[0] = std::thread([this] { run(HttpChannel::Api); });
             workers_[1] = std::thread([this] { run(HttpChannel::Image); });
         } catch (...) {
-            requestWorkerShutdown();
+            requestStopNoexcept();
             joinWorkersNoexcept();
             throw;
         }
@@ -227,10 +228,7 @@ public:
                 if (shutdownThread_ == std::this_thread::get_id()) {
                     return;
                 }
-                try {
-                    shutdownCondition_.wait(shutdownLock, [this] { return shutdownCompleted_; });
-                } catch (...) {
-                }
+                shutdownCondition_.wait(shutdownLock, [this] { return shutdownCompleted_; });
                 return;
             }
             shutdownInProgress_ = true;
@@ -244,29 +242,10 @@ public:
             }
         } completion{*this};
 
-        try {
-            PendingQueues pendingToWipe;
-            takePendingForShutdown(pendingToWipe);
-            wipePendingRequests(pendingToWipe);
-            pendingCondition_.notify_all();
-            joinWorkersNoexcept();
-
-            std::array<std::deque<HttpResponse>, 2> completedToWipe;
-            {
-                std::lock_guard<std::mutex> queueLock(queueMutex_);
-                for (std::size_t index = 0; index < completedByChannel_.size(); ++index) {
-                    subtractOutstanding(outstandingByChannel_[index], completedByChannel_[index].size());
-                    completedToWipe[index].swap(completedByChannel_[index]);
-                }
-            }
-            for (auto& completed : completedToWipe) {
-                for (auto& response : completed) {
-                    secureEraseBody(response.body, wipeObserver_);
-                }
-            }
-        } catch (...) {
-            joinWorkersNoexcept();
-        }
+        requestStopNoexcept();
+        wipePendingRequestsInPlaceNoexcept();
+        joinWorkersNoexcept();
+        wipeCompletedResponsesInPlaceNoexcept();
     }
 
 private:
@@ -276,35 +255,60 @@ private:
         return activeHttpTransportWorker == this;
     }
 
-    void takePendingForShutdown(PendingQueues& pendingToWipe) noexcept {
-        std::lock_guard<std::mutex> queueLock(queueMutex_);
-        stopping_ = true;
-        stopRequested_->store(true, std::memory_order_relaxed);
-        for (std::size_t index = 0; index < pendingByChannel_.size(); ++index) {
-            subtractOutstanding(outstandingByChannel_[index], pendingByChannel_[index].size());
-            pendingToWipe[index].swap(pendingByChannel_[index]);
+    void requestStopNoexcept() noexcept {
+        {
+            std::lock_guard<std::mutex> queueLock(queueMutex_);
+            stopping_ = true;
+            stopRequested_->store(true, std::memory_order_relaxed);
         }
+        pendingCondition_.notify_all();
     }
 
-    void wipePendingRequests(PendingQueues& pendingToWipe) noexcept {
-        for (auto& pending : pendingToWipe) {
-            for (auto& request : pending) {
+    void wipePendingRequestsInPlaceNoexcept() noexcept {
+        for (std::size_t index = 0; index < pendingByChannel_.size(); ++index) {
+            for (;;) {
+                std::unique_ptr<HttpRequest> request;
+                {
+                    std::lock_guard<std::mutex> queueLock(queueMutex_);
+                    if (pendingByChannel_[index].empty()) {
+                        break;
+                    }
+                    request = std::move(pendingByChannel_[index].front());
+                    pendingByChannel_[index].pop_front();
+                    subtractOutstanding(outstandingByChannel_[index], 1U);
+                }
                 secureErasePostData(request->postData, wipeObserver_);
             }
         }
     }
 
     void requestWorkerShutdown() noexcept {
-        try {
-            PendingQueues pendingToWipe;
-            takePendingForShutdown(pendingToWipe);
-            wipePendingRequests(pendingToWipe);
-            pendingCondition_.notify_all();
-        } catch (...) {
+        requestStopNoexcept();
+        wipePendingRequestsInPlaceNoexcept();
+    }
+
+    void wipeCompletedResponsesInPlaceNoexcept() noexcept {
+        for (std::size_t index = 0; index < completedByChannel_.size(); ++index) {
+            for (;;) {
+                HttpResponse response;
+                {
+                    std::lock_guard<std::mutex> queueLock(queueMutex_);
+                    if (completedByChannel_[index].empty()) {
+                        break;
+                    }
+                    transferResponse(response, completedByChannel_[index].front());
+                    completedByChannel_[index].pop_front();
+                    subtractOutstanding(outstandingByChannel_[index], 1U);
+                }
+                secureEraseBody(response.body, wipeObserver_);
+            }
         }
     }
 
     void joinWorkersNoexcept() noexcept {
+        if (runsOnWorkerThread()) {
+            std::terminate();
+        }
         for (auto& worker : workers_) {
             if (!worker.joinable()) {
                 continue;
@@ -312,26 +316,19 @@ private:
             try {
                 worker.join();
             } catch (...) {
-                try {
-                    worker.detach();
-                } catch (...) {
-                }
+                std::terminate();
             }
         }
     }
 
     void finishShutdown() noexcept {
-        try {
+        {
             std::lock_guard<std::mutex> shutdownLock(shutdownMutex_);
             shutdownInProgress_ = false;
             shutdownCompleted_ = true;
             shutdownThread_ = {};
-        } catch (...) {
         }
-        try {
-            shutdownCondition_.notify_all();
-        } catch (...) {
-        }
+        shutdownCondition_.notify_all();
     }
 
     void run(HttpChannel channel) {
@@ -344,10 +341,10 @@ private:
                 pendingCondition_.wait(lock, [this, index] {
                     return stopping_ || !pendingByChannel_[index].empty();
                 });
+                if (stopping_) {
+                    return;
+                }
                 if (pendingByChannel_[index].empty()) {
-                    if (stopping_) {
-                        return;
-                    }
                     continue;
                 }
                 request = std::move(pendingByChannel_[index].front());
@@ -369,11 +366,13 @@ private:
             bool completionStored = false;
             {
                 std::lock_guard<std::mutex> lock(queueMutex_);
+                const std::size_t responseIndex = channelIndex(response.channel);
                 try {
-                    completedByChannel_[channelIndex(response.channel)].emplace_back();
-                    transferResponse(completedByChannel_[channelIndex(response.channel)].back(), response);
+                    completedByChannel_[responseIndex].emplace_back();
+                    transferResponse(completedByChannel_[responseIndex].back(), response);
                     completionStored = true;
                 } catch (...) {
+                    subtractOutstanding(outstandingByChannel_[responseIndex], 1U);
                 }
             }
             if (!completionStored) {
