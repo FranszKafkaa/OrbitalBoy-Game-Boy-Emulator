@@ -295,8 +295,10 @@ std::string lowercaseAscii(std::string_view value) {
     return lowered;
 }
 
-bool isTransientLoginFailure(int result) {
-    return result == RC_NO_RESPONSE;
+bool isCredentialLoginFailure(int result) {
+    return result == RC_ACCESS_DENIED
+        || result == RC_INVALID_CREDENTIALS
+        || result == RC_EXPIRED_TOKEN;
 }
 
 std::string imageUrl(
@@ -541,10 +543,11 @@ public:
         if (result != RC_OK || !user) {
             state.connectionState = RaConnectionState::Error;
             state.statusText = "Falha no login do RetroAchievements.";
-            state.errorText = isTransientLoginFailure(result)
-                ? "Não foi possível conectar ao RetroAchievements. Tente novamente."
-                : "Usuário, senha ou token inválido no RetroAchievements.";
-            if (!isTransientLoginFailure(result)) {
+            const bool credentialFailure = isCredentialLoginFailure(result);
+            state.errorText = credentialFailure
+                ? "Usuário, senha ou token inválido no RetroAchievements."
+                : "Não foi possível conectar ao RetroAchievements. Tente novamente.";
+            if (credentialFailure) {
                 config.clearToken();
                 if (!persist()) {
                     state.errorText =
@@ -553,7 +556,7 @@ public:
             }
             publishSnapshot();
             addEvent({
-                tokenLogin && !isTransientLoginFailure(result)
+                tokenLogin && credentialFailure
                     ? RaUiEventType::LoginRequired
                     : RaUiEventType::LoginFailed,
                 "Falha no login",

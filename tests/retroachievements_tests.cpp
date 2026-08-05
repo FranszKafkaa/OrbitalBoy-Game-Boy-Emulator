@@ -3308,6 +3308,18 @@ TEST_CASE("retroachievements", "session_login_failure_clears_only_non_transient_
     T_REQUIRE(session.snapshot().errorText.find("network detail") == std::string::npos);
     T_REQUIRE(persisted.empty());
 
+    for (const int serviceFailure : {RC_INVALID_JSON, RC_API_FAILURE}) {
+        session.enqueueTokenLogin(config.username, config.token);
+        session.processPending();
+        api.completeLogin(serviceFailure, "service failure");
+
+        T_REQUIRE(session.snapshot().connectionState == gb::frontend::RaConnectionState::Error);
+        T_REQUIRE(persisted.empty());
+        const auto failureEvents = session.takeEvents();
+        T_REQUIRE(!failureEvents.empty());
+        T_REQUIRE(failureEvents.back().type == gb::frontend::RaUiEventType::LoginFailed);
+    }
+
     session.enqueueTokenLogin(config.username, config.token);
     session.processPending();
     api.completeLogin(RC_INVALID_CREDENTIALS, "bad password");
@@ -3316,7 +3328,7 @@ TEST_CASE("retroachievements", "session_login_failure_clears_only_non_transient_
     T_EQ(persisted.size(), 1U);
     T_REQUIRE(persisted.back().token.empty());
     const auto events = session.takeEvents();
-    T_EQ(events.size(), 2U);
+    T_EQ(events.size(), 1U);
     T_REQUIRE(events.back().type == gb::frontend::RaUiEventType::LoginRequired);
     session.shutdown();
     transport.shutdown();

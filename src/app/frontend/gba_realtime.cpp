@@ -8,6 +8,7 @@
 #include "gb/app/frontend/realtime/retroachievements_config.hpp"
 #include "gb/app/frontend/realtime/retroachievements_http.hpp"
 #include "gb/app/frontend/realtime/retroachievements_image_cache.hpp"
+#include "gb/app/frontend/realtime/retroachievements_lifecycle.hpp"
 #include "gb/app/frontend/realtime/retroachievements_memory.hpp"
 #include "gb/app/frontend/realtime/retroachievements_progress.hpp"
 #include "gb/app/frontend/realtime/retroachievements_session.hpp"
@@ -1244,6 +1245,7 @@ int runGbaRealtimeCommon(
     std::uint64_t raConnectionGeneration = 0;
     auto raLastIdle = std::chrono::steady_clock::now()
         - std::chrono::milliseconds(100);
+    RaDeferredProgressRestore raDeferredProgress{};
 #endif
 
     const auto setMessage = [&](std::string message, int frames = 120) {
@@ -1432,23 +1434,14 @@ int runGbaRealtimeCommon(
         if (loaded) {
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
             const auto stateImage = readRetroAchievementsStateFile(loadedPath);
-            const auto snapshot = raSession->snapshot();
-            bool restored = false;
-            if (stateImage.has_value() && snapshot.gameLoaded
-                && !snapshot.romHash.empty()) {
-                const auto stored = loadRetroAchievementsProgressV2(
+            if (stateImage.has_value()) {
+                raDeferredProgress.stage(loadRetroAchievementsProgressV2(
                     retroAchievementsProgressPathForState(loadedPath),
-                    snapshot.romHash,
+                    {},
                     stateImage->fingerprint
-                );
-                restored = stored.has_value()
-                    && raSession->deserializeProgress(
-                        stored->romHash,
-                        stored->payload
-                    );
-            }
-            if (!restored) {
-                (void)raSession->resetProgress();
+                ));
+            } else {
+                raDeferredProgress.stage(std::nullopt);
             }
 #endif
             setMessage("STATE LOADED S" + std::to_string(activeSaveSlot));
@@ -2090,7 +2083,29 @@ int runGbaRealtimeCommon(
             }
         }
 
-        if (!paused) {
+        bool raProgressReady = true;
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+        if (!paused && raDeferredProgress.pending()) {
+            const auto raProgressResult = raDeferredProgress.prepareCommittedFrame(
+                raSession->snapshot(),
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()
+                ),
+                [&](std::string_view romHash,
+                    const std::vector<std::uint8_t>& payload) {
+                    return raSession->deserializeProgress(romHash, payload);
+                },
+                [&]() { return raSession->resetProgress(); }
+            );
+            raProgressReady = raProgressResult != RaDeferredRestoreResult::Waiting;
+            if (raProgressResult == RaDeferredRestoreResult::TimedOutReset) {
+                setMessage("STATE RA TIMEOUT; PROGRESSO RESETADO", 180);
+            } else if (raProgressResult == RaDeferredRestoreResult::Reset) {
+                setMessage("STATE SEM PROGRESSO RA", 180);
+            }
+        }
+#endif
+        if (!paused && raProgressReady) {
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
             const bool raOverlayOpen = raLoginModal.open || raProfilePanel.open;
             core.setInputState(
