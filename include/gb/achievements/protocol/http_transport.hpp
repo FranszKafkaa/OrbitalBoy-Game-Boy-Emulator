@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -85,4 +86,3 @@ private:
 };
 
 } // namespace gb::achievements::protocol
-#include <atomic>

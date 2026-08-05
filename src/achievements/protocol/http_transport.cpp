@@ -59,7 +59,9 @@ void secureEraseBody(std::vector<std::uint8_t>& body, const HttpWipeObserver& ob
 }
 
 void secureErasePostData(std::string& postData, const HttpWipeObserver& observer) {
-    (void)secureEraseStringStorage(postData, [&observer](const char* bytes, std::size_t size) {
+    bool observerNotified = false;
+    (void)secureEraseStringStorage(postData, [&observer, &observerNotified](const char* bytes, std::size_t size) {
+        observerNotified = true;
         if (observer) {
             try {
                 observer(reinterpret_cast<const std::uint8_t*>(bytes), size);
@@ -67,6 +69,12 @@ void secureErasePostData(std::string& postData, const HttpWipeObserver& observer
             }
         }
     });
+    if (observer && !observerNotified) {
+        try {
+            observer(nullptr, 0U);
+        } catch (...) {
+        }
+    }
 }
 
 HttpResponse makeErrorResponse(const HttpRequest& request, const char* error) {
@@ -167,8 +175,8 @@ public:
                 }
             }
         }
+        secureErasePostData(request.postData, wipeObserver_);
         if (rejected) {
-            secureErasePostData(request.postData, wipeObserver_);
             return false;
         }
         pendingCondition_.notify_all();
@@ -195,22 +203,27 @@ public:
     }
 
     void shutdown() {
-        std::lock_guard<std::mutex> shutdownLock(shutdownMutex_);
-        std::array<std::deque<HttpRequest>, 2> pendingToWipe;
+        if (runsOnWorkerThread()) {
+            requestWorkerShutdown();
+            return;
+        }
         {
-            std::lock_guard<std::mutex> queueLock(queueMutex_);
-            stopping_ = true;
-            stopRequested_->store(true, std::memory_order_relaxed);
-            for (std::size_t index = 0; index < pendingByChannel_.size(); ++index) {
-                subtractOutstanding(outstandingByChannel_[index], pendingByChannel_[index].size());
-                pendingToWipe[index].swap(pendingByChannel_[index]);
+            std::unique_lock<std::mutex> shutdownLock(shutdownMutex_);
+            if (shutdownCompleted_) {
+                return;
             }
-        }
-        for (auto& pending : pendingToWipe) {
-            for (auto& request : pending) {
-                secureErasePostData(request.postData, wipeObserver_);
+            if (shutdownInProgress_) {
+                if (shutdownThread_ == std::this_thread::get_id()) {
+                    return;
+                }
+                shutdownCondition_.wait(shutdownLock, [this] { return shutdownCompleted_; });
+                return;
             }
+            shutdownInProgress_ = true;
+            shutdownThread_ = std::this_thread::get_id();
         }
+        auto pendingToWipe = takePendingForShutdown();
+        wipePendingRequests(pendingToWipe);
         pendingCondition_.notify_all();
         for (auto& worker : workers_) {
             if (worker.joinable()) {
@@ -230,13 +243,57 @@ public:
                 secureEraseBody(response.body, wipeObserver_);
             }
         }
+        {
+            std::lock_guard<std::mutex> shutdownLock(shutdownMutex_);
+            shutdownInProgress_ = false;
+            shutdownCompleted_ = true;
+            shutdownThread_ = {};
+        }
+        shutdownCondition_.notify_all();
     }
 
 private:
+    [[nodiscard]] bool runsOnWorkerThread() const {
+        const std::thread::id currentThread = std::this_thread::get_id();
+        for (const auto& worker : workers_) {
+            if (worker.get_id() == currentThread) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    std::array<std::deque<HttpRequest>, 2> takePendingForShutdown() {
+        std::array<std::deque<HttpRequest>, 2> pendingToWipe;
+        std::lock_guard<std::mutex> queueLock(queueMutex_);
+        stopping_ = true;
+        stopRequested_->store(true, std::memory_order_relaxed);
+        for (std::size_t index = 0; index < pendingByChannel_.size(); ++index) {
+            subtractOutstanding(outstandingByChannel_[index], pendingByChannel_[index].size());
+            pendingToWipe[index].swap(pendingByChannel_[index]);
+        }
+        return pendingToWipe;
+    }
+
+    void wipePendingRequests(std::array<std::deque<HttpRequest>, 2>& pendingToWipe) {
+        for (auto& pending : pendingToWipe) {
+            for (auto& request : pending) {
+                secureErasePostData(request.postData, wipeObserver_);
+            }
+        }
+    }
+
+    void requestWorkerShutdown() {
+        auto pendingToWipe = takePendingForShutdown();
+        wipePendingRequests(pendingToWipe);
+        pendingCondition_.notify_all();
+    }
+
     void run(HttpChannel channel) {
         const std::size_t index = channelIndex(channel);
         for (;;) {
             HttpRequest request;
+            std::string transferredPostData;
             {
                 std::unique_lock<std::mutex> lock(queueMutex_);
                 pendingCondition_.wait(lock, [this, index] {
@@ -249,8 +306,10 @@ private:
                     continue;
                 }
                 transferRequest(request, pendingByChannel_[index].front());
+                transferredPostData.swap(pendingByChannel_[index].front().postData);
                 pendingByChannel_[index].pop_front();
             }
+            secureErasePostData(transferredPostData, wipeObserver_);
 
             HttpResponse response;
             if (!isSupportedUrl(request.url)) {
@@ -280,6 +339,10 @@ private:
     bool stopping_ = false;
     HttpCancellationFlag stopRequested_;
     std::mutex shutdownMutex_;
+    std::condition_variable shutdownCondition_;
+    bool shutdownInProgress_ = false;
+    bool shutdownCompleted_ = false;
+    std::thread::id shutdownThread_{};
     std::array<std::thread, 2> workers_;
 };
 

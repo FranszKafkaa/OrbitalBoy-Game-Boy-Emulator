@@ -47,8 +47,10 @@ class WipeRecorder {
 public:
     void observe(const std::uint8_t* bytes, std::size_t size) {
         std::lock_guard<std::mutex> lock(mutex_);
-        allBytesWereZero_ = allBytesWereZero_ && bytes != nullptr
-            && std::all_of(bytes, bytes + size, [](std::uint8_t byte) { return byte == 0U; });
+        allBytesWereZero_ = allBytesWereZero_ && (size == 0U || (bytes != nullptr
+            && std::all_of(bytes, bytes + size, [](std::uint8_t byte) {
+                return byte == 0U;
+            })));
         sizes_.push_back(size);
         condition_.notify_all();
     }
@@ -64,6 +66,13 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         return condition_.wait_for(lock, std::chrono::seconds(2), [&] {
             return !sizes_.empty();
+        });
+    }
+
+    [[nodiscard]] bool waitForCount(std::size_t count) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return condition_.wait_for(lock, std::chrono::seconds(2), [&] {
+            return sizes_.size() >= count;
         });
     }
 
@@ -307,6 +316,39 @@ TEST_CASE("achievements_http_transport", "wipes_active_post_data_after_executor_
     transport.shutdown();
 }
 
+TEST_CASE("achievements_http_transport", "wipes_post_storage_after_each_accepted_handoff") {
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool entered = false;
+    bool release = false;
+    WipeRecorder wipes;
+    HttpTransport transport(
+        [&](const HttpRequest& request) {
+            std::unique_lock<std::mutex> lock(mutex);
+            entered = true;
+            condition.notify_all();
+            condition.wait(lock, [&] { return release; });
+            return HttpResponse{request.id, request.channel, 200L, {}, {}};
+        },
+        [&](const std::uint8_t* bytes, std::size_t size) { wipes.observe(bytes, size); }
+    );
+
+    T_REQUIRE(transport.submit({1U, HttpChannel::Api, "https://example.invalid/handoff", "handoff-post"}));
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        T_REQUIRE(condition.wait_for(lock, std::chrono::seconds(2), [&] { return entered; }));
+    }
+    T_REQUIRE(wipes.waitForCount(2U));
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        release = true;
+    }
+    condition.notify_all();
+    T_REQUIRE(wipes.waitForCount(3U));
+    T_REQUIRE(wipes.allBytesWereZero());
+    transport.shutdown();
+}
+
 TEST_CASE("achievements_http_transport", "wipes_pending_post_data_during_shutdown") {
     std::mutex mutex;
     std::condition_variable condition;
@@ -441,6 +483,9 @@ TEST_CASE("achievements_http_transport", "wipes_rejected_post_data_at_channel_li
 TEST_CASE("achievements_http_transport", "contains_reentrant_and_throwing_wipe_observers") {
     HttpTransport* transportPointer = nullptr;
     std::atomic<int> calls{0};
+    std::atomic<bool> armed{false};
+    std::atomic<bool> sawTransport{false};
+    std::atomic<bool> reenteredShutdown{false};
     std::promise<void> executed;
     const auto executedFuture = executed.get_future();
     HttpTransport transport(
@@ -449,9 +494,15 @@ TEST_CASE("achievements_http_transport", "contains_reentrant_and_throwing_wipe_o
             return HttpResponse{request.id, request.channel, 200L, {'o', 'k'}, {}};
         },
         [&](const std::uint8_t*, std::size_t) {
+            if (!armed.load()) {
+                return;
+            }
             ++calls;
-            T_REQUIRE(transportPointer != nullptr);
-            (void)transportPointer->acceptingRequests();
+            if (transportPointer != nullptr) {
+                sawTransport.store(true);
+                transportPointer->shutdown();
+                reenteredShutdown.store(true);
+            }
             throw std::runtime_error("observer failure");
         }
     );
@@ -459,9 +510,50 @@ TEST_CASE("achievements_http_transport", "contains_reentrant_and_throwing_wipe_o
 
     T_REQUIRE(transport.submit({1U, HttpChannel::Api, "https://example.invalid/reenter", {}}));
     T_REQUIRE(executedFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    armed.store(true);
     transport.shutdown();
 
     T_REQUIRE(calls.load() >= 1);
+    T_REQUIRE(sawTransport.load());
+    T_REQUIRE(reenteredShutdown.load());
+}
+
+TEST_CASE("achievements_http_transport", "allows_worker_wipe_observer_to_request_shutdown") {
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool entered = false;
+    bool release = false;
+    HttpTransport* transportPointer = nullptr;
+    std::atomic<int> observerCalls{0};
+    std::atomic<bool> shutdownReturned{false};
+    HttpTransport transport(
+        [&](const HttpRequest& request) {
+            std::unique_lock<std::mutex> lock(mutex);
+            entered = true;
+            condition.notify_all();
+            condition.wait(lock, [&] { return release; });
+            return HttpResponse{request.id, request.channel, 200L, {}, {}};
+        },
+        [&](const std::uint8_t*, std::size_t) {
+            if (observerCalls.fetch_add(1) == 1 && transportPointer != nullptr) {
+                transportPointer->shutdown();
+                shutdownReturned.store(true);
+            }
+        }
+    );
+    transportPointer = &transport;
+
+    T_REQUIRE(transport.submit({1U, HttpChannel::Api, "https://example.invalid/worker", "worker-post"}));
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        T_REQUIRE(condition.wait_for(lock, std::chrono::seconds(2), [&] { return entered; }));
+        release = true;
+    }
+    condition.notify_all();
+    transport.shutdown();
+
+    T_REQUIRE(shutdownReturned.load());
+    T_REQUIRE(!transport.acceptingRequests());
 }
 
 } // namespace
