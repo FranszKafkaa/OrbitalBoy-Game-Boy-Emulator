@@ -5,6 +5,7 @@
 #include <memory>
 
 #include "gb/achievements/runtime/achievement_runtime.hpp"
+#include "gb/app/frontend/realtime/retroachievements_http.hpp"
 
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
 namespace gb {
@@ -16,7 +17,6 @@ struct AchievementConfig;
 }
 
 namespace gb::frontend {
-class RaHttpTransport;
 using RaMemoryReader = std::function<std::uint32_t(
     std::uint32_t,
     std::uint8_t*,

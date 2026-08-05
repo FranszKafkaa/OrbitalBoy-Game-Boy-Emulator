@@ -77,6 +77,7 @@ set(GBEMU_APP_SOURCES
 set(GBEMU_REALTIME_SUPPORT_SOURCES
     src/achievements/runtime/achievement_runtime.cpp
     src/achievements/security/secret_string.cpp
+    src/achievements/protocol/http_transport.cpp
     src/achievements/config/achievement_config.cpp
     src/achievements/storage/private_file_io.cpp
     src/app/frontend/realtime_options.cpp
@@ -201,6 +202,7 @@ if (GBEMU_ENABLE_RETROACHIEVEMENTS)
     target_sources(gbfrontend_support PRIVATE
         src/achievements/adapters/rcheevos/achievement_runtime_factory.cpp
         src/achievements/adapters/rcheevos/rcheevos_achievement_runtime.cpp
+        src/achievements/adapters/curl/curl_http_executor.cpp
         src/app/frontend/realtime/retroachievements_http.cpp
         src/app/frontend/realtime/retroachievements_image_cache.cpp
         src/app/frontend/realtime/retroachievements_lifecycle.cpp
@@ -329,6 +331,20 @@ if (BUILD_TESTING)
         target_compile_options(gbachievements_security_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME gbachievements_security_tests COMMAND gbachievements_security_tests)
+
+    add_executable(gbachievements_http_transport_tests
+        tests/test_main.cpp
+        tests/achievements/protocol/http_transport_tests.cpp
+        src/achievements/protocol/http_transport.cpp
+        src/achievements/security/secret_string.cpp
+    )
+    target_include_directories(gbachievements_http_transport_tests PRIVATE include)
+    if (MSVC)
+        target_compile_options(gbachievements_http_transport_tests PRIVATE /W4 /EHsc)
+    else()
+        target_compile_options(gbachievements_http_transport_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME gbachievements_http_transport_tests COMMAND gbachievements_http_transport_tests)
 
     add_executable(gbachievement_models_tests
         tests/test_main.cpp
