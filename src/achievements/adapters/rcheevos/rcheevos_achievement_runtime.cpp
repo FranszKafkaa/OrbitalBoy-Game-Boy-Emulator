@@ -40,14 +40,14 @@ RcheevosAchievementRuntime::RcheevosAchievementRuntime(
 
 void RcheevosAchievementRuntime::enqueueLogin(
     std::string username,
-    RaSecretString password
+    SecretString password
 ) {
     session_.enqueueLogin(std::move(username), std::move(password));
 }
 
 void RcheevosAchievementRuntime::enqueueTokenLogin(
     std::string username,
-    RaSecretString token
+    SecretString token
 ) {
     session_.enqueueTokenLogin(std::move(username), std::move(token));
 }

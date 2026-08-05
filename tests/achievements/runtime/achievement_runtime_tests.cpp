@@ -24,10 +24,10 @@ gb::frontend::RaHttpTransport makeTransport() {
 
 class RecordingAchievementRuntime final : public gb::achievements::AchievementRuntime {
 public:
-    void enqueueLogin(std::string, gb::achievements::RaSecretString) override {
+    void enqueueLogin(std::string, gb::achievements::SecretString) override {
         ++loginCount;
     }
-    void enqueueTokenLogin(std::string, gb::achievements::RaSecretString) override {
+    void enqueueTokenLogin(std::string, gb::achievements::SecretString) override {
         ++tokenLoginCount;
     }
     void enqueueLogout() override {
@@ -86,11 +86,11 @@ TEST_CASE("achievements_runtime", "public_runtime_contract_supports_polymorphic_
     auto concrete = std::make_unique<RecordingAchievementRuntime>();
     RecordingAchievementRuntime* observed = concrete.get();
     std::unique_ptr<gb::achievements::AchievementRuntime> runtime = std::move(concrete);
-    gb::achievements::RaSecretString secret;
+    gb::achievements::SecretString secret;
     secret.assign("secret");
 
     runtime->enqueueLogin("user", std::move(secret));
-    runtime->enqueueTokenLogin("user", gb::achievements::RaSecretString{});
+    runtime->enqueueTokenLogin("user", gb::achievements::SecretString{});
     runtime->enqueueLogout();
     runtime->enqueueLoadGame(5U, "game.gba");
     runtime->processPending();

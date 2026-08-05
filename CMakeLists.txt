@@ -76,6 +76,7 @@ set(GBEMU_APP_SOURCES
 
 set(GBEMU_REALTIME_SUPPORT_SOURCES
     src/achievements/runtime/achievement_runtime.cpp
+    src/achievements/security/secret_string.cpp
     src/app/frontend/realtime_options.cpp
     src/app/frontend/realtime/debug_session.cpp
     src/app/frontend/realtime/emulation_worker.cpp
@@ -92,7 +93,6 @@ set(GBEMU_REALTIME_SUPPORT_SOURCES
     src/app/frontend/realtime/link_transport.cpp
     src/app/frontend/realtime/network_config.cpp
     src/app/frontend/realtime/private_file_io.cpp
-    src/app/frontend/realtime/secure_string.cpp
     src/app/frontend/realtime/retroachievements_config.cpp
     src/app/frontend/realtime/retroachievements_memory.cpp
     src/app/frontend/realtime/top_menu.cpp
@@ -124,6 +124,8 @@ set(GBEMU_TEST_SOURCES
     tests/peripheral_tests.cpp
     tests/state_and_options_tests.cpp
     tests/frontend_feature_tests.cpp
+    tests/achievements/security/secret_string_compatibility_tests.cpp
+    tests/achievements/security/secret_string_tests.cpp
     tests/achievements/runtime/achievement_runtime_tests.cpp
     tests/achievements/runtime/achievement_models_tests.cpp
 )

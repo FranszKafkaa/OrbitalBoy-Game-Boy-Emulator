@@ -6,18 +6,16 @@
 #include <vector>
 
 #include "gb/achievements/runtime/models.hpp"
-#include "gb/app/frontend/realtime/secure_string.hpp"
+#include "gb/achievements/security/secret_string.hpp"
 
 namespace gb::achievements {
-
-using RaSecretString = gb::frontend::RaSecretString;
 
 class AchievementRuntime {
 public:
     virtual ~AchievementRuntime();
 
-    virtual void enqueueLogin(std::string username, RaSecretString password) = 0;
-    virtual void enqueueTokenLogin(std::string username, RaSecretString token) = 0;
+    virtual void enqueueLogin(std::string username, SecretString password) = 0;
+    virtual void enqueueTokenLogin(std::string username, SecretString token) = 0;
     virtual void enqueueLogout() = 0;
     virtual void enqueueLoadGame(std::uint32_t consoleId, std::string romPath) = 0;
 

@@ -23,8 +23,8 @@ public:
         gb::frontend::RaClientApi* clientApi = nullptr
     );
 
-    void enqueueLogin(std::string username, RaSecretString password) override;
-    void enqueueTokenLogin(std::string username, RaSecretString token) override;
+    void enqueueLogin(std::string username, SecretString password) override;
+    void enqueueTokenLogin(std::string username, SecretString token) override;
     void enqueueLogout() override;
     void enqueueLoadGame(std::uint32_t consoleId, std::string romPath) override;
     void processPending() override;
