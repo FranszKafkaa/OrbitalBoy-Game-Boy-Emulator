@@ -75,6 +75,7 @@ set(GBEMU_APP_SOURCES
 )
 
 set(GBEMU_REALTIME_SUPPORT_SOURCES
+    src/achievements/runtime/achievement_runtime.cpp
     src/app/frontend/realtime_options.cpp
     src/app/frontend/realtime/debug_session.cpp
     src/app/frontend/realtime/emulation_worker.cpp
@@ -123,6 +124,7 @@ set(GBEMU_TEST_SOURCES
     tests/peripheral_tests.cpp
     tests/state_and_options_tests.cpp
     tests/frontend_feature_tests.cpp
+    tests/achievements/runtime/achievement_runtime_tests.cpp
 )
 
 if (WIN32 AND GBEMU_USE_SDL2)
@@ -183,6 +185,8 @@ if (GBEMU_ENABLE_RETROACHIEVEMENTS)
     find_package(CURL REQUIRED)
     add_subdirectory(third_party/rcheevos EXCLUDE_FROM_ALL)
     target_sources(gbfrontend_support PRIVATE
+        src/achievements/adapters/rcheevos/achievement_runtime_factory.cpp
+        src/achievements/adapters/rcheevos/rcheevos_achievement_runtime.cpp
         src/app/frontend/realtime/retroachievements_http.cpp
         src/app/frontend/realtime/retroachievements_image_cache.cpp
         src/app/frontend/realtime/retroachievements_lifecycle.cpp

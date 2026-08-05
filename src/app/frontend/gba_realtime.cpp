@@ -5,13 +5,13 @@
 #include "gb/app/frontend/realtime/save_slots.hpp"
 #include "gb/app/frontend/realtime/top_menu.hpp"
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+#include "gb/achievements/runtime/achievement_runtime_factory.hpp"
 #include "gb/app/frontend/realtime/retroachievements_config.hpp"
 #include "gb/app/frontend/realtime/retroachievements_http.hpp"
 #include "gb/app/frontend/realtime/retroachievements_image_cache.hpp"
 #include "gb/app/frontend/realtime/retroachievements_lifecycle.hpp"
 #include "gb/app/frontend/realtime/retroachievements_memory.hpp"
 #include "gb/app/frontend/realtime/retroachievements_progress.hpp"
-#include "gb/app/frontend/realtime/retroachievements_session.hpp"
 #include "gb/app/frontend/realtime/retroachievements_ui.hpp"
 #include "gb/app/runtime_paths.hpp"
 #endif
@@ -1232,7 +1232,7 @@ int runGbaRealtimeCommon(
         raHttpTransport,
         gb::retroAchievementsCacheDirectory()
     );
-    std::unique_ptr<RetroAchievementsSession> raSession{};
+    std::unique_ptr<gb::achievements::AchievementRuntime> raSession{};
     RaSessionSnapshot raSnapshot{};
     raSnapshot.connectionState = RaConnectionState::LoggedOut;
     RaLoginModalState raLoginModal{};
@@ -1275,7 +1275,7 @@ int runGbaRealtimeCommon(
             numBytes
         );
     };
-    raSession = std::make_unique<RetroAchievementsSession>(
+    raSession = gb::achievements::makeDefaultAchievementRuntime(
         std::move(raMemoryReader),
         5U,
         raHttpTransport,

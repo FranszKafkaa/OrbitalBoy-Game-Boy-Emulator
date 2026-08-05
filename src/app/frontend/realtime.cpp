@@ -30,12 +30,12 @@
 #include "gb/app/frontend/realtime/netplay_session.hpp"
 #include "gb/app/frontend/realtime/realtime_session.hpp"
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+#include "gb/achievements/runtime/achievement_runtime_factory.hpp"
 #include "gb/app/frontend/realtime/retroachievements_config.hpp"
 #include "gb/app/frontend/realtime/retroachievements_http.hpp"
 #include "gb/app/frontend/realtime/retroachievements_image_cache.hpp"
 #include "gb/app/frontend/realtime/retroachievements_lifecycle.hpp"
 #include "gb/app/frontend/realtime/retroachievements_progress.hpp"
-#include "gb/app/frontend/realtime/retroachievements_session.hpp"
 #include "gb/app/frontend/realtime/retroachievements_ui.hpp"
 #include "gb/app/runtime_paths.hpp"
 #endif
@@ -292,7 +292,7 @@ int RealtimeSession::run() {
         raHttpTransport,
         gb::retroAchievementsCacheDirectory()
     );
-    RetroAchievementsSession* raOwnerSession = nullptr;
+    gb::achievements::AchievementRuntime* raOwnerSession = nullptr;
     FrameTimeline timeline(
         gb,
         [&]() {
@@ -1232,7 +1232,7 @@ int RealtimeSession::run() {
         std::cout << "[MT][EMU] worker iniciado\n";
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
         RaConfig raConfig{};
-        std::unique_ptr<RetroAchievementsSession> raSession{};
+        std::unique_ptr<gb::achievements::AchievementRuntime> raSession{};
         RaRealtimeLifecycleCoordinator raLifecycle{};
         RaLifecycleActions raActions{};
         bool captureRaTimelineThisFrame = false;
@@ -1302,7 +1302,7 @@ int RealtimeSession::run() {
                 raConfig.autoLogin,
                 raConfig.showNotifications,
             };
-            raSession = std::make_unique<RetroAchievementsSession>(
+            raSession = gb::achievements::makeDefaultAchievementRuntime(
                 gb,
                 raHttpTransport,
                 std::move(sessionConfig),
