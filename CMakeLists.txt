@@ -77,6 +77,8 @@ set(GBEMU_APP_SOURCES
 set(GBEMU_REALTIME_SUPPORT_SOURCES
     src/achievements/runtime/achievement_runtime.cpp
     src/achievements/security/secret_string.cpp
+    src/achievements/config/achievement_config.cpp
+    src/achievements/storage/private_file_io.cpp
     src/app/frontend/realtime_options.cpp
     src/app/frontend/realtime/debug_session.cpp
     src/app/frontend/realtime/emulation_worker.cpp
@@ -92,8 +94,6 @@ set(GBEMU_REALTIME_SUPPORT_SOURCES
     src/app/frontend/realtime/control_bindings.cpp
     src/app/frontend/realtime/link_transport.cpp
     src/app/frontend/realtime/network_config.cpp
-    src/app/frontend/realtime/private_file_io.cpp
-    src/app/frontend/realtime/retroachievements_config.cpp
     src/app/frontend/realtime/retroachievements_memory.cpp
     src/app/frontend/realtime/top_menu.cpp
     src/app/frontend/realtime/ui_message_queue.cpp
@@ -124,6 +124,7 @@ set(GBEMU_TEST_SOURCES
     tests/peripheral_tests.cpp
     tests/state_and_options_tests.cpp
     tests/frontend_feature_tests.cpp
+    tests/achievements/config/achievement_config_compatibility_tests.cpp
     tests/achievements/security/secret_string_compatibility_tests.cpp
     tests/achievements/runtime/achievement_runtime_tests.cpp
     tests/achievements/runtime/achievement_models_tests.cpp
@@ -270,6 +271,25 @@ if (GBEMU_BUILD_MCP)
 endif()
 
 if (BUILD_TESTING)
+    add_executable(gbachievements_config_storage_tests
+        tests/test_main.cpp
+        tests/achievements/config/achievement_config_tests.cpp
+        tests/achievements/storage/private_file_io_tests.cpp
+        src/achievements/config/achievement_config.cpp
+        src/achievements/storage/private_file_io.cpp
+        src/achievements/security/secret_string.cpp
+    )
+    target_include_directories(gbachievements_config_storage_tests PRIVATE include)
+    if (MSVC)
+        target_compile_options(gbachievements_config_storage_tests PRIVATE /W4 /EHsc)
+    else()
+        target_compile_options(gbachievements_config_storage_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(
+        NAME gbachievements_config_storage_tests
+        COMMAND gbachievements_config_storage_tests
+    )
+
     add_executable(gbachievements_security_tests
         tests/test_main.cpp
         tests/achievements/security/secret_string_tests.cpp

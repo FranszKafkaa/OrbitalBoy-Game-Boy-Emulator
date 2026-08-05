@@ -11,9 +11,12 @@ namespace gb {
 class GameBoy;
 }
 
+namespace gb::achievements {
+struct AchievementConfig;
+}
+
 namespace gb::frontend {
 class RaHttpTransport;
-struct RaConfig;
 using RaMemoryReader = std::function<std::uint32_t(
     std::uint32_t,
     std::uint8_t*,
@@ -23,7 +26,7 @@ using RaMemoryReader = std::function<std::uint32_t(
 
 namespace gb::achievements {
 
-using RaConfigPersistence = std::function<bool(const gb::frontend::RaConfig&)>;
+using RaConfigPersistence = std::function<bool(const AchievementConfig&)>;
 
 [[nodiscard]] std::unique_ptr<AchievementRuntime> makeDefaultAchievementRuntime(
     gb::GameBoy& gameBoy,
@@ -32,7 +35,7 @@ using RaConfigPersistence = std::function<bool(const gb::frontend::RaConfig&)>;
 [[nodiscard]] std::unique_ptr<AchievementRuntime> makeDefaultAchievementRuntime(
     gb::GameBoy& gameBoy,
     gb::frontend::RaHttpTransport& transport,
-    gb::frontend::RaConfig config,
+    AchievementConfig config,
     RaConfigPersistence persistConfig
 );
 [[nodiscard]] std::unique_ptr<AchievementRuntime> makeDefaultAchievementRuntime(
@@ -44,7 +47,7 @@ using RaConfigPersistence = std::function<bool(const gb::frontend::RaConfig&)>;
     gb::frontend::RaMemoryReader memoryReader,
     std::uint32_t defaultConsoleId,
     gb::frontend::RaHttpTransport& transport,
-    gb::frontend::RaConfig config,
+    AchievementConfig config,
     RaConfigPersistence persistConfig
 );
 
