@@ -349,6 +349,21 @@ if (BUILD_TESTING)
     endif()
     add_test(NAME gbachievements_http_transport_tests COMMAND gbachievements_http_transport_tests)
 
+    # Deliberately isolated from application and transport dependencies.
+    add_executable(gbachievements_json_parser_tests
+        tests/test_main.cpp
+        tests/achievements/protocol/json_parser_tests.cpp
+        src/achievements/protocol/json_value.cpp
+        src/achievements/protocol/json_parser.cpp
+    )
+    target_include_directories(gbachievements_json_parser_tests PRIVATE include)
+    if (MSVC)
+        target_compile_options(gbachievements_json_parser_tests PRIVATE /W4 /EHsc)
+    else()
+        target_compile_options(gbachievements_json_parser_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME gbachievements_json_parser_tests COMMAND gbachievements_json_parser_tests)
+
     add_executable(gbachievement_models_tests
         tests/test_main.cpp
         tests/achievements/runtime/achievement_models_tests.cpp
