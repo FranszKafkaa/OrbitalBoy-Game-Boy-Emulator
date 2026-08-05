@@ -56,6 +56,8 @@ using gb::achievements::protocol::JsonParser;
 using gb::achievements::protocol::JsonValue;
 using gb::achievements::protocol::JsonValueType;
 using gb::achievements::protocol::kJsonDefaultMaximumDecodedStringBytes;
+using gb::achievements::protocol::kJsonDefaultMaximumInputBytes;
+using gb::achievements::protocol::kJsonDefaultMaximumNestingDepth;
 using gb::achievements::protocol::kJsonDefaultMaximumTotalValues;
 
 JsonValue parseValue(const std::string& input) {
@@ -241,6 +243,27 @@ TEST_CASE("achievements_json_parser", "rejects_zero_options_and_provides_checked
     T_REQUIRE(value.string() == nullptr);
     T_REQUIRE(value.array() == nullptr);
     T_REQUIRE(value.object() == nullptr);
+}
+
+TEST_CASE("achievements_json_parser", "rejects_options_above_fixed_security_ceilings_before_parsing") {
+    for (JsonParseOptions options : {
+             JsonParseOptions{kJsonDefaultMaximumInputBytes + 1U, 64U, 100000U, 1024U},
+             JsonParseOptions{4U, kJsonDefaultMaximumNestingDepth + 1U, 100000U, 1024U},
+             JsonParseOptions{4U, 64U, kJsonDefaultMaximumTotalValues + 1U, 1024U},
+             JsonParseOptions{4U, 64U, 100000U, kJsonDefaultMaximumDecodedStringBytes + 1U},
+         }) {
+        const auto invalid = JsonParser::parse("null", options);
+        T_REQUIRE(!invalid.ok());
+        T_REQUIRE(invalid.error().category == JsonErrorCategory::InvalidOptions);
+        T_EQ(invalid.error().byteOffset, 0U);
+    }
+
+    const std::string deeplyNested = std::string(65U, '[') + "0" + std::string(65U, ']');
+    const JsonParseOptions unsafeDepth{4U * 1024U * 1024U, 65U, 100000U, 1024U * 1024U};
+    const auto invalidDepth = JsonParser::parse(deeplyNested, unsafeDepth);
+    T_REQUIRE(!invalidDepth.ok());
+    T_REQUIRE(invalidDepth.error().category == JsonErrorCategory::InvalidOptions);
+    T_EQ(invalidDepth.error().byteOffset, 0U);
 }
 
 TEST_CASE("achievements_json_parser", "returns_a_resource_error_without_a_partial_value_when_allocation_fails") {

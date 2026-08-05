@@ -421,8 +421,14 @@ private:
 };
 
 bool optionsAreValid(const JsonParseOptions& options) noexcept {
-    return options.maximumInputBytes != 0U && options.maximumNestingDepth != 0U
-        && options.maximumTotalValues != 0U && options.maximumDecodedStringBytes != 0U;
+    return options.maximumInputBytes != 0U
+        && options.maximumInputBytes <= kJsonDefaultMaximumInputBytes
+        && options.maximumNestingDepth != 0U
+        && options.maximumNestingDepth <= kJsonDefaultMaximumNestingDepth
+        && options.maximumTotalValues != 0U
+        && options.maximumTotalValues <= kJsonDefaultMaximumTotalValues
+        && options.maximumDecodedStringBytes != 0U
+        && options.maximumDecodedStringBytes <= kJsonDefaultMaximumDecodedStringBytes;
 }
 
 } // namespace
