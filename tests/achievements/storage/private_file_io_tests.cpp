@@ -1,55 +1,30 @@
-#include <chrono>
+#include <cerrno>
 #include <filesystem>
-#include <fstream>
 #include <string>
 #include <vector>
 
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 #include "gb/achievements/storage/private_file_io.hpp"
 
+#include "../achievement_test_utils.hpp"
 #include "../../test_framework.hpp"
 
 namespace {
-
-std::filesystem::path temporaryDirectory(const std::string& name) {
-    static std::uint64_t counter = 0;
-    const auto now = std::chrono::high_resolution_clock::now()
-        .time_since_epoch().count();
-    return std::filesystem::temp_directory_path()
-        / (name + "_" + std::to_string(now) + "_"
-           + std::to_string(++counter));
-}
-
-class ScopedPath {
-public:
-    explicit ScopedPath(std::filesystem::path path)
-        : path_(std::move(path)) {}
-
-    ~ScopedPath() {
-        std::error_code error;
-        std::filesystem::remove_all(path_, error);
-    }
-
-private:
-    std::filesystem::path path_;
-};
-
-std::string readText(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary);
-    return std::string(
-        std::istreambuf_iterator<char>(input),
-        std::istreambuf_iterator<char>()
-    );
-}
-
-void writeText(const std::filesystem::path& path, std::string_view contents) {
-    std::ofstream output(path, std::ios::binary);
-    output << contents;
-}
+using achievement_tests::ScopedPath;
+using achievement_tests::readBytes;
+using achievement_tests::readText;
+using achievement_tests::temporaryPath;
+using achievement_tests::writeBytes;
+using achievement_tests::writeText;
 
 } // namespace
 
 TEST_CASE("achievement_storage", "canonical_atomic_write_preserves_sibling_temporary_file") {
-    const auto directory = temporaryDirectory("achievement_storage_atomic");
+    const auto directory = temporaryPath("achievement_storage_atomic");
     ScopedPath cleanup(directory);
     T_REQUIRE(std::filesystem::create_directories(directory));
     const auto destination = directory / "config";
@@ -65,7 +40,7 @@ TEST_CASE("achievement_storage", "canonical_atomic_write_preserves_sibling_tempo
 }
 
 TEST_CASE("achievement_storage", "canonical_atomic_write_cleans_failed_temporary_file") {
-    const auto directory = temporaryDirectory("achievement_storage_cleanup");
+    const auto directory = temporaryPath("achievement_storage_cleanup");
     ScopedPath cleanup(directory);
     T_REQUIRE(std::filesystem::create_directories(directory));
     const auto destination = directory / "config";
@@ -92,7 +67,7 @@ TEST_CASE("achievement_storage", "canonical_atomic_write_cleans_failed_temporary
 }
 
 TEST_CASE("achievement_storage", "canonical_durable_rename_and_remove_change_real_entries") {
-    const auto directory = temporaryDirectory("achievement_storage_entries");
+    const auto directory = temporaryPath("achievement_storage_entries");
     ScopedPath cleanup(directory);
     T_REQUIRE(std::filesystem::create_directories(directory));
     const auto source = directory / "source";
@@ -116,3 +91,136 @@ TEST_CASE("achievement_storage", "canonical_durable_rename_and_remove_change_rea
     T_REQUIRE(changed);
     T_REQUIRE(!std::filesystem::exists(destination));
 }
+
+TEST_CASE("achievement_storage", "canonical_atomic_write_reports_directory_sync_failure_after_replacement") {
+    const auto directory = temporaryPath("achievement_storage_sync_failure");
+    ScopedPath cleanup(directory);
+    T_REQUIRE(std::filesystem::create_directories(directory));
+    const auto destination = directory / "config";
+    std::vector<gb::achievements::storage::PrivateFileIoEvent> events;
+    gb::achievements::storage::PrivateFileIoHooks hooks{};
+    hooks.trace = [&](const auto event, const auto&) { events.push_back(event); };
+    hooks.syncDirectory = [](const auto&) { return false; };
+
+    T_REQUIRE(!gb::achievements::storage::writePrivateFileAtomically(
+        destination,
+        std::string_view("written-but-not-durable"),
+        &hooks
+    ));
+    T_EQ(readText(destination), std::string("written-but-not-durable"));
+    T_REQUIRE(events.size() >= 3U);
+    T_REQUIRE(events[events.size() - 2U]
+        == gb::achievements::storage::PrivateFileIoEvent::Replaced);
+    T_REQUIRE(events.back()
+        == gb::achievements::storage::PrivateFileIoEvent::DirectorySyncFailed);
+}
+
+TEST_CASE("achievement_storage", "canonical_durable_rename_never_overwrites_existing_entry") {
+    const auto directory = temporaryPath("achievement_storage_rename_exclusive");
+    ScopedPath cleanup(directory);
+    T_REQUIRE(std::filesystem::create_directories(directory));
+    const auto source = directory / "source";
+    const auto destination = directory / "destination";
+    writeBytes(source, {1});
+    writeBytes(destination, {2});
+    bool changed = true;
+
+    T_REQUIRE(!gb::achievements::storage::renameFileDurably(
+        source,
+        destination,
+        &changed
+    ));
+    T_REQUIRE(!changed);
+    T_REQUIRE(readBytes(source) == std::vector<std::uint8_t>({1}));
+    T_REQUIRE(readBytes(destination) == std::vector<std::uint8_t>({2}));
+}
+
+#if !defined(_WIN32)
+TEST_CASE("achievement_storage", "canonical_atomic_failure_cleans_temporary_syncs_directory_and_preserves_errno") {
+    const auto directory = temporaryPath("achievement_storage_errno");
+    ScopedPath cleanup(directory);
+    T_REQUIRE(std::filesystem::create_directories(directory));
+    const auto destination = directory / "config";
+    const auto temporary = directory / "chosen-temporary";
+    std::vector<gb::achievements::storage::PrivateFileIoEvent> events;
+    gb::achievements::storage::PrivateFileIoHooks hooks{};
+    hooks.chooseTemporaryPath = [&](const auto&, int) { return temporary; };
+    hooks.allowReplace = [](const auto&, const auto&) {
+        errno = EIO;
+        return false;
+    };
+    hooks.trace = [&](const auto event, const auto&) { events.push_back(event); };
+    hooks.syncDirectory = [](const auto&) { return true; };
+
+    errno = 0;
+    T_REQUIRE(!gb::achievements::storage::writePrivateFileAtomically(
+        destination,
+        std::string_view("secret"),
+        &hooks
+    ));
+    T_EQ(errno, EIO);
+    T_REQUIRE(!std::filesystem::exists(destination));
+    T_REQUIRE(!std::filesystem::exists(temporary));
+    T_REQUIRE(events == std::vector<gb::achievements::storage::PrivateFileIoEvent>({
+        gb::achievements::storage::PrivateFileIoEvent::TemporaryCreated,
+        gb::achievements::storage::PrivateFileIoEvent::TemporarySynced,
+        gb::achievements::storage::PrivateFileIoEvent::TemporaryRemoved,
+        gb::achievements::storage::PrivateFileIoEvent::DirectorySynced,
+    }));
+}
+
+TEST_CASE("achievement_storage", "canonical_private_file_operations_do_not_follow_symlinks") {
+    const auto directory = temporaryPath("achievement_storage_symlink");
+    ScopedPath cleanup(directory);
+    T_REQUIRE(std::filesystem::create_directories(directory));
+    const auto outside = directory / "outside";
+    const auto collision = directory / "temporary-collision";
+    const auto destination = directory / "config";
+    writeText(outside, "keep");
+    T_REQUIRE(::chmod(
+        outside.c_str(),
+        S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH
+    ) == 0);
+    std::filesystem::create_symlink(outside, collision);
+
+    gb::achievements::storage::PrivateFileIoHooks hooks{};
+    hooks.chooseTemporaryPath = [&](const auto&, int attempt) {
+        return attempt == 0 ? collision : directory / "temporary-success";
+    };
+    hooks.syncDirectory = [](const auto&) { return true; };
+    T_REQUIRE(gb::achievements::storage::writePrivateFileAtomically(
+        destination,
+        std::string_view("safe"),
+        &hooks
+    ));
+    T_REQUIRE(std::filesystem::is_symlink(collision));
+    T_EQ(readText(outside), std::string("keep"));
+
+    const auto privateLink = directory / "private-link";
+    std::filesystem::create_symlink(outside, privateLink);
+    T_REQUIRE(!gb::achievements::storage::makeFileOwnerPrivate(privateLink));
+    struct stat status {};
+    T_REQUIRE(::stat(outside.c_str(), &status) == 0);
+    T_EQ(
+        status.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO),
+        static_cast<mode_t>(S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)
+    );
+}
+
+TEST_CASE("achievement_storage", "canonical_private_file_permissions_are_owner_only") {
+    const auto directory = temporaryPath("achievement_storage_permissions");
+    ScopedPath cleanup(directory);
+    T_REQUIRE(std::filesystem::create_directories(directory));
+    const auto path = directory / "config";
+    writeText(path, "secret");
+    T_REQUIRE(::chmod(path.c_str(), S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH) == 0);
+
+    T_REQUIRE(gb::achievements::storage::makeFileOwnerPrivate(path));
+    struct stat status {};
+    T_REQUIRE(::stat(path.c_str(), &status) == 0);
+    T_EQ(
+        status.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO),
+        static_cast<mode_t>(S_IRUSR | S_IWUSR)
+    );
+}
+#endif
