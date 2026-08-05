@@ -378,6 +378,20 @@ if (BUILD_TESTING)
     endif()
     add_test(NAME gbachievements_condition_parser_tests COMMAND gbachievements_condition_parser_tests)
 
+    # Deliberately isolated from live achievement runtime and rcheevos dependencies.
+    add_executable(gbachievements_condition_evaluator_tests
+        tests/test_main.cpp
+        tests/achievements/runtime/condition_evaluator_tests.cpp
+        src/achievements/runtime/condition_evaluator.cpp
+    )
+    target_include_directories(gbachievements_condition_evaluator_tests PRIVATE include)
+    if (MSVC)
+        target_compile_options(gbachievements_condition_evaluator_tests PRIVATE /W4 /EHsc)
+    else()
+        target_compile_options(gbachievements_condition_evaluator_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME gbachievements_condition_evaluator_tests COMMAND gbachievements_condition_evaluator_tests)
+
     add_executable(gbachievement_models_tests
         tests/test_main.cpp
         tests/achievements/runtime/achievement_models_tests.cpp
