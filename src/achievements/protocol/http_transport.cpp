@@ -2,10 +2,6 @@
 
 #include "gb/achievements/security/secret_string.hpp"
 
-#if defined(GBEMU_ENABLE_RETROACHIEVEMENTS)
-#include "gb/achievements/adapters/curl/curl_http_executor.hpp"
-#endif
-
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -54,7 +50,10 @@ void secureEraseBody(std::vector<std::uint8_t>& body, const HttpWipeObserver& ob
         bytes[index] = 0U;
     }
     if (observer && !body.empty()) {
-        observer(body.data(), body.size());
+        try {
+            observer(body.data(), body.size());
+        } catch (...) {
+        }
     }
     std::vector<std::uint8_t>{}.swap(body);
 }
@@ -62,7 +61,10 @@ void secureEraseBody(std::vector<std::uint8_t>& body, const HttpWipeObserver& ob
 void secureErasePostData(std::string& postData, const HttpWipeObserver& observer) {
     (void)secureEraseStringStorage(postData, [&observer](const char* bytes, std::size_t size) {
         if (observer) {
-            observer(reinterpret_cast<const std::uint8_t*>(bytes), size);
+            try {
+                observer(reinterpret_cast<const std::uint8_t*>(bytes), size);
+            } catch (...) {
+            }
         }
     });
 }
@@ -87,19 +89,31 @@ HttpResponse normalizeResponse(const HttpRequest& request, HttpResponse response
     return response;
 }
 
-HttpExecutor makeDefaultHttpExecutor(std::atomic<bool>& stopRequested) {
-#if defined(GBEMU_ENABLE_RETROACHIEVEMENTS)
-    return adapters::curl::makeCurlHttpExecutor(stopRequested);
-#else
-    (void)stopRequested;
+HttpExecutor makeUnavailableHttpExecutor() {
     return [](const HttpRequest& request) {
         return makeErrorResponse(request, requestFailedError);
     };
-#endif
 }
 
 void subtractOutstanding(std::size_t& outstanding, std::size_t count) {
     outstanding = count > outstanding ? 0U : outstanding - count;
+}
+
+void transferRequest(HttpRequest& destination, HttpRequest& source) noexcept {
+    using std::swap;
+    swap(destination.id, source.id);
+    swap(destination.channel, source.channel);
+    destination.url.swap(source.url);
+    destination.postData.swap(source.postData);
+}
+
+void transferResponse(HttpResponse& destination, HttpResponse& source) noexcept {
+    using std::swap;
+    swap(destination.id, source.id);
+    swap(destination.channel, source.channel);
+    swap(destination.statusCode, source.statusCode);
+    destination.body.swap(source.body);
+    destination.error.swap(source.error);
 }
 
 } // namespace
@@ -114,11 +128,20 @@ HttpRequestPolicy makeHttpRequestPolicy(const HttpRequest& request) {
     return {HttpMethod::Post, 0L, 3L, HttpRedirectProtocols::HttpAndHttps};
 }
 
+HttpCancellationFlag makeHttpCancellationFlag() {
+    return std::make_shared<std::atomic<bool>>(false);
+}
+
 class HttpTransport::Impl {
 public:
-    Impl(HttpExecutor executor, HttpWipeObserver wipeObserver)
-        : executor_(executor ? std::move(executor) : makeDefaultHttpExecutor(stopRequested_)),
-          wipeObserver_(std::move(wipeObserver)) {
+    Impl(
+        HttpExecutor executor,
+        HttpCancellationFlag cancellationFlag,
+        HttpWipeObserver wipeObserver
+    )
+        : executor_(executor ? std::move(executor) : makeUnavailableHttpExecutor()),
+          wipeObserver_(std::move(wipeObserver)),
+          stopRequested_(cancellationFlag ? std::move(cancellationFlag) : makeHttpCancellationFlag()) {
         workers_[0] = std::thread([this] { run(HttpChannel::Api); });
         workers_[1] = std::thread([this] { run(HttpChannel::Image); });
     }
@@ -127,15 +150,26 @@ public:
         shutdown();
     }
 
-    bool submit(HttpRequest request) {
+    bool submit(HttpRequest& request) {
+        bool rejected = false;
         {
             std::lock_guard<std::mutex> lock(queueMutex_);
             const std::size_t index = channelIndex(request.channel);
             if (stopping_ || outstandingByChannel_[index] >= maximumOutstandingPerChannel) {
-                return false;
+                rejected = true;
+            } else {
+                try {
+                    pendingByChannel_[index].emplace_back();
+                    transferRequest(pendingByChannel_[index].back(), request);
+                    ++outstandingByChannel_[index];
+                } catch (...) {
+                    rejected = true;
+                }
             }
-            pendingByChannel_[index].push_back(std::move(request));
-            ++outstandingByChannel_[index];
+        }
+        if (rejected) {
+            secureErasePostData(request.postData, wipeObserver_);
+            return false;
         }
         pendingCondition_.notify_all();
         return true;
@@ -162,16 +196,19 @@ public:
 
     void shutdown() {
         std::lock_guard<std::mutex> shutdownLock(shutdownMutex_);
+        std::array<std::deque<HttpRequest>, 2> pendingToWipe;
         {
             std::lock_guard<std::mutex> queueLock(queueMutex_);
             stopping_ = true;
-            stopRequested_.store(true, std::memory_order_relaxed);
+            stopRequested_->store(true, std::memory_order_relaxed);
             for (std::size_t index = 0; index < pendingByChannel_.size(); ++index) {
-                for (auto& request : pendingByChannel_[index]) {
-                    secureErasePostData(request.postData, wipeObserver_);
-                }
                 subtractOutstanding(outstandingByChannel_[index], pendingByChannel_[index].size());
-                pendingByChannel_[index].clear();
+                pendingToWipe[index].swap(pendingByChannel_[index]);
+            }
+        }
+        for (auto& pending : pendingToWipe) {
+            for (auto& request : pending) {
+                secureErasePostData(request.postData, wipeObserver_);
             }
         }
         pendingCondition_.notify_all();
@@ -180,13 +217,18 @@ public:
                 worker.join();
             }
         }
-        std::lock_guard<std::mutex> queueLock(queueMutex_);
-        for (std::size_t index = 0; index < completedByChannel_.size(); ++index) {
-            for (auto& response : completedByChannel_[index]) {
+        std::array<std::deque<HttpResponse>, 2> completedToWipe;
+        {
+            std::lock_guard<std::mutex> queueLock(queueMutex_);
+            for (std::size_t index = 0; index < completedByChannel_.size(); ++index) {
+                subtractOutstanding(outstandingByChannel_[index], completedByChannel_[index].size());
+                completedToWipe[index].swap(completedByChannel_[index]);
+            }
+        }
+        for (auto& completed : completedToWipe) {
+            for (auto& response : completed) {
                 secureEraseBody(response.body, wipeObserver_);
             }
-            subtractOutstanding(outstandingByChannel_[index], completedByChannel_[index].size());
-            completedByChannel_[index].clear();
         }
     }
 
@@ -206,7 +248,7 @@ private:
                     }
                     continue;
                 }
-                request = std::move(pendingByChannel_[index].front());
+                transferRequest(request, pendingByChannel_[index].front());
                 pendingByChannel_[index].pop_front();
             }
 
@@ -223,7 +265,8 @@ private:
             secureErasePostData(request.postData, wipeObserver_);
 
             std::lock_guard<std::mutex> lock(queueMutex_);
-            completedByChannel_[channelIndex(response.channel)].push_back(std::move(response));
+            completedByChannel_[channelIndex(response.channel)].emplace_back();
+            transferResponse(completedByChannel_[channelIndex(response.channel)].back(), response);
         }
     }
 
@@ -235,24 +278,39 @@ private:
     std::array<std::deque<HttpResponse>, 2> completedByChannel_;
     std::array<std::size_t, 2> outstandingByChannel_{};
     bool stopping_ = false;
-    std::atomic<bool> stopRequested_{false};
+    HttpCancellationFlag stopRequested_;
     std::mutex shutdownMutex_;
     std::array<std::thread, 2> workers_;
 };
 
 HttpTransport::HttpTransport()
-    : impl_(std::make_unique<Impl>(HttpExecutor{}, HttpWipeObserver{})) {}
+    : impl_(std::make_unique<Impl>(
+        HttpExecutor{}, makeHttpCancellationFlag(), HttpWipeObserver{}
+    )) {}
 
 HttpTransport::HttpTransport(HttpExecutor executor)
-    : impl_(std::make_unique<Impl>(std::move(executor), HttpWipeObserver{})) {}
+    : impl_(std::make_unique<Impl>(
+        std::move(executor), makeHttpCancellationFlag(), HttpWipeObserver{}
+    )) {}
 
 HttpTransport::HttpTransport(HttpExecutor executor, HttpWipeObserver wipeObserver)
-    : impl_(std::make_unique<Impl>(std::move(executor), std::move(wipeObserver))) {}
+    : impl_(std::make_unique<Impl>(
+        std::move(executor), makeHttpCancellationFlag(), std::move(wipeObserver)
+    )) {}
+
+HttpTransport::HttpTransport(
+    HttpExecutor executor,
+    HttpCancellationFlag cancellationFlag,
+    HttpWipeObserver wipeObserver
+)
+    : impl_(std::make_unique<Impl>(
+        std::move(executor), std::move(cancellationFlag), std::move(wipeObserver)
+    )) {}
 
 HttpTransport::~HttpTransport() = default;
 
 bool HttpTransport::submit(HttpRequest request) {
-    return impl_->submit(std::move(request));
+    return impl_->submit(request);
 }
 
 std::vector<HttpResponse> HttpTransport::takeCompleted(HttpChannel channel) {

@@ -219,7 +219,10 @@ if (GBEMU_ENABLE_RETROACHIEVEMENTS)
         GBEMU_ENABLE_RETROACHIEVEMENTS=1
         RC_CLIENT_SUPPORTS_HASH=1
     )
-    list(APPEND GBEMU_TEST_SOURCES tests/retroachievements_tests.cpp)
+    list(APPEND GBEMU_TEST_SOURCES
+        tests/retroachievements_tests.cpp
+        tests/achievements/protocol/legacy_ra_http_forward_declaration_tests.cpp
+    )
 endif()
 
 add_executable(gbemu ${GBEMU_APP_SOURCES})

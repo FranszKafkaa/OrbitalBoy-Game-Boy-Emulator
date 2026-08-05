@@ -35,6 +35,7 @@ struct HttpResponse {
 
 using HttpExecutor = std::function<HttpResponse(const HttpRequest&)>;
 using HttpWipeObserver = std::function<void(const std::uint8_t* bytes, std::size_t size)>;
+using HttpCancellationFlag = std::shared_ptr<std::atomic<bool>>;
 
 enum class HttpMethod {
     Get,
@@ -54,12 +55,18 @@ struct HttpRequestPolicy {
 };
 
 [[nodiscard]] HttpRequestPolicy makeHttpRequestPolicy(const HttpRequest& request);
+[[nodiscard]] HttpCancellationFlag makeHttpCancellationFlag();
 
 class HttpTransport {
 public:
     HttpTransport();
     explicit HttpTransport(HttpExecutor executor);
     HttpTransport(HttpExecutor executor, HttpWipeObserver wipeObserver);
+    HttpTransport(
+        HttpExecutor executor,
+        HttpCancellationFlag cancellationFlag,
+        HttpWipeObserver wipeObserver = {}
+    );
     ~HttpTransport();
 
     HttpTransport(const HttpTransport&) = delete;
@@ -78,3 +85,4 @@ private:
 };
 
 } // namespace gb::achievements::protocol
+#include <atomic>

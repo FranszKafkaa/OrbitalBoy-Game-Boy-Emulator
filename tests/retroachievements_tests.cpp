@@ -5177,7 +5177,7 @@ TEST_CASE("retroachievements", "http_user_agent_identifies_platform_and_rcheevos
     T_EQ(std::string(gb::frontend::retroAchievementsUserAgent()), std::string(expected));
 }
 
-TEST_CASE("retroachievements", "http_legacy_names_are_canonical_transport_aliases") {
+TEST_CASE("retroachievements", "http_legacy_names_keep_canonical_values_and_transport_wrapper") {
     T_REQUIRE((std::is_same_v<
         gb::frontend::RaHttpRequest,
         gb::achievements::protocol::HttpRequest
@@ -5186,7 +5186,7 @@ TEST_CASE("retroachievements", "http_legacy_names_are_canonical_transport_aliase
         gb::frontend::RaHttpResponse,
         gb::achievements::protocol::HttpResponse
     >));
-    T_REQUIRE((std::is_same_v<
+    T_REQUIRE((!std::is_same_v<
         gb::frontend::RaHttpTransport,
         gb::achievements::protocol::HttpTransport
     >));

@@ -13,7 +13,6 @@ using RaHttpExecutor = gb::achievements::protocol::HttpExecutor;
 using RaHttpMethod = gb::achievements::protocol::HttpMethod;
 using RaHttpRedirectProtocols = gb::achievements::protocol::HttpRedirectProtocols;
 using RaHttpRequestPolicy = gb::achievements::protocol::HttpRequestPolicy;
-using RaHttpTransport = gb::achievements::protocol::HttpTransport;
 
 inline constexpr auto kRaHttpRequestTimeout = gb::achievements::protocol::kHttpRequestTimeout;
 
@@ -22,5 +21,26 @@ inline constexpr auto kRaHttpRequestTimeout = gb::achievements::protocol::kHttpR
 }
 
 [[nodiscard]] std::string_view retroAchievementsUserAgent() noexcept;
+
+class RaHttpTransport {
+public:
+    RaHttpTransport();
+    explicit RaHttpTransport(RaHttpExecutor executor);
+    ~RaHttpTransport();
+
+    RaHttpTransport(const RaHttpTransport&) = delete;
+    RaHttpTransport& operator=(const RaHttpTransport&) = delete;
+    RaHttpTransport(RaHttpTransport&&) = delete;
+    RaHttpTransport& operator=(RaHttpTransport&&) = delete;
+
+    [[nodiscard]] bool submit(RaHttpRequest request);
+    [[nodiscard]] std::vector<RaHttpResponse> takeCompleted(RaHttpChannel channel);
+    [[nodiscard]] bool acceptingRequests() const;
+    void shutdown();
+
+private:
+    gb::achievements::protocol::HttpCancellationFlag cancellationFlag_;
+    gb::achievements::protocol::HttpTransport transport_;
+};
 
 } // namespace gb::frontend
