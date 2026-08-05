@@ -255,7 +255,7 @@ TEST_CASE("achievements_condition_evaluator", "reports_checked_arithmetic_memory
 
     ConditionTrigger advanced;
     auto advancedCondition = memoryEquals(0U, 1U);
-    advancedCondition.flag = gb::achievements::parser::ConditionFlag::AddSource;
+    advancedCondition.flag = gb::achievements::parser::ConditionFlag::Measured;
     advanced.core.conditions.push_back(advancedCondition);
     T_REQUIRE(evaluator.evaluate(advanced).status == ConditionEvaluationStatus::Unsupported);
 }
@@ -281,6 +281,42 @@ TEST_CASE("achievements_condition_evaluator", "updates_alternate_state_and_honor
     reset.flag = gb::achievements::parser::ConditionFlag::ResetIf;
     alternateReset.alt.push_back({{reset}, {}});
     T_REQUIRE(evaluator.evaluate(alternateReset).status == ConditionEvaluationStatus::Reset);
+}
+
+TEST_CASE("achievements_condition_evaluator", "combines_sources_and_indirect_addresses") {
+    TestMemory memory{{4U, 2U, 0U, 0U, 7U}};
+    ConditionEvaluator evaluator(memory.reader());
+    ConditionTrigger source;
+    auto addSource = memoryEquals(1U, 0U);
+    addSource.flag = gb::achievements::parser::ConditionFlag::AddSource;
+    addSource.op = Operator::None;
+    addSource.right.reset();
+    source.core.conditions.push_back(addSource);
+    source.core.conditions.push_back(memoryEquals(4U, 9U));
+    T_REQUIRE(evaluator.evaluate(source).status == ConditionEvaluationStatus::Triggered);
+
+    ConditionTrigger indirect;
+    auto addAddress = memoryEquals(0U, 0U);
+    addAddress.flag = gb::achievements::parser::ConditionFlag::AddAddress;
+    addAddress.op = Operator::None;
+    addAddress.right.reset();
+    indirect.core.conditions.push_back(addAddress);
+    indirect.core.conditions.push_back(memoryEquals(0U, 7U));
+    T_REQUIRE(evaluator.evaluate(indirect).status == ConditionEvaluationStatus::Triggered);
+}
+
+TEST_CASE("achievements_condition_evaluator", "rejects_unimplemented_chain_and_hit_combinations") {
+    TestMemory memory{{1U}};
+    for (const auto flag : {gb::achievements::parser::ConditionFlag::AndNext,
+             gb::achievements::parser::ConditionFlag::OrNext,
+             gb::achievements::parser::ConditionFlag::AddHits,
+             gb::achievements::parser::ConditionFlag::SubHits}) {
+        ConditionTrigger trigger;
+        auto condition = memoryEquals(0U, 1U);
+        condition.flag = flag;
+        trigger.core.conditions.push_back(condition);
+        T_REQUIRE(ConditionEvaluator(memory.reader()).evaluate(trigger).status == ConditionEvaluationStatus::Unsupported);
+    }
 }
 
 } // namespace

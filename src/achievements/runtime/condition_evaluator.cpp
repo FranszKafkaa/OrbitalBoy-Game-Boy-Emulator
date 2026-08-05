@@ -20,9 +20,8 @@ bool isFloat(parser::MemorySize size) noexcept {
 }
 
 bool isAdvancedFlag(parser::ConditionFlag flag) noexcept {
-    return flag == parser::ConditionFlag::AddSource || flag == parser::ConditionFlag::SubSource
-        || flag == parser::ConditionFlag::AddHits || flag == parser::ConditionFlag::SubHits
-        || flag == parser::ConditionFlag::AddAddress || flag == parser::ConditionFlag::AndNext
+    return flag == parser::ConditionFlag::AddHits || flag == parser::ConditionFlag::SubHits
+        || flag == parser::ConditionFlag::AndNext
         || flag == parser::ConditionFlag::OrNext || flag == parser::ConditionFlag::Measured
         || flag == parser::ConditionFlag::MeasuredPercent || flag == parser::ConditionFlag::MeasuredIf
         || flag == parser::ConditionFlag::Remember;
@@ -52,7 +51,7 @@ class EvaluationFrame final {
 public:
     explicit EvaluationFrame(ConditionEvaluator& owner) : owner_(owner) {}
 
-    bool operand(const parser::Operand& operand, OperandValue& output) {
+    bool operand(const parser::Operand& operand, OperandValue& output, std::uint32_t offset = 0U) {
         if (operand.kind == parser::OperandKind::Constant) {
             output.value = operand.constant;
             output.mask = std::numeric_limits<std::uint32_t>::max();
@@ -65,10 +64,12 @@ public:
             return fail(ConditionEvaluationStatus::Unsupported, operand.span, "floating memory is unsupported");
         }
 
-        RawMemory* raw = findRaw(operand.memory.address, operand.memory.size);
+        if (operand.memory.address > std::numeric_limits<std::uint32_t>::max() - offset) return unsupported(operand.span, "indirect address overflow");
+        const auto address = operand.memory.address + offset;
+        RawMemory* raw = findRaw(address, operand.memory.size);
         if (raw == nullptr) {
             RawMemory decoded;
-            decoded.address = operand.memory.address;
+            decoded.address = address;
             decoded.size = operand.memory.size;
             if (!read(decoded)) {
                 error_.sourceSpan = operand.span;
@@ -78,11 +79,11 @@ public:
             raw = &reads_.back();
         }
 
-        auto history = std::find_if(owner_.histories_.begin(), owner_.histories_.end(), [&operand](const auto& entry) {
-            return entry.address == operand.memory.address && entry.size == operand.memory.size;
+        auto history = std::find_if(owner_.histories_.begin(), owner_.histories_.end(), [&operand, address](const auto& entry) {
+            return entry.address == address && entry.size == operand.memory.size;
         });
         if (history == owner_.histories_.end()) {
-            owner_.histories_.push_back({operand.memory.address, operand.memory.size});
+            owner_.histories_.push_back({address, operand.memory.size});
             history = std::prev(owner_.histories_.end());
         }
 
@@ -214,15 +215,16 @@ bool preflight(const parser::ConditionGroup& group, ConditionEvaluation& result)
     return true;
 }
 
-bool expression(EvaluationFrame& frame, const parser::Condition& condition, bool& result) {
+bool expression(EvaluationFrame& frame, const parser::Condition& condition, bool& result, std::uint32_t offset = 0U, std::uint32_t source = 0U) {
     OperandValue left;
-    if (!frame.operand(condition.left, left)) return false;
+    if (!frame.operand(condition.left, left, offset)) return false;
+    left.value += source;
     if (!condition.right || condition.op == parser::Operator::None) {
         result = left.value != 0U;
         return true;
     }
     OperandValue right;
-    if (!frame.operand(*condition.right, right)) return false;
+    if (!frame.operand(*condition.right, right, offset)) return false;
     switch (condition.op) {
     case parser::Operator::Equal: result = left.value == right.value; return true;
     case parser::Operator::NotEqual: result = left.value != right.value; return true;
@@ -261,9 +263,26 @@ ConditionEvaluation ConditionEvaluator::evaluate(const parser::ConditionTrigger&
     const auto evaluateGroup = [this, &frame, &trigger](const parser::ConditionGroup& group) {
         GroupEvaluation groupResult;
         bool resetNext = false;
+        std::uint32_t source = 0U;
+        std::uint32_t addressOffset = 0U;
         for (const auto& condition : group.conditions) {
+            if (condition.flag == parser::ConditionFlag::AddSource || condition.flag == parser::ConditionFlag::SubSource
+                || condition.flag == parser::ConditionFlag::AddAddress) {
+                OperandValue value;
+                if (!frame.operand(condition.left, value)) return GroupEvaluation{false, false, false, frame.error().status};
+                if (condition.flag == parser::ConditionFlag::AddSource) source += value.value;
+                else if (condition.flag == parser::ConditionFlag::SubSource) source -= value.value;
+                else {
+                    if (addressOffset > std::numeric_limits<std::uint32_t>::max() - value.value) {
+                        frame.unsupported(condition.span, "indirect address overflow");
+                        return GroupEvaluation{false, false, false, ConditionEvaluationStatus::Unsupported};
+                    }
+                    addressOffset += value.value;
+                }
+                continue;
+            }
             bool conditionPasses = false;
-            if (!expression(frame, condition, conditionPasses)) {
+            if (!expression(frame, condition, conditionPasses, addressOffset, source)) {
                 if (frame.error().status != ConditionEvaluationStatus::Waiting) return GroupEvaluation{false, false, false, frame.error().status};
                 return GroupEvaluation{false, false, false, ConditionEvaluationStatus::Unsupported};
             }
@@ -295,6 +314,8 @@ ConditionEvaluation ConditionEvaluator::evaluate(const parser::ConditionTrigger&
             }
             resetNext = false;
             if (!conditionPasses) groupResult.passes = false;
+            source = 0U;
+            addressOffset = 0U;
         }
         return groupResult;
     };
