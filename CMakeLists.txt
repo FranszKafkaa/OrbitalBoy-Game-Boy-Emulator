@@ -156,6 +156,17 @@ add_library(gbcore ${GBEMU_CORE_SOURCES})
 
 target_include_directories(gbcore PUBLIC include)
 
+add_library(gbachievements_hashing
+    src/achievements/hashing/md5.cpp
+    src/achievements/hashing/rom_hasher.cpp
+)
+target_include_directories(gbachievements_hashing PUBLIC include)
+if (MSVC)
+    target_compile_options(gbachievements_hashing PRIVATE /W4 /EHsc)
+else()
+    target_compile_options(gbachievements_hashing PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 add_library(gbgba_mgba src/core/gba/mgba_core.cpp)
 target_include_directories(gbgba_mgba PUBLIC include)
 if (GBEMU_ENABLE_GBA)
@@ -174,7 +185,7 @@ endif()
 
 add_library(gbfrontend_support ${GBEMU_FRONTEND_SUPPORT_SOURCES})
 target_include_directories(gbfrontend_support PUBLIC include)
-target_link_libraries(gbfrontend_support PUBLIC gbcore)
+target_link_libraries(gbfrontend_support PUBLIC gbcore gbachievements_hashing)
 if (WIN32)
     target_link_libraries(gbfrontend_support PRIVATE advapi32)
 endif()
@@ -271,6 +282,19 @@ if (GBEMU_BUILD_MCP)
 endif()
 
 if (BUILD_TESTING)
+    add_executable(gbachievements_hashing_tests
+        tests/test_main.cpp
+        tests/achievements/hashing/rom_hashing_tests.cpp
+    )
+    target_include_directories(gbachievements_hashing_tests PRIVATE include)
+    target_link_libraries(gbachievements_hashing_tests PRIVATE gbachievements_hashing)
+    if (MSVC)
+        target_compile_options(gbachievements_hashing_tests PRIVATE /W4 /EHsc)
+    else()
+        target_compile_options(gbachievements_hashing_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME gbachievements_hashing_tests COMMAND gbachievements_hashing_tests)
+
     add_executable(gbachievements_config_storage_tests
         tests/test_main.cpp
         tests/achievements/config/achievement_config_tests.cpp
