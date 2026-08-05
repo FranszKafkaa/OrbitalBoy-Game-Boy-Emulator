@@ -20,9 +20,7 @@ bool isFloat(parser::MemorySize size) noexcept {
 }
 
 bool isAdvancedFlag(parser::ConditionFlag flag) noexcept {
-    return flag == parser::ConditionFlag::AddHits || flag == parser::ConditionFlag::SubHits
-        || flag == parser::ConditionFlag::AndNext
-        || flag == parser::ConditionFlag::OrNext || flag == parser::ConditionFlag::Measured
+    return flag == parser::ConditionFlag::Measured
         || flag == parser::ConditionFlag::MeasuredPercent || flag == parser::ConditionFlag::MeasuredIf
         || flag == parser::ConditionFlag::Remember;
 }
@@ -265,7 +263,24 @@ ConditionEvaluation ConditionEvaluator::evaluate(const parser::ConditionTrigger&
         bool resetNext = false;
         std::uint32_t source = 0U;
         std::uint32_t addressOffset = 0U;
+        bool chainActive = false;
+        bool chainOr = false;
+        bool chainValue = false;
+        std::uint32_t hitContribution = 0U;
+        bool hitSubtract = false;
         for (const auto& condition : group.conditions) {
+            if (condition.flag == parser::ConditionFlag::AddHits || condition.flag == parser::ConditionFlag::SubHits) {
+                OperandValue contribution;
+                if (!frame.operand(condition.left, contribution)) return GroupEvaluation{false, false, false, frame.error().status};
+                if (condition.flag == parser::ConditionFlag::AddHits) {
+                    hitContribution = std::numeric_limits<std::uint32_t>::max() - hitContribution < contribution.value
+                        ? std::numeric_limits<std::uint32_t>::max() : hitContribution + contribution.value;
+                } else {
+                    hitContribution = contribution.value;
+                    hitSubtract = true;
+                }
+                continue;
+            }
             if (condition.flag == parser::ConditionFlag::AddSource || condition.flag == parser::ConditionFlag::SubSource
                 || condition.flag == parser::ConditionFlag::AddAddress) {
                 OperandValue value;
@@ -295,8 +310,13 @@ ConditionEvaluation ConditionEvaluator::evaluate(const parser::ConditionTrigger&
                     hit = std::prev(hitCounts_.end());
                 }
                 if (conditionPasses) {
-                    if (hit->count < std::numeric_limits<std::uint32_t>::max()) ++hit->count;
+                    if (hitSubtract) hit->count = hit->count < hitContribution ? 0U : hit->count - hitContribution;
+                    const auto increment = hitSubtract || hitContribution == 0U ? 1U : hitContribution;
+                    hit->count = std::numeric_limits<std::uint32_t>::max() - hit->count < increment
+                        ? std::numeric_limits<std::uint32_t>::max() : hit->count + increment;
                 }
+                hitContribution = 0U;
+                hitSubtract = false;
                 conditionPasses = conditionPasses && hit->count >= *condition.hitTarget;
             }
             if (condition.flag == parser::ConditionFlag::PauseIf && conditionPasses) return GroupEvaluation{false, false, false, ConditionEvaluationStatus::Paused};
@@ -306,6 +326,12 @@ ConditionEvaluation ConditionEvaluator::evaluate(const parser::ConditionTrigger&
                 resetNext = conditionPasses;
                 continue;
             }
+            if (condition.flag == parser::ConditionFlag::AndNext || condition.flag == parser::ConditionFlag::OrNext) {
+                chainActive = true;
+                chainOr = condition.flag == parser::ConditionFlag::OrNext;
+                chainValue = conditionPasses;
+                continue;
+            }
             if (resetNext && conditionPasses) return GroupEvaluation{false, false, false, ConditionEvaluationStatus::Reset};
             if (condition.flag == parser::ConditionFlag::Trigger) {
                 groupResult.hasTrigger = true;
@@ -313,6 +339,10 @@ ConditionEvaluation ConditionEvaluator::evaluate(const parser::ConditionTrigger&
                 continue;
             }
             resetNext = false;
+            if (chainActive) {
+                conditionPasses = chainOr ? (chainValue || conditionPasses) : (chainValue && conditionPasses);
+                chainActive = false;
+            }
             if (!conditionPasses) groupResult.passes = false;
             source = 0U;
             addressOffset = 0U;

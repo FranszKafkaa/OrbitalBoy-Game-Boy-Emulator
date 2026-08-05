@@ -307,16 +307,51 @@ TEST_CASE("achievements_condition_evaluator", "combines_sources_and_indirect_add
 
 TEST_CASE("achievements_condition_evaluator", "rejects_unimplemented_chain_and_hit_combinations") {
     TestMemory memory{{1U}};
-    for (const auto flag : {gb::achievements::parser::ConditionFlag::AndNext,
-             gb::achievements::parser::ConditionFlag::OrNext,
-             gb::achievements::parser::ConditionFlag::AddHits,
-             gb::achievements::parser::ConditionFlag::SubHits}) {
-        ConditionTrigger trigger;
-        auto condition = memoryEquals(0U, 1U);
-        condition.flag = flag;
-        trigger.core.conditions.push_back(condition);
-        T_REQUIRE(ConditionEvaluator(memory.reader()).evaluate(trigger).status == ConditionEvaluationStatus::Unsupported);
-    }
+    ConditionTrigger trigger;
+    auto condition = memoryEquals(0U, 1U);
+    condition.flag = gb::achievements::parser::ConditionFlag::Measured;
+    trigger.core.conditions.push_back(condition);
+    T_REQUIRE(ConditionEvaluator(memory.reader()).evaluate(trigger).status == ConditionEvaluationStatus::Unsupported);
+}
+
+TEST_CASE("achievements_condition_evaluator", "chains_and_next_or_next_truth") {
+    TestMemory memory{{0U, 1U}};
+    ConditionEvaluator evaluator(memory.reader());
+
+    ConditionTrigger andNext;
+    auto andCondition = memoryEquals(0U, 1U);
+    andCondition.flag = gb::achievements::parser::ConditionFlag::AndNext;
+    andNext.core.conditions.push_back(andCondition);
+    andNext.core.conditions.push_back(memoryEquals(1U, 1U));
+    T_REQUIRE(evaluator.evaluate(andNext).status == ConditionEvaluationStatus::Waiting);
+
+    ConditionTrigger orNext;
+    auto orCondition = memoryEquals(0U, 1U);
+    orCondition.flag = gb::achievements::parser::ConditionFlag::OrNext;
+    orNext.core.conditions.push_back(orCondition);
+    orNext.core.conditions.push_back(memoryEquals(1U, 1U));
+    T_REQUIRE(evaluator.evaluate(orNext).status == ConditionEvaluationStatus::Triggered);
+}
+
+TEST_CASE("achievements_condition_evaluator", "saturates_add_hits_and_sub_hits_for_following_target") {
+    TestMemory memory{{1U}};
+    ConditionEvaluator evaluator(memory.reader());
+    ConditionTrigger add;
+    auto addHits = constantCondition(2U, Operator::None, 0U);
+    addHits.flag = gb::achievements::parser::ConditionFlag::AddHits;
+    add.core.conditions.push_back(addHits);
+    auto target = memoryEquals(0U, 1U);
+    target.hitTarget = 3U;
+    add.core.conditions.push_back(target);
+    T_REQUIRE(evaluator.evaluate(add).status == ConditionEvaluationStatus::Waiting);
+    T_REQUIRE(evaluator.evaluate(add).status == ConditionEvaluationStatus::Triggered);
+
+    ConditionTrigger subtract;
+    auto subHits = constantCondition(9U, Operator::None, 0U);
+    subHits.flag = gb::achievements::parser::ConditionFlag::SubHits;
+    subtract.core.conditions.push_back(subHits);
+    subtract.core.conditions.push_back(target);
+    T_REQUIRE(evaluator.evaluate(subtract).status == ConditionEvaluationStatus::Waiting);
 }
 
 } // namespace
