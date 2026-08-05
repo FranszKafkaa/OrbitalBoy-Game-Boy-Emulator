@@ -254,7 +254,10 @@ namespace {
 constexpr std::size_t kMaximumUiEvents = 32;
 constexpr std::size_t kMaximumTitleBatch = 100;
 constexpr std::uint32_t kGameBoyConsoleId = 4;
+constexpr std::uint32_t kGameBoyAdvanceConsoleId = 5;
 constexpr std::uint32_t kGameBoyColorConsoleId = 6;
+
+using RaConsoleIdProvider = std::function<std::uint32_t()>;
 
 std::mutex gSessionRegistryMutex;
 std::unordered_map<rc_client_t*, RetroAchievementsSession*> gSessionRegistry;
@@ -362,14 +365,16 @@ public:
 
     Impl(
         RetroAchievementsSession& ownerValue,
-        gb::GameBoy& gameBoy,
+        RaMemoryReader memoryReaderValue,
+        RaConsoleIdProvider defaultConsoleIdValue,
         RaHttpTransport& transportValue,
         RaConfig configValue,
         RaConfigPersistence persistConfigValue,
         RaClientApi* clientApi
     )
         : owner(ownerValue),
-          gameBoy(gameBoy),
+          memoryReader(std::move(memoryReaderValue)),
+          defaultConsoleId(std::move(defaultConsoleIdValue)),
           transport(transportValue),
           config(std::move(configValue)),
           persistConfig(std::move(persistConfigValue)),
@@ -616,10 +621,16 @@ public:
             return;
         }
         if (consoleId != kGameBoyConsoleId
+            && consoleId != kGameBoyAdvanceConsoleId
             && consoleId != kGameBoyColorConsoleId) {
-            consoleId = gameBoy.runningInCgbMode()
-                ? kGameBoyColorConsoleId
-                : kGameBoyConsoleId;
+            consoleId = defaultConsoleId ? defaultConsoleId() : 0U;
+        }
+        if (consoleId != kGameBoyConsoleId
+            && consoleId != kGameBoyAdvanceConsoleId
+            && consoleId != kGameBoyColorConsoleId) {
+            state.errorText = "Sistema não suportado pelo RetroAchievements.";
+            publishSnapshot();
+            return;
         }
 
         auto* context = new GameCallbackContext{&owner, generation};
@@ -1306,7 +1317,8 @@ public:
     }
 
     RetroAchievementsSession& owner;
-    gb::GameBoy& gameBoy;
+    RaMemoryReader memoryReader;
+    RaConsoleIdProvider defaultConsoleId;
     RaHttpTransport& transport;
     RaConfig config;
     RaConfigPersistence persistConfig;
@@ -1349,7 +1361,41 @@ RetroAchievementsSession::RetroAchievementsSession(
 )
     : impl_(std::make_unique<Impl>(
           *this,
-          gameBoy,
+          [&gameBoy](
+              std::uint32_t address,
+              std::uint8_t* buffer,
+              std::uint32_t numBytes
+          ) {
+              return readRetroAchievementsMemory(
+                  gameBoy.bus(),
+                  address,
+                  buffer,
+                  numBytes
+              );
+          },
+          [&gameBoy]() {
+              return gameBoy.runningInCgbMode()
+                  ? kGameBoyColorConsoleId
+                  : kGameBoyConsoleId;
+          },
+          transport,
+          std::move(config),
+          std::move(persistConfig),
+          clientApi
+      )) {}
+
+RetroAchievementsSession::RetroAchievementsSession(
+    RaMemoryReader memoryReader,
+    std::uint32_t defaultConsoleId,
+    RaHttpTransport& transport,
+    RaConfig config,
+    RaConfigPersistence persistConfig,
+    RaClientApi* clientApi
+)
+    : impl_(std::make_unique<Impl>(
+          *this,
+          std::move(memoryReader),
+          [defaultConsoleId]() { return defaultConsoleId; },
           transport,
           std::move(config),
           std::move(persistConfig),
@@ -1464,12 +1510,9 @@ std::uint32_t RetroAchievementsSession::readMemoryThunk(
     if (!session || !session->impl_->onOwnerThread()) {
         return 0;
     }
-    return readRetroAchievementsMemory(
-        session->impl_->gameBoy.bus(),
-        address,
-        buffer,
-        numBytes
-    );
+    return session->impl_->memoryReader
+        ? session->impl_->memoryReader(address, buffer, numBytes)
+        : 0U;
 }
 
 void RetroAchievementsSession::serverCallThunk(

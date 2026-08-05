@@ -138,11 +138,24 @@ public:
 };
 
 using RaConfigPersistence = std::function<bool(const RaConfig&)>;
+using RaMemoryReader = std::function<std::uint32_t(
+    std::uint32_t,
+    std::uint8_t*,
+    std::uint32_t
+)>;
 
 class RetroAchievementsSession {
 public:
     RetroAchievementsSession(
         gb::GameBoy& gameBoy,
+        RaHttpTransport& transport,
+        RaConfig config = {},
+        RaConfigPersistence persistConfig = {},
+        RaClientApi* clientApi = nullptr
+    );
+    RetroAchievementsSession(
+        RaMemoryReader memoryReader,
+        std::uint32_t defaultConsoleId,
         RaHttpTransport& transport,
         RaConfig config = {},
         RaConfigPersistence persistConfig = {},

@@ -263,6 +263,70 @@ TEST_CASE("retroachievements", "memory_reader_reads_wram_in_address_order") {
     T_EQ(out[2], 0x05);
 }
 
+TEST_CASE("retroachievements", "gba_memory_reader_maps_all_ra_regions_and_crosses_boundaries") {
+    std::vector<std::uint32_t> physicalAddresses;
+    const gb::frontend::RaGbaByteReader readByte = [&](std::uint32_t address) {
+        physicalAddresses.push_back(address);
+        return std::optional<std::uint8_t>(static_cast<std::uint8_t>(address >> 24U));
+    };
+    std::array<std::uint8_t, 4> out{};
+
+    T_EQ(gb::frontend::readRetroAchievementsGbaMemory(
+        readByte,
+        0x007FFEU,
+        out.data(),
+        out.size()
+    ), 4U);
+    const std::vector<std::uint32_t> expected{
+        0x03007FFEU,
+        0x03007FFFU,
+        0x02000000U,
+        0x02000001U,
+    };
+    T_REQUIRE(physicalAddresses == expected);
+    T_EQ(out[0], 0x03U);
+    T_EQ(out[1], 0x03U);
+    T_EQ(out[2], 0x02U);
+    T_EQ(out[3], 0x02U);
+
+    physicalAddresses.clear();
+    T_EQ(gb::frontend::readRetroAchievementsGbaMemory(
+        readByte,
+        0x048000U,
+        out.data(),
+        1
+    ), 1U);
+    T_EQ(physicalAddresses.front(), 0x0E000000U);
+    T_EQ(out[0], 0x0EU);
+}
+
+TEST_CASE("retroachievements", "gba_memory_reader_rejects_invalid_ranges_without_reading") {
+    int reads = 0;
+    const gb::frontend::RaGbaByteReader readByte = [&](std::uint32_t) {
+        ++reads;
+        return std::optional<std::uint8_t>(0x5AU);
+    };
+    std::array<std::uint8_t, 2> out{0x11U, 0x22U};
+
+    T_EQ(gb::frontend::readRetroAchievementsGbaMemory(readByte, 0, nullptr, 1), 0U);
+    T_EQ(gb::frontend::readRetroAchievementsGbaMemory(readByte, 0, out.data(), 0), 0U);
+    T_EQ(gb::frontend::readRetroAchievementsGbaMemory(
+        readByte,
+        0x057FFFU,
+        out.data(),
+        2
+    ), 0U);
+    T_EQ(gb::frontend::readRetroAchievementsGbaMemory(
+        readByte,
+        0xFFFFFFFFU,
+        out.data(),
+        2
+    ), 0U);
+    T_EQ(reads, 0);
+    T_EQ(out[0], 0x11U);
+    T_EQ(out[1], 0x22U);
+}
+
 TEST_CASE("retroachievements", "progress_sidecar_round_trips_exact_versioned_format") {
     const std::string statePath = tempFilePath("slot.state");
     const std::string path = gb::frontend::retroAchievementsProgressPathForState(statePath);
@@ -3032,6 +3096,48 @@ TEST_CASE("retroachievements", "session_memory_thunk_reads_only_on_owner_thread"
         return api.readThroughClient(0xC000, bytes.data(), 1);
     });
     T_EQ(backgroundRead.get(), 0U);
+    session.shutdown();
+    transport.shutdown();
+}
+
+TEST_CASE("retroachievements", "session_routes_gba_memory_and_console_without_gameboy") {
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200, {}, {}};
+    });
+    FakeRaClientApi api;
+    std::vector<std::uint32_t> physicalReads;
+    gb::frontend::RaMemoryReader memoryReader = [&](std::uint32_t address,
+                                                     std::uint8_t* buffer,
+                                                     std::uint32_t numBytes) {
+        return gb::frontend::readRetroAchievementsGbaMemory(
+            [&](std::uint32_t physicalAddress) {
+                physicalReads.push_back(physicalAddress);
+                return std::optional<std::uint8_t>(0xA5U);
+            },
+            address,
+            buffer,
+            numBytes
+        );
+    };
+    gb::frontend::RetroAchievementsSession session(
+        std::move(memoryReader),
+        5U,
+        transport,
+        {},
+        {},
+        &api
+    );
+    std::array<std::uint8_t, 1> byte{};
+
+    T_EQ(api.readThroughClient(0x008000U, byte.data(), 1), 1U);
+    T_EQ(byte.front(), 0xA5U);
+    T_EQ(physicalReads.size(), 1U);
+    T_EQ(physicalReads.front(), 0x02000000U);
+
+    session.enqueueLoadGame(5U, "/roms/fire-emblem.gba");
+    session.processPending();
+    T_EQ(api.lastGameConsole, 5U);
+    T_EQ(api.lastGamePath, std::string("/roms/fire-emblem.gba"));
     session.shutdown();
     transport.shutdown();
 }
