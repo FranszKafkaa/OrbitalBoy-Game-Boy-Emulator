@@ -96,6 +96,39 @@ int sectionWidth(TopMenuSection section) {
     return textPixelWidth(topMenuSectionLabel(section)) + kSectionPad;
 }
 
+TopMenuRect dropdownRectForItems(
+    int outputW,
+    TopMenuSection section,
+    const std::vector<TopMenuItem>& items) {
+    const TopMenuRect sec = topMenuSectionRect(outputW, section);
+    int maxLabel = 0;
+    for (const auto& item : items) {
+        maxLabel = std::max(maxLabel, textPixelWidth(item.label));
+    }
+    const int w = std::max(sec.w + 30, maxLabel + 16);
+    const int h = static_cast<int>(items.size()) * kItemHeight + kDropdownPad * 2;
+    return TopMenuRect{sec.x, kBarHeight, w, h};
+}
+
+std::optional<TopMenuAction> hitTestActionForItems(
+    const TopMenuRect& drop,
+    const std::vector<TopMenuItem>& items,
+    int px,
+    int py) {
+    if (!topMenuRectContains(drop, px, py)) {
+        return std::nullopt;
+    }
+    const int localY = py - drop.y - kDropdownPad;
+    if (localY < 0) {
+        return std::nullopt;
+    }
+    const int row = localY / kItemHeight;
+    if (row < 0 || row >= static_cast<int>(items.size())) {
+        return std::nullopt;
+    }
+    return items[static_cast<std::size_t>(row)].action;
+}
+
 } // namespace
 
 int topMenuBarHeight() {
@@ -157,16 +190,14 @@ TopMenuRect topMenuSectionRect(int outputW, TopMenuSection section) {
 }
 
 TopMenuRect topMenuDropdownRect(int outputW, TopMenuSection section) {
-    const TopMenuRect sec = topMenuSectionRect(outputW, section);
-    const auto& items = topMenuItems(section);
-    int maxLabel = 0;
-    for (const auto& item : items) {
-        maxLabel = std::max(maxLabel, textPixelWidth(item.label));
-    }
-    const int w = std::max(sec.w + 30, maxLabel + 16);
-    const int h = static_cast<int>(items.size()) * kItemHeight + kDropdownPad * 2;
-    return TopMenuRect{sec.x, kBarHeight, w, h};
+    return dropdownRectForItems(outputW, section, topMenuItems(section));
 }
+
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+TopMenuRect topMenuDropdownRect(int outputW, TopMenuSection section, bool raLoggedIn) {
+    return dropdownRectForItems(outputW, section, topMenuItems(section, raLoggedIn));
+}
+#endif
 
 std::optional<TopMenuSection> hitTestTopMenuSection(int outputW, int px, int py) {
     if (py < 0 || py >= kBarHeight) {
@@ -184,19 +215,21 @@ std::optional<TopMenuSection> hitTestTopMenuSection(int outputW, int px, int py)
 
 std::optional<TopMenuAction> hitTestTopMenuAction(int outputW, TopMenuSection section, int px, int py) {
     const TopMenuRect drop = topMenuDropdownRect(outputW, section);
-    if (!topMenuRectContains(drop, px, py)) {
-        return std::nullopt;
-    }
-    const int localY = py - drop.y - kDropdownPad;
-    if (localY < 0) {
-        return std::nullopt;
-    }
-    const int row = localY / kItemHeight;
     const auto& items = topMenuItems(section);
-    if (row < 0 || row >= static_cast<int>(items.size())) {
-        return std::nullopt;
-    }
-    return items[static_cast<std::size_t>(row)].action;
+    return hitTestActionForItems(drop, items, px, py);
 }
+
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+std::optional<TopMenuAction> hitTestTopMenuAction(
+    int outputW,
+    TopMenuSection section,
+    int px,
+    int py,
+    bool raLoggedIn) {
+    const TopMenuRect drop = topMenuDropdownRect(outputW, section, raLoggedIn);
+    const auto& items = topMenuItems(section, raLoggedIn);
+    return hitTestActionForItems(drop, items, px, py);
+}
+#endif
 
 } // namespace gb::frontend

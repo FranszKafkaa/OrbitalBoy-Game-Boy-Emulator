@@ -75,8 +75,19 @@ const std::vector<TopMenuItem>& topMenuItems(TopMenuSection section, bool raLogg
 
 TopMenuRect topMenuSectionRect(int outputW, TopMenuSection section);
 TopMenuRect topMenuDropdownRect(int outputW, TopMenuSection section);
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+TopMenuRect topMenuDropdownRect(int outputW, TopMenuSection section, bool raLoggedIn);
+#endif
 
 std::optional<TopMenuSection> hitTestTopMenuSection(int outputW, int px, int py);
 std::optional<TopMenuAction> hitTestTopMenuAction(int outputW, TopMenuSection section, int px, int py);
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+std::optional<TopMenuAction> hitTestTopMenuAction(
+    int outputW,
+    TopMenuSection section,
+    int px,
+    int py,
+    bool raLoggedIn);
+#endif
 
 } // namespace gb::frontend

@@ -346,6 +346,7 @@ public:
     struct LoginCallbackContext {
         RetroAchievementsSession* session = nullptr;
         std::uint64_t generation = 0;
+        bool tokenLogin = false;
     };
 
     struct GameCallbackContext {
@@ -494,7 +495,7 @@ public:
         bool tokenLogin
     ) {
         const std::uint64_t generation = ++loginGeneration;
-        auto* context = new LoginCallbackContext{&owner, generation};
+        auto* context = new LoginCallbackContext{&owner, generation, tokenLogin};
         loginContexts.insert(context);
         state.connectionState = RaConnectionState::LoggingIn;
         state.statusText = "Entrando no RetroAchievements...";
@@ -526,6 +527,7 @@ public:
             return;
         }
         const std::uint64_t generation = context->generation;
+        const bool tokenLogin = context->tokenLogin;
         loginContexts.erase(contextFound);
         delete context;
         if (shutdownRequested || generation != loginGeneration
@@ -551,7 +553,9 @@ public:
             }
             publishSnapshot();
             addEvent({
-                RaUiEventType::LoginFailed,
+                tokenLogin && !isTransientLoginFailure(result)
+                    ? RaUiEventType::LoginRequired
+                    : RaUiEventType::LoginFailed,
                 "Falha no login",
                 state.errorText,
                 0,
@@ -691,11 +695,15 @@ public:
         ++profileGeneration;
         mergedLibrary.clear();
         state.profile.library.clear();
-        pendingProfileRequests = 2;
+        pendingProfileRequests = 3;
         pendingTitleRequests = 0;
         profileWarning = false;
 
         beginConsoleProfile(kGameBoyConsoleId, &RetroAchievementsSession::gbProgressThunk);
+        beginConsoleProfile(
+            kGameBoyAdvanceConsoleId,
+            &RetroAchievementsSession::gbaProgressThunk
+        );
         beginConsoleProfile(
             kGameBoyColorConsoleId,
             &RetroAchievementsSession::gbcProgressThunk
@@ -1584,6 +1592,16 @@ void RetroAchievementsSession::gbProgressThunk(
 }
 
 void RetroAchievementsSession::gbcProgressThunk(
+    int result,
+    const char*,
+    rc_client_all_user_progress_t* list,
+    rc_client_t*,
+    void* callbackData
+) {
+    gbProgressThunk(result, nullptr, list, nullptr, callbackData);
+}
+
+void RetroAchievementsSession::gbaProgressThunk(
     int result,
     const char*,
     rc_client_all_user_progress_t* list,

@@ -228,6 +228,13 @@ private:
         rc_client_t* client,
         void* callbackData
     );
+    static void RC_CCONV gbaProgressThunk(
+        int result,
+        const char* errorMessage,
+        rc_client_all_user_progress_t* list,
+        rc_client_t* client,
+        void* callbackData
+    );
     static void RC_CCONV gbcProgressThunk(
         int result,
         const char* errorMessage,

@@ -18,6 +18,7 @@ enum class RaConnectionState {
 enum class RaUiEventType {
     LoginSucceeded,
     LoginFailed,
+    LoginRequired,
     AchievementUnlocked,
     GameLoaded,
     Offline,

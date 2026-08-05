@@ -2610,6 +2610,15 @@ int RealtimeSession::run() {
             if (event.type == RaUiEventType::Reconnected) {
                 raImageCache.retryFailed();
             }
+            if (event.type == RaUiEventType::LoginRequired) {
+                neutralizeGameplayInputForRaOverlay();
+                closeRaProfilePanel(raProfilePanel);
+                openRaLoginModal(
+                    raLoginModal,
+                    raUiSnapshot.profile.user.username
+                );
+                SDL_StartTextInput();
+            }
             if (event.type == RaUiEventType::AchievementUnlocked) {
                 const auto found = std::find_if(
                     raUiSnapshot.currentAchievements.begin(),

@@ -24,7 +24,7 @@ option(GBEMU_USE_SDL2 "Build with SDL2 real-time frontend when available" ON)
 option(GBEMU_BUILD_MCP "Build read-only OrbitalBoy RunLab MCP stdio adapter" OFF)
 option(GBEMU_ENABLE_GBA "Build native mGBA runtime support" ON)
 option(GBEMU_BUILD_EXPERIMENTAL_GBA "Build the in-house experimental GBA core and tests" OFF)
-option(GBEMU_ENABLE_RETROACHIEVEMENTS "Build RetroAchievements support for GB/GBC" OFF)
+option(GBEMU_ENABLE_RETROACHIEVEMENTS "Build RetroAchievements support for GB/GBC/GBA" OFF)
 
 if (GBEMU_ENABLE_GBA)
     find_path(MGBA_INCLUDE_DIR mgba/core/core.h)

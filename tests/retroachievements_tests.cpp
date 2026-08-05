@@ -3317,7 +3317,7 @@ TEST_CASE("retroachievements", "session_login_failure_clears_only_non_transient_
     T_REQUIRE(persisted.back().token.empty());
     const auto events = session.takeEvents();
     T_EQ(events.size(), 2U);
-    T_REQUIRE(events.back().type == gb::frontend::RaUiEventType::LoginFailed);
+    T_REQUIRE(events.back().type == gb::frontend::RaUiEventType::LoginRequired);
     session.shutdown();
     transport.shutdown();
 }
@@ -3819,9 +3819,10 @@ TEST_CASE("retroachievements", "session_merges_gb_gbc_profile_batches_titles_and
 
     const auto snapshot = session.snapshot();
     T_REQUIRE(snapshot.connectionState == gb::frontend::RaConnectionState::Online);
-    T_EQ(api.progressConsoles.size(), 2U);
+    T_EQ(api.progressConsoles.size(), 3U);
     T_EQ(api.progressConsoles.at(0), 4U);
-    T_EQ(api.progressConsoles.at(1), 6U);
+    T_EQ(api.progressConsoles.at(1), 5U);
+    T_EQ(api.progressConsoles.at(2), 6U);
     T_EQ(snapshot.profile.library.size(), 205U);
     T_EQ(api.titleBatches.size(), 3U);
     T_EQ(api.titleBatches.at(0).size(), 100U);
@@ -4066,6 +4067,21 @@ TEST_CASE("retroachievements", "menu_exposes_login_or_profile_actions_from_sessi
     T_EQ(std::string(loggedIn[1].label), std::string("JOGO ATUAL"));
     T_REQUIRE(loggedIn[2].action == TopMenuAction::RaLogout);
     T_EQ(std::string(loggedIn[2].label), std::string("SAIR DA CONTA"));
+
+    const auto drop = gb::frontend::topMenuDropdownRect(
+        1280,
+        TopMenuSection::Achievements,
+        true
+    );
+    const auto logout = gb::frontend::hitTestTopMenuAction(
+        1280,
+        TopMenuSection::Achievements,
+        drop.x + 6,
+        drop.y + 4 + 2 * gb::frontend::topMenuItemHeight() + 2,
+        true
+    );
+    T_REQUIRE(logout.has_value());
+    T_REQUIRE(logout.value() == TopMenuAction::RaLogout);
 }
 
 TEST_CASE("retroachievements", "login_modal_edits_utf8_password_without_exposing_it") {

@@ -4,6 +4,16 @@
 #include "gb/app/frontend/debug_ui.hpp"
 #include "gb/app/frontend/realtime/save_slots.hpp"
 #include "gb/app/frontend/realtime/top_menu.hpp"
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+#include "gb/app/frontend/realtime/retroachievements_config.hpp"
+#include "gb/app/frontend/realtime/retroachievements_http.hpp"
+#include "gb/app/frontend/realtime/retroachievements_image_cache.hpp"
+#include "gb/app/frontend/realtime/retroachievements_memory.hpp"
+#include "gb/app/frontend/realtime/retroachievements_progress.hpp"
+#include "gb/app/frontend/realtime/retroachievements_session.hpp"
+#include "gb/app/frontend/realtime/retroachievements_ui.hpp"
+#include "gb/app/runtime_paths.hpp"
+#endif
 #include "gb/app/frontend/realtime_support.hpp"
 #include "gb/app/sdl_compat.hpp"
 #include "gb/core/environment.hpp"
@@ -16,6 +26,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <thread>
@@ -635,8 +646,12 @@ void drawTopMenuBar(
     int outputW,
     std::optional<TopMenuSection> openSection,
     std::optional<TopMenuSection> hoveredSection,
-    int hoveredItem
+    int hoveredItem,
+    bool raLoggedIn
 ) {
+#ifndef GBEMU_ENABLE_RETROACHIEVEMENTS
+    (void)raLoggedIn;
+#endif
     SDL_SetRenderDrawColor(renderer, 12, 15, 24, 238);
     SDL_Rect bar{0, 0, outputW, topMenuBarHeight()};
     SDL_RenderFillRect(renderer, &bar);
@@ -658,14 +673,22 @@ void drawTopMenuBar(
     }
 
     const auto section = openSection.value();
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    const auto drop = topMenuDropdownRect(outputW, section, raLoggedIn);
+#else
     const auto drop = topMenuDropdownRect(outputW, section);
+#endif
     SDL_SetRenderDrawColor(renderer, 18, 22, 34, 248);
     SDL_Rect d{drop.x, drop.y, drop.w, drop.h};
     SDL_RenderFillRect(renderer, &d);
     SDL_SetRenderDrawColor(renderer, 74, 86, 116, 255);
     SDL_RenderDrawRect(renderer, &d);
 
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    const auto& items = topMenuItems(section, raLoggedIn);
+#else
     const auto& items = topMenuItems(section);
+#endif
     for (int i = 0; i < static_cast<int>(items.size()); ++i) {
         const int y = drop.y + 4 + i * topMenuItemHeight();
         if (i == hoveredItem) {
@@ -1064,8 +1087,13 @@ int runGbaRealtimeCommon(
     }
 
     const int baseScale = std::max(1, scale);
-    const int windowW = Core::ScreenWidth * baseScale;
-    const int windowH = Core::ScreenHeight * baseScale;
+    int windowW = Core::ScreenWidth * baseScale;
+    int windowH = Core::ScreenHeight * baseScale;
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    const RaUiSize raInitialSize = raWindowedSize(windowW, windowH);
+    windowW = raInitialSize.w;
+    windowH = raInitialSize.h;
+#endif
     SDL_Window* window = SDL_CreateWindow(
         windowTitle.c_str(),
         SDL_WINDOWPOS_CENTERED,
@@ -1078,7 +1106,12 @@ int runGbaRealtimeCommon(
         SDL_Quit();
         return 1;
     }
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    const RaUiSize raMinimumSize = raWindowedSize(0, 0);
+    SDL_SetWindowMinimumSize(window, raMinimumSize.w, raMinimumSize.h);
+#else
     SDL_SetWindowMinimumSize(window, Core::ScreenWidth, Core::ScreenHeight);
+#endif
 
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     if (!renderer) {
@@ -1191,11 +1224,89 @@ int runGbaRealtimeCommon(
     GbaDebugView debugView = GbaDebugView::CpuMemory;
     std::vector<u32> debugBreakpoints{};
     std::optional<u32> selectedSpriteAddress{};
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    const std::string raConfigPath = gb::retroAchievementsConfigPath();
+    RaHttpTransport raHttpTransport{};
+    RetroAchievementsImageCache raImageCache(
+        raHttpTransport,
+        gb::retroAchievementsCacheDirectory()
+    );
+    std::unique_ptr<RetroAchievementsSession> raSession{};
+    RaSessionSnapshot raSnapshot{};
+    raSnapshot.connectionState = RaConnectionState::LoggedOut;
+    RaLoginModalState raLoginModal{};
+    RaProfilePanelState raProfilePanel{};
+    RaToastState raToast{};
+    RaImageTextureCache raImageTextureCache{};
+    bool raShowNotifications = true;
+    bool raLoggedIn = false;
+    bool raGameLoadRequested = false;
+    std::uint64_t raConnectionGeneration = 0;
+    auto raLastIdle = std::chrono::steady_clock::now()
+        - std::chrono::milliseconds(100);
+#endif
 
     const auto setMessage = [&](std::string message, int frames = 120) {
         uiMessage = std::move(message);
         uiMessageFrames = frames;
     };
+
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    RaConfig raConfig = loadRetroAchievementsConfig(raConfigPath);
+    raShowNotifications = raConfig.showNotifications;
+    RaConfig raSessionConfig{
+        raConfig.version,
+        {},
+        {},
+        raConfig.autoLogin,
+        raConfig.showNotifications,
+    };
+    RaMemoryReader raMemoryReader = [&](std::uint32_t address,
+                                        std::uint8_t* buffer,
+                                        std::uint32_t numBytes) {
+        return readRetroAchievementsGbaMemory(
+            [&](std::uint32_t physicalAddress) {
+                return core.debugRead8(physicalAddress);
+            },
+            address,
+            buffer,
+            numBytes
+        );
+    };
+    raSession = std::make_unique<RetroAchievementsSession>(
+        std::move(raMemoryReader),
+        5U,
+        raHttpTransport,
+        std::move(raSessionConfig),
+        [&](const RaConfig& updated) {
+            raShowNotifications = updated.showNotifications;
+            if (updated.username.empty() && updated.token.empty()) {
+                bool quarantined = false;
+                const bool invalidated = invalidateRetroAchievementsConfig(
+                    raConfigPath,
+                    &quarantined
+                );
+                if (!invalidated) {
+                    setMessage("ERRO AO REMOVER LOGIN RA", 240);
+                }
+                return invalidated;
+            }
+            const bool saved = saveRetroAchievementsConfig(raConfigPath, updated);
+            if (!saved) {
+                setMessage("ERRO AO SALVAR LOGIN RA", 240);
+            }
+            return saved;
+        }
+    );
+    if (raConfig.autoLogin && !raConfig.username.empty() && !raConfig.token.empty()) {
+        RaSecretString token;
+        raConfig.transferTokenTo(token);
+        raSession->enqueueTokenLogin(std::move(raConfig.username), std::move(token));
+    }
+    raConfig.clearToken();
+    raConfig.username.clear();
+    raSession->processPending();
+#endif
 
     const auto clearAudio = [&]() {
         if (audioReady) {
@@ -1216,7 +1327,15 @@ int runGbaRealtimeCommon(
             const int nextW = visible
                 ? std::max(Core::ScreenWidth + kPanelWidth, currentW + kPanelWidth)
                 : std::max(Core::ScreenWidth, currentW - kPanelWidth);
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+            SDL_SetWindowMinimumSize(
+                window,
+                visible ? raMinimumSize.w + kPanelWidth : raMinimumSize.w,
+                raMinimumSize.h
+            );
+#else
             SDL_SetWindowMinimumSize(window, visible ? Core::ScreenWidth + kPanelWidth : Core::ScreenWidth, Core::ScreenHeight);
+#endif
             SDL_SetWindowSize(window, nextW, std::max(Core::ScreenHeight, currentH));
             SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
         }
@@ -1239,7 +1358,11 @@ int runGbaRealtimeCommon(
         SDL_SetWindowFullscreen(window, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
         if (!fullscreen) {
             showScaleMenu = false;
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+            SDL_SetWindowMinimumSize(window, raMinimumSize.w, raMinimumSize.h);
+#else
             SDL_SetWindowMinimumSize(window, Core::ScreenWidth, Core::ScreenHeight);
+#endif
             SDL_SetWindowSize(window, windowW, windowH);
             SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
         }
@@ -1261,6 +1384,26 @@ int runGbaRealtimeCommon(
         const std::string slotMetaPath = saveSlotMetaPath(statePath, activeSaveSlot);
         const bool saved = core.saveStateToFile(slotStatePath);
         if (saved) {
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+            const auto stateImage = readRetroAchievementsStateFile(slotStatePath);
+            const auto snapshot = raSession->snapshot();
+            const auto progress = raSession->serializeProgress();
+            const std::string progressPath =
+                retroAchievementsProgressPathForState(slotStatePath);
+            if (stateImage.has_value() && snapshot.gameLoaded
+                && !snapshot.romHash.empty() && !progress.empty()) {
+                if (!saveRetroAchievementsProgressV2(
+                        progressPath,
+                        snapshot.romHash,
+                        stateImage->fingerprint,
+                        progress
+                    )) {
+                    (void)invalidateRetroAchievementsProgress(progressPath);
+                }
+            } else {
+                (void)invalidateRetroAchievementsProgress(progressPath);
+            }
+#endif
             SaveSlotMeta meta{};
             meta.slot = activeSaveSlot;
             meta.title = std::filesystem::path(core.loadedRomPath()).filename().string();
@@ -1279,12 +1422,35 @@ int runGbaRealtimeCommon(
 
     const auto loadStateFromActiveSlot = [&]() {
         const std::string slotStatePath = saveSlotStatePath(statePath, activeSaveSlot);
+        std::string loadedPath = slotStatePath;
         bool loaded = core.loadStateFromFile(slotStatePath);
         if (!loaded && activeSaveSlot == 0) {
             loaded = core.loadStateFromFile(statePath);
+            loadedPath = statePath;
         }
         clearAudio();
         if (loaded) {
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+            const auto stateImage = readRetroAchievementsStateFile(loadedPath);
+            const auto snapshot = raSession->snapshot();
+            bool restored = false;
+            if (stateImage.has_value() && snapshot.gameLoaded
+                && !snapshot.romHash.empty()) {
+                const auto stored = loadRetroAchievementsProgressV2(
+                    retroAchievementsProgressPathForState(loadedPath),
+                    snapshot.romHash,
+                    stateImage->fingerprint
+                );
+                restored = stored.has_value()
+                    && raSession->deserializeProgress(
+                        stored->romHash,
+                        stored->payload
+                    );
+            }
+            if (!restored) {
+                (void)raSession->resetProgress();
+            }
+#endif
             setMessage("STATE LOADED S" + std::to_string(activeSaveSlot));
             std::cout << "state GBA carregado: " << slotStatePath << "\n";
         } else {
@@ -1440,6 +1606,39 @@ int runGbaRealtimeCommon(
         case TopMenuAction::OpenControlsMenu:
             showControlsMenu = !showControlsMenu;
             break;
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+        case TopMenuAction::RaLogin:
+            eventInput = gba::InputState{};
+            fastForward = false;
+            clearAudio();
+            closeRaProfilePanel(raProfilePanel);
+            openRaLoginModal(raLoginModal, raSnapshot.profile.user.username);
+            SDL_StartTextInput();
+            break;
+        case TopMenuAction::RaLogout:
+            raSession->enqueueLogout();
+            closeRaLoginModal(raLoginModal);
+            closeRaProfilePanel(raProfilePanel);
+            SDL_StopTextInput();
+            setMessage("SAINDO DO RETROACHIEVEMENTS", 90);
+            break;
+        case TopMenuAction::RaOpenProfile:
+            eventInput = gba::InputState{};
+            fastForward = false;
+            clearAudio();
+            closeRaLoginModal(raLoginModal);
+            SDL_StopTextInput();
+            openRaProfilePanel(raProfilePanel, RaProfileTab::Summary);
+            break;
+        case TopMenuAction::RaOpenAchievements:
+            eventInput = gba::InputState{};
+            fastForward = false;
+            clearAudio();
+            closeRaLoginModal(raLoginModal);
+            SDL_StopTextInput();
+            openRaProfilePanel(raProfilePanel, RaProfileTab::CurrentGame);
+            break;
+#endif
         case TopMenuAction::TogglePaletteMenu:
         case TopMenuAction::CycleFilter:
         case TopMenuAction::ToggleRunLabMcpBridge:
@@ -1454,6 +1653,76 @@ int runGbaRealtimeCommon(
     };
 
     while (running) {
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+        raSession->processPending();
+        const auto raPollNow = std::chrono::steady_clock::now();
+        if (paused && raPollNow - raLastIdle >= std::chrono::milliseconds(100)) {
+            raSession->idle();
+            raLastIdle = raPollNow;
+        }
+        raSnapshot = raSession->snapshot();
+        if (raSnapshot.connectionGeneration != raConnectionGeneration) {
+            raConnectionGeneration = raSnapshot.connectionGeneration;
+            raGameLoadRequested = false;
+        }
+        if (raSnapshot.connectionState != RaConnectionState::Online) {
+            raGameLoadRequested = false;
+        } else if (!raSnapshot.gameLoaded && !raGameLoadRequested) {
+            raSession->enqueueLoadGame(5U, core.loadedRomPath());
+            raGameLoadRequested = true;
+        }
+        raLoggedIn = raSnapshot.connectionState == RaConnectionState::Online
+            || raSnapshot.connectionState == RaConnectionState::Offline;
+        raImageCache.processCompleted();
+        int raOutputW = 0;
+        int raOutputH = 0;
+        SDL_GetRendererOutputSize(renderer, &raOutputW, &raOutputH);
+        const auto visibleRaImages = raVisibleImageUrls(
+            raSnapshot,
+            raProfilePanel,
+            raOutputW,
+            raOutputH
+        );
+        for (const auto& url : visibleRaImages) {
+            raImageCache.request(url);
+        }
+        applyCachedImagePathsForUrls(raSnapshot, raImageCache, visibleRaImages);
+        const auto raUiNowMs = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()
+            ).count()
+        );
+        for (auto& raEvent : raSession->takeEvents()) {
+            if (raEvent.type == RaUiEventType::Reconnected) {
+                raImageCache.retryFailed();
+            } else if (raEvent.type == RaUiEventType::LoginRequired) {
+                eventInput = gba::InputState{};
+                fastForward = false;
+                clearAudio();
+                closeRaProfilePanel(raProfilePanel);
+                openRaLoginModal(raLoginModal, raSnapshot.profile.user.username);
+                SDL_StartTextInput();
+            } else if (raEvent.type == RaUiEventType::AchievementUnlocked) {
+                const auto found = std::find_if(
+                    raSnapshot.currentAchievements.begin(),
+                    raSnapshot.currentAchievements.end(),
+                    [&](const RaAchievementSummary& achievement) {
+                        return achievement.title == raEvent.title;
+                    }
+                );
+                if (found != raSnapshot.currentAchievements.end()) {
+                    raEvent.imagePath = found->badgePath;
+                }
+            }
+            if (raShowNotifications) {
+                enqueueRaToast(raToast, raEvent, raUiNowMs);
+            }
+        }
+        if (applyRaLoginSnapshot(raLoginModal, raSnapshot)
+            == RaLoginModalAction::Close) {
+            SDL_StopTextInput();
+        }
+#endif
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) {
@@ -1464,6 +1733,54 @@ int runGbaRealtimeCommon(
                 eventInput = gba::InputState{};
                 continue;
             }
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+            const bool raOverlayInput =
+                event.type == SDL_KEYDOWN
+                || event.type == SDL_KEYUP
+                || event.type == SDL_TEXTINPUT
+                || event.type == SDL_MOUSEBUTTONDOWN
+                || event.type == SDL_MOUSEBUTTONUP
+                || event.type == SDL_MOUSEMOTION
+                || event.type == SDL_MOUSEWHEEL
+                || event.type == SDL_CONTROLLERBUTTONDOWN
+                || event.type == SDL_CONTROLLERBUTTONUP;
+            if (raLoginModal.open && raOverlayInput) {
+                int outputW = 0;
+                int outputH = 0;
+                SDL_GetRendererOutputSize(renderer, &outputW, &outputH);
+                const RaLoginModalAction action = handleRaLoginModalEvent(
+                    raLoginModal,
+                    event,
+                    outputW,
+                    outputH
+                );
+                if (action == RaLoginModalAction::Submit) {
+                    RaSecretString password;
+                    password.assignAndErase(raLoginModal.password);
+                    raSession->enqueueLogin(
+                        raLoginModal.username,
+                        std::move(password)
+                    );
+                    setMessage("LOGIN RETROACHIEVEMENTS", 90);
+                } else if (action == RaLoginModalAction::Close) {
+                    SDL_StopTextInput();
+                }
+                continue;
+            }
+            if (raProfilePanel.open && raOverlayInput) {
+                int outputW = 0;
+                int outputH = 0;
+                SDL_GetRendererOutputSize(renderer, &outputW, &outputH);
+                (void)handleRaProfilePanelEvent(
+                    raProfilePanel,
+                    raSnapshot,
+                    event,
+                    outputW,
+                    outputH
+                );
+                continue;
+            }
+#endif
             if (event.type == SDL_MOUSEMOTION) {
                 hoveredTopMenuSection.reset();
                 hoveredTopMenuItem = -1;
@@ -1472,7 +1789,15 @@ int runGbaRealtimeCommon(
                     const int my = event.motion.y;
                     hoveredTopMenuSection = hitTestTopMenuSection(0, mx, my);
                     if (openTopMenuSection.has_value()) {
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+                        const auto drop = topMenuDropdownRect(
+                            0,
+                            openTopMenuSection.value(),
+                            raLoggedIn
+                        );
+#else
                         const auto drop = topMenuDropdownRect(0, openTopMenuSection.value());
+#endif
                         if (topMenuRectContains(drop, mx, my)) {
                             const int localY = my - drop.y - 4;
                             if (localY >= 0) {
@@ -1564,7 +1889,17 @@ int runGbaRealtimeCommon(
                     continue;
                 }
                 if (openTopMenuSection.has_value()) {
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+                    if (const auto action = hitTestTopMenuAction(
+                            0,
+                            openTopMenuSection.value(),
+                            mx,
+                            my,
+                            raLoggedIn
+                        ); action.has_value()) {
+#else
                     if (const auto action = hitTestTopMenuAction(0, openTopMenuSection.value(), mx, my); action.has_value()) {
+#endif
                         dispatchTopMenuAction(action.value());
                     }
                     openTopMenuSection.reset();
@@ -1756,8 +2091,20 @@ int runGbaRealtimeCommon(
         }
 
         if (!paused) {
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+            const bool raOverlayOpen = raLoginModal.open || raProfilePanel.open;
+            core.setInputState(
+                raOverlayOpen
+                    ? gba::InputState{}
+                    : readGbaInput(eventInput, gamepad)
+            );
+#else
             core.setInputState(readGbaInput(eventInput, gamepad));
+#endif
             core.runFrame();
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+            raSession->doFrame();
+#endif
             if (!debugBreakpoints.empty()) {
                 const auto snapshot = core.debugSnapshot();
                 if (snapshot.available) {
@@ -1830,7 +2177,18 @@ int runGbaRealtimeCommon(
             }
         }
         if (showTopMenuBar) {
-            drawTopMenuBar(renderer, outputW, openTopMenuSection, hoveredTopMenuSection, hoveredTopMenuItem);
+            drawTopMenuBar(
+                renderer,
+                outputW,
+                openTopMenuSection,
+                hoveredTopMenuSection,
+                hoveredTopMenuItem,
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+                raLoggedIn
+#else
+                false
+#endif
+            );
         }
         if (showPanel) {
             const auto snapshot = core.debugSnapshot();
@@ -1874,6 +2232,38 @@ int runGbaRealtimeCommon(
         if (showControlsMenu) {
             drawGbaControlsOverlay(renderer, outputW, outputH);
         }
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+        const auto raNowMs = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()
+            ).count()
+        );
+        raImageTextureCache.beginFrame();
+        advanceRaToast(raToast, raNowMs);
+        renderRaProfilePanel(
+            renderer,
+            raProfilePanel,
+            raSnapshot,
+            raImageTextureCache,
+            outputW,
+            outputH
+        );
+        renderRaLoginModal(
+            renderer,
+            raLoginModal,
+            raSnapshot,
+            outputW,
+            outputH
+        );
+        renderRaToast(
+            renderer,
+            raToast,
+            raImageTextureCache,
+            raNowMs,
+            outputW,
+            outputH
+        );
+#endif
         SDL_RenderPresent(renderer);
 
         ++fpsFrames;
@@ -1906,6 +2296,18 @@ int runGbaRealtimeCommon(
 
 #ifdef _WIN32
     timeEndPeriod(1);
+#endif
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    closeRaLoginModal(raLoginModal);
+    closeRaProfilePanel(raProfilePanel);
+    SDL_StopTextInput();
+    if (raSession) {
+        (void)raSession->shutdown();
+        raSession.reset();
+    }
+    raImageCache.shutdown();
+    raHttpTransport.shutdown();
+    raImageTextureCache.shutdown();
 #endif
     if (gamepad != nullptr) {
         SDL_GameControllerClose(gamepad);
