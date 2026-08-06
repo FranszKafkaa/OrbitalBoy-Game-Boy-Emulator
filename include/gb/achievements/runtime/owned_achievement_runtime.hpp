@@ -17,6 +17,7 @@ class OwnedAchievementApi;
 
 class OwnedAchievementRuntime final : public AchievementRuntime {
 public:
+    struct HardcoreStatus { bool enabled = true; bool invalidated = false; std::string reason{}; };
     explicit OwnedAchievementRuntime(memory::MemoryReader reader);
     OwnedAchievementRuntime(memory::MemoryReader reader, OwnedAchievementApi& api);
     OwnedAchievementRuntime(memory::MemoryReader reader, std::unique_ptr<OwnedAchievementApi> api);
@@ -28,6 +29,10 @@ public:
     bool attach(gb::gba::System& system);
     bool attach(gb::gba::MgbaCore& core);
     bool detach();
+    void setHardcoreEnabled(bool enabled);
+    [[nodiscard]] bool hardcoreEnabled() const { return hardcore_.enabled; }
+    [[nodiscard]] bool hardcoreInvalidated() const { return hardcore_.invalidated; }
+    void notifyStateMutation(std::string reason);
 
     void enqueueLogin(std::string username, SecretString password) override;
     void enqueueTokenLogin(std::string username, SecretString token) override;
@@ -44,7 +49,7 @@ public:
     bool shutdown() override;
 
 private:
-    struct Definition { std::string key; AchievementSummary summary; parser::ConditionTrigger trigger; };
+    struct Definition { std::string key; AchievementSummary summary; parser::ConditionTrigger trigger; bool hardcoreUnlocked = false; };
     enum class CommandKind { Login, TokenLogin, Logout, LoadGame };
     struct Command { CommandKind kind; std::string username; SecretString secret; std::uint32_t consoleId = 0; std::string path; };
     void handleFrameEvent(const runtime::FrameEvent& event);
@@ -60,6 +65,7 @@ private:
     bool shutdown_ = false;
     OwnedAchievementApi* api_ = nullptr;
     std::unique_ptr<OwnedAchievementApi> apiOwner_;
+    HardcoreStatus hardcore_{};
 };
 
 } // namespace gb::achievements

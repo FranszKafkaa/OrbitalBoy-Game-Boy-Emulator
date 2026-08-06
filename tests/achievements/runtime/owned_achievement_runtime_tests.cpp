@@ -96,4 +96,33 @@ TEST_CASE("owned_achievement_runtime", "owned_api_rejects_malformed_and_http_err
     transport.shutdown();
 }
 
+TEST_CASE("owned_achievement_runtime", "hardcore_unlocks_and_mutation_invalidation") {
+    OwnedAchievementRuntime runtime([](std::uint32_t, std::uint8_t*, std::size_t) { return std::size_t{0U}; });
+    T_REQUIRE(runtime.registerAchievement("key", "Title", "Desc", 5U, passingTrigger()));
+    runtime.setHardcoreEnabled(true);
+    runtime.doFrame();
+    T_EQ(runtime.snapshot().currentGame.unlockedHardcore, 1U);
+    T_REQUIRE(runtime.takeEvents().size() == 1U);
+    runtime.notifyStateMutation("rewind");
+    T_REQUIRE(runtime.hardcoreInvalidated());
+    T_EQ(runtime.takeEvents().size(), 1U);
+    runtime.notifyStateMutation("cheat");
+    T_REQUIRE(runtime.takeEvents().empty());
+}
+
+TEST_CASE("owned_achievement_runtime", "casual_and_load_reset_hardcore_state") {
+    OwnedAchievementRuntime runtime([](std::uint32_t, std::uint8_t*, std::size_t) { return std::size_t{0U}; });
+    T_REQUIRE(runtime.registerAchievement("key", "Title", "Desc", 5U, passingTrigger()));
+    runtime.setHardcoreEnabled(false);
+    runtime.doFrame();
+    T_EQ(runtime.snapshot().currentGame.unlockedCasual, 1U);
+    T_EQ(runtime.snapshot().currentGame.unlockedHardcore, 0U);
+    runtime.setHardcoreEnabled(true);
+    runtime.notifyStateMutation("save state");
+    runtime.enqueueLoadGame(1U, "next.gb");
+    runtime.processPending();
+    T_REQUIRE(!runtime.hardcoreInvalidated());
+    T_REQUIRE(runtime.hardcoreEnabled());
+}
+
 } // namespace

@@ -42,6 +42,18 @@ bool OwnedAchievementRuntime::attach(gb::gba::System& system) { return attachmen
 bool OwnedAchievementRuntime::attach(gb::gba::MgbaCore& core) { return attachment_.attach(core); }
 bool OwnedAchievementRuntime::detach() { return attachment_.detach(); }
 
+void OwnedAchievementRuntime::setHardcoreEnabled(bool enabled) {
+    hardcore_.enabled = enabled;
+    if (!enabled) { hardcore_.invalidated = false; hardcore_.reason.clear(); }
+}
+
+void OwnedAchievementRuntime::notifyStateMutation(std::string reason) {
+    if (!hardcore_.enabled || hardcore_.invalidated) return;
+    hardcore_.invalidated = true;
+    hardcore_.reason = std::move(reason);
+    events_.push_back({UiEventType::HardcoreInvalidated, "Hardcore invalidated", hardcore_.reason, 0U, {}});
+}
+
 void OwnedAchievementRuntime::enqueueLogin(std::string username, SecretString password) {
     pending_.push_back({CommandKind::Login, std::move(username), std::move(password), 0U, {}});
 }
@@ -93,7 +105,10 @@ void OwnedAchievementRuntime::processPending() {
         snapshot_.currentGame.gameId = command.consoleId;
         snapshot_.romHash = command.path;
         bridge_.reset();
+        hardcore_.invalidated = false;
+        hardcore_.reason.clear();
         for (auto& definition : definitions_) definition.summary.unlocked = false;
+        for (auto& definition : definitions_) definition.hardcoreUnlocked = false;
         refreshAchievements();
         events_.push_back({UiEventType::GameLoaded, "Game loaded", command.path, 0U, {}});
     }
@@ -106,7 +121,7 @@ SessionSnapshot OwnedAchievementRuntime::snapshot() const { return snapshot_; }
 std::vector<UiEvent> OwnedAchievementRuntime::takeEvents() { auto result = std::move(events_); events_.clear(); return result; }
 
 std::vector<std::uint8_t> OwnedAchievementRuntime::serializeProgress() const {
-    std::vector<std::uint8_t> payload{'O', 'A', 'R', 1U, 0U, 0U};
+    std::vector<std::uint8_t> payload{'O', 'A', 'R', 2U, 0U, 0U};
     std::size_t count = 0U;
     for (const auto& definition : definitions_) if (definition.summary.unlocked) ++count;
     if (count == 0U) return {};
@@ -119,12 +134,13 @@ std::vector<std::uint8_t> OwnedAchievementRuntime::serializeProgress() const {
         payload.push_back(static_cast<std::uint8_t>(key.size() & 0xFFU));
         payload.push_back(static_cast<std::uint8_t>((key.size() >> 8U) & 0xFFU));
         payload.insert(payload.end(), key.begin(), key.end());
+        payload.push_back(static_cast<std::uint8_t>(definition.hardcoreUnlocked && hardcore_.enabled && !hardcore_.invalidated));
     }
     return payload.size() <= 65536U ? payload : std::vector<std::uint8_t>{};
 }
 
 bool OwnedAchievementRuntime::deserializeProgress(std::string_view, const std::vector<std::uint8_t>& payload) {
-    if (payload.size() < 6U || payload[0] != 'O' || payload[1] != 'A' || payload[2] != 'R' || payload[3] != 1U) return false;
+    if (payload.size() < 6U || payload[0] != 'O' || payload[1] != 'A' || payload[2] != 'R' || payload[3] != 2U) return false;
     const std::size_t count = payload[4] | (static_cast<std::size_t>(payload[5]) << 8U);
     std::size_t offset = 6U;
     for (std::size_t index = 0U; index < count; ++index) {
@@ -134,7 +150,12 @@ bool OwnedAchievementRuntime::deserializeProgress(std::string_view, const std::v
         if (offset + length > payload.size()) return false;
         const std::string title(reinterpret_cast<const char*>(payload.data() + offset), length);
         offset += length;
-        for (auto& definition : definitions_) if (definition.key == title) definition.summary.unlocked = true;
+        if (offset >= payload.size()) return false;
+        const bool hardcore = payload[offset++] != 0U;
+        for (auto& definition : definitions_) if (definition.key == title) {
+            definition.summary.unlocked = true;
+            definition.hardcoreUnlocked = hardcore && hardcore_.enabled && !hardcore_.invalidated;
+        }
     }
     if (offset != payload.size()) return false;
     refreshAchievements();
@@ -144,6 +165,9 @@ bool OwnedAchievementRuntime::deserializeProgress(std::string_view, const std::v
 bool OwnedAchievementRuntime::resetProgress() {
     bridge_.reset();
     for (auto& definition : definitions_) definition.summary.unlocked = false;
+    for (auto& definition : definitions_) definition.hardcoreUnlocked = false;
+    hardcore_.invalidated = false;
+    hardcore_.reason.clear();
     refreshAchievements();
     return true;
 }
@@ -162,6 +186,7 @@ void OwnedAchievementRuntime::handleFrameEvent(const runtime::FrameEvent& event)
         if (definition.key == event.key) {
             if (definition.summary.unlocked) return;
             definition.summary.unlocked = true;
+            definition.hardcoreUnlocked = hardcore_.enabled && !hardcore_.invalidated;
             events_.push_back({UiEventType::AchievementUnlocked, definition.summary.title, definition.summary.description, definition.summary.points, {}});
         }
     }
@@ -171,6 +196,12 @@ void OwnedAchievementRuntime::handleFrameEvent(const runtime::FrameEvent& event)
 void OwnedAchievementRuntime::refreshAchievements() {
     snapshot_.currentAchievements.clear();
     for (const auto& definition : definitions_) snapshot_.currentAchievements.push_back(definition.summary);
+    snapshot_.currentGame.unlockedCasual = 0U;
+    snapshot_.currentGame.unlockedHardcore = 0U;
+    for (const auto& definition : definitions_) {
+        if (definition.summary.unlocked) ++snapshot_.currentGame.unlockedCasual;
+        if (definition.hardcoreUnlocked) ++snapshot_.currentGame.unlockedHardcore;
+    }
 }
 
 } // namespace gb::achievements

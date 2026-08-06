@@ -20,6 +20,7 @@ enum class UiEventType {
     LoginFailed,
     LoginRequired,
     AchievementUnlocked,
+    HardcoreInvalidated,
     GameLoaded,
     Offline,
     Reconnected,
