@@ -495,6 +495,32 @@ if (BUILD_TESTING)
     endif()
     add_test(NAME gbfrontend_achievement_bridge_tests COMMAND gbfrontend_achievement_bridge_tests)
 
+    add_executable(gbachievements_owned_runtime_tests
+        tests/test_main.cpp
+        tests/achievements/runtime/owned_achievement_runtime_tests.cpp
+        src/achievements/runtime/owned_achievement_runtime.cpp
+        src/achievements/runtime/achievement_runtime.cpp
+        src/achievements/runtime/achievement_frame_attachment.cpp
+        src/achievements/runtime/achievement_frame_bridge.cpp
+        src/achievements/runtime/condition_evaluator.cpp
+        src/achievements/security/secret_string.cpp
+        src/achievements/adapters/memory_adapters.cpp
+        src/core/gba/system.cpp
+        src/core/gba/memory.cpp
+        src/core/gba/cpu.cpp
+        src/core/gba/ppu.cpp
+        src/core/gba/apu.cpp
+        src/core/gba/mgba_core.cpp
+    )
+    target_include_directories(gbachievements_owned_runtime_tests PRIVATE include)
+    target_link_libraries(gbachievements_owned_runtime_tests PRIVATE gbcore)
+    if (MSVC)
+        target_compile_options(gbachievements_owned_runtime_tests PRIVATE /W4 /EHsc)
+    else()
+        target_compile_options(gbachievements_owned_runtime_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME gbachievements_owned_runtime_tests COMMAND gbachievements_owned_runtime_tests)
+
     add_executable(gbachievement_models_tests
         tests/test_main.cpp
         tests/achievements/runtime/achievement_models_tests.cpp
