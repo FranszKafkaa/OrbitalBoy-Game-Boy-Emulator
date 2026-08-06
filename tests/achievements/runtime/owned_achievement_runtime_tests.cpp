@@ -2,6 +2,7 @@
 
 #include "gb/achievements/runtime/owned_achievement_runtime.hpp"
 #include "gb/achievements/runtime/owned_achievement_api.hpp"
+#include "gb/achievements/runtime/hardcore_frontend_bridge.hpp"
 #include "gb/achievements/protocol/http_transport.hpp"
 
 #include "../../test_framework.hpp"
@@ -123,6 +124,13 @@ TEST_CASE("owned_achievement_runtime", "casual_and_load_reset_hardcore_state") {
     runtime.processPending();
     T_REQUIRE(!runtime.hardcoreInvalidated());
     T_REQUIRE(runtime.hardcoreEnabled());
+}
+
+TEST_CASE("owned_achievement_runtime", "frontend_mutation_helper_is_safe_for_owned_and_null") {
+    OwnedAchievementRuntime runtime([](std::uint32_t, std::uint8_t*, std::size_t) { return std::size_t{0U}; });
+    notifyOwnedHardcoreMutation(&runtime, "rewind");
+    T_REQUIRE(runtime.hardcoreInvalidated());
+    notifyOwnedHardcoreMutation(nullptr, "ignored");
 }
 
 } // namespace

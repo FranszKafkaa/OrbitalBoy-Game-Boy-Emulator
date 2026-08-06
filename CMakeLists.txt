@@ -78,6 +78,7 @@ set(GBEMU_REALTIME_SUPPORT_SOURCES
     src/achievements/runtime/frontend_achievement_bridge.cpp
     src/achievements/runtime/owned_achievement_runtime.cpp
     src/achievements/runtime/owned_achievement_api.cpp
+    src/achievements/runtime/hardcore_frontend_bridge.cpp
     src/achievements/protocol/http_transport.cpp
     src/achievements/protocol/json_parser.cpp
     src/achievements/protocol/json_value.cpp
@@ -514,6 +515,7 @@ if (BUILD_TESTING)
         tests/achievements/runtime/owned_achievement_runtime_tests.cpp
         src/achievements/runtime/owned_achievement_runtime.cpp
         src/achievements/runtime/owned_achievement_api.cpp
+        src/achievements/runtime/hardcore_frontend_bridge.cpp
         src/achievements/protocol/http_transport.cpp
         src/achievements/protocol/json_parser.cpp
         src/achievements/protocol/json_value.cpp
