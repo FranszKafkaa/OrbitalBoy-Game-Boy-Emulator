@@ -76,6 +76,16 @@ set(GBEMU_APP_SOURCES
 
 set(GBEMU_REALTIME_SUPPORT_SOURCES
     src/achievements/runtime/frontend_achievement_bridge.cpp
+    src/achievements/runtime/owned_achievement_runtime.cpp
+    src/achievements/runtime/achievement_frame_attachment.cpp
+    src/achievements/runtime/achievement_frame_bridge.cpp
+    src/achievements/runtime/condition_evaluator.cpp
+    src/achievements/adapters/memory_adapters.cpp
+    src/core/gba/system.cpp
+    src/core/gba/memory.cpp
+    src/core/gba/cpu.cpp
+    src/core/gba/ppu.cpp
+    src/core/gba/apu.cpp
     src/achievements/runtime/achievement_runtime.cpp
     src/achievements/security/secret_string.cpp
     src/achievements/protocol/http_transport.cpp
@@ -536,7 +546,7 @@ if (BUILD_TESTING)
     add_executable(gbemu_tests
         ${GBEMU_TEST_SOURCES}
     )
-    target_link_libraries(gbemu_tests PRIVATE gbfrontend_support)
+    target_link_libraries(gbemu_tests PRIVATE gbfrontend_support gbgba_mgba)
     if (SDL2_FOUND)
         target_sources(gbemu_tests PRIVATE
             src/app/frontend/debug_ui.cpp

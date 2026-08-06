@@ -84,6 +84,7 @@ std::vector<std::uint8_t> OwnedAchievementRuntime::serializeProgress() const {
     std::vector<std::uint8_t> payload{'O', 'A', 'R', 1U, 0U, 0U};
     std::size_t count = 0U;
     for (const auto& definition : definitions_) if (definition.summary.unlocked) ++count;
+    if (count == 0U) return {};
     if (count > std::numeric_limits<std::uint16_t>::max()) return {};
     payload[4] = static_cast<std::uint8_t>(count & 0xFFU);
     payload[5] = static_cast<std::uint8_t>((count >> 8U) & 0xFFU);
