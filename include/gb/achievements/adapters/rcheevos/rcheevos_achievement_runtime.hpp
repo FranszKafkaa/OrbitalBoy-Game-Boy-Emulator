@@ -1,5 +1,7 @@
 #pragma once
 
+// Compatibility-only legacy adapter; not selected by the owned default path.
+
 #include "gb/achievements/runtime/achievement_runtime.hpp"
 #include "gb/app/frontend/realtime/retroachievements_session.hpp"
 

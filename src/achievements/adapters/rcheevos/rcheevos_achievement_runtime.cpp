@@ -1,5 +1,7 @@
 #include "gb/achievements/adapters/rcheevos/rcheevos_achievement_runtime.hpp"
 
+// Compatibility-only legacy adapter. The default factory uses owned runtime.
+
 #include <utility>
 
 namespace gb::achievements {

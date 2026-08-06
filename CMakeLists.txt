@@ -25,6 +25,7 @@ option(GBEMU_BUILD_MCP "Build read-only OrbitalBoy RunLab MCP stdio adapter" OFF
 option(GBEMU_ENABLE_GBA "Build native mGBA runtime support" ON)
 option(GBEMU_BUILD_EXPERIMENTAL_GBA "Build the in-house experimental GBA core and tests" OFF)
 option(GBEMU_ENABLE_RETROACHIEVEMENTS "Build RetroAchievements support for GB/GBC/GBA" OFF)
+option(GBEMU_ENABLE_LEGACY_RETROACHIEVEMENTS "Keep legacy rcheevos compatibility adapter available" OFF)
 
 if (GBEMU_ENABLE_GBA)
     find_path(MGBA_INCLUDE_DIR mgba/core/core.h)
@@ -235,6 +236,9 @@ if (GBEMU_ENABLE_RETROACHIEVEMENTS)
         GBEMU_ENABLE_RETROACHIEVEMENTS=1
         RC_CLIENT_SUPPORTS_HASH=1
     )
+    if (GBEMU_ENABLE_LEGACY_RETROACHIEVEMENTS)
+        target_compile_definitions(gbfrontend_support PUBLIC GBEMU_ENABLE_LEGACY_RETROACHIEVEMENTS=1)
+    endif()
     list(APPEND GBEMU_TEST_SOURCES
         tests/retroachievements_tests.cpp
         tests/achievements/protocol/legacy_ra_http_forward_declaration_tests.cpp
