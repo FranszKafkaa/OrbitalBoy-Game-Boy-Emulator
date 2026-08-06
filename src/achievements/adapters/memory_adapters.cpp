@@ -7,6 +7,7 @@
 #include "gb/core/gameboy.hpp"
 #include "gb/core/gba/memory.hpp"
 #include "gb/core/gba/system.hpp"
+#include "gb/core/gba/mgba_core.hpp"
 
 namespace gb::achievements::adapters {
 
@@ -44,6 +45,21 @@ memory::MemoryReader makeGbaMemoryReader(gb::gba::System& system) {
             const auto current = address + static_cast<std::uint32_t>(read);
             if (current < address || !isMappedByte(system.memory(), current)) break;
             destination[read] = system.memory().read8(current);
+        }
+        return read;
+    };
+}
+
+memory::MemoryReader makeGbaMemoryReader(gb::gba::MgbaCore& core) {
+    return [&core](std::uint32_t address, std::uint8_t* destination, std::size_t count) {
+        if (destination == nullptr || count == 0U) return std::size_t{0U};
+        std::size_t read = 0U;
+        for (; read < count; ++read) {
+            const auto current = address + static_cast<std::uint32_t>(read);
+            if (current < address) break;
+            const auto value = core.debugRead8(current);
+            if (!value.has_value()) break;
+            destination[read] = *value;
         }
         return read;
     };

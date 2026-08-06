@@ -5,6 +5,7 @@
 #include "gb/app/frontend/realtime/save_slots.hpp"
 #include "gb/app/frontend/realtime/top_menu.hpp"
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+#include "gb/achievements/runtime/frontend_achievement_bridge.hpp"
 #include "gb/achievements/runtime/achievement_runtime_factory.hpp"
 #include "gb/app/frontend/realtime/retroachievements_config.hpp"
 #include "gb/app/frontend/realtime/retroachievements_http.hpp"
@@ -1254,6 +1255,16 @@ int runGbaRealtimeCommon(
     };
 
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    gb::achievements::runtime::FrontendAchievementBridge ownedAchievements(
+        [&](const auto& event) {
+            if (event.kind == gb::achievements::runtime::FrameEventKind::Unlocked) {
+                setMessage("ACHIEVEMENT " + event.key, 180);
+            } else {
+                setMessage("ACHIEVEMENT ERROR", 120);
+            }
+        }
+    );
+    ownedAchievements.attach(core);
     RaConfig raConfig = loadRetroAchievementsConfig(raConfigPath);
     raShowNotifications = raConfig.showNotifications;
     RaConfig raSessionConfig{

@@ -4,7 +4,7 @@
 
 #include "gb/achievements/runtime/achievement_frame_clock.hpp"
 
-namespace gb { class GameBoy; namespace gba { class System; } }
+namespace gb { class GameBoy; namespace gba { class System; class MgbaCore; } }
 
 namespace gb::achievements::runtime {
 
@@ -18,18 +18,20 @@ public:
 
     bool attach(gb::GameBoy& gameBoy);
     bool attach(gb::gba::System& system);
+    bool attach(gb::gba::MgbaCore& core);
     bool detach();
 
     [[nodiscard]] bool attached() const { return attached_; }
     [[nodiscard]] const FrameEvaluationSummary& lastSummary() const { return lastSummary_; }
 
 private:
-    enum class CoreKind { None, GameBoy, GbaSystem };
+    enum class CoreKind { None, GameBoy, GbaSystem, MgbaCore };
     void onFrame();
 
     AchievementFrameClock& clock_;
     gb::GameBoy* gameBoy_ = nullptr;
     gb::gba::System* gbaSystem_ = nullptr;
+    gb::gba::MgbaCore* mgbaCore_ = nullptr;
     CoreKind coreKind_ = CoreKind::None;
     bool attached_ = false;
     FrameEvaluationSummary lastSummary_{};

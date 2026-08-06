@@ -30,6 +30,7 @@
 #include "gb/app/frontend/realtime/netplay_session.hpp"
 #include "gb/app/frontend/realtime/realtime_session.hpp"
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+#include "gb/achievements/runtime/frontend_achievement_bridge.hpp"
 #include "gb/achievements/runtime/achievement_runtime_factory.hpp"
 #include "gb/app/frontend/realtime/retroachievements_config.hpp"
 #include "gb/app/frontend/realtime/retroachievements_http.hpp"
@@ -286,6 +287,16 @@ int RealtimeSession::run() {
     int paletteMenuIndex = static_cast<int>(paletteMode);
     UiMessageQueue workerUiMessages;
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    gb::achievements::runtime::FrontendAchievementBridge ownedAchievements(
+        [&](const auto& event) {
+            if (event.kind == gb::achievements::runtime::FrameEventKind::Unlocked) {
+                workerUiMessages.post("ACHIEVEMENT " + event.key, 180);
+            } else {
+                workerUiMessages.post("ACHIEVEMENT ERROR", 120);
+            }
+        }
+    );
+    ownedAchievements.attach(gb);
     const std::string raConfigPath = gb::retroAchievementsConfigPath();
     RaHttpTransport raHttpTransport{};
     RetroAchievementsImageCache raImageCache(

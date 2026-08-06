@@ -75,6 +75,7 @@ set(GBEMU_APP_SOURCES
 )
 
 set(GBEMU_REALTIME_SUPPORT_SOURCES
+    src/achievements/runtime/frontend_achievement_bridge.cpp
     src/achievements/runtime/achievement_runtime.cpp
     src/achievements/security/secret_string.cpp
     src/achievements/protocol/http_transport.cpp
@@ -467,6 +468,29 @@ if (BUILD_TESTING)
         target_compile_options(gbachievements_frame_attachment_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME gbachievements_frame_attachment_tests COMMAND gbachievements_frame_attachment_tests)
+
+    add_executable(gbfrontend_achievement_bridge_tests
+        tests/test_main.cpp
+        tests/achievements/runtime/frontend_achievement_bridge_tests.cpp
+        src/achievements/runtime/frontend_achievement_bridge.cpp
+        src/achievements/runtime/achievement_frame_attachment.cpp
+        src/achievements/runtime/achievement_frame_bridge.cpp
+        src/achievements/runtime/condition_evaluator.cpp
+        src/achievements/adapters/memory_adapters.cpp
+        src/core/gba/system.cpp
+        src/core/gba/memory.cpp
+        src/core/gba/cpu.cpp
+        src/core/gba/ppu.cpp
+        src/core/gba/apu.cpp
+    )
+    target_include_directories(gbfrontend_achievement_bridge_tests PRIVATE include)
+    target_link_libraries(gbfrontend_achievement_bridge_tests PRIVATE gbcore gbgba_mgba)
+    if (MSVC)
+        target_compile_options(gbfrontend_achievement_bridge_tests PRIVATE /W4 /EHsc)
+    else()
+        target_compile_options(gbfrontend_achievement_bridge_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME gbfrontend_achievement_bridge_tests COMMAND gbfrontend_achievement_bridge_tests)
 
     add_executable(gbachievement_models_tests
         tests/test_main.cpp
