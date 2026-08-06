@@ -11,6 +11,7 @@
 #endif
 
 #include "../../test_framework.hpp"
+#include "../../test_utils.hpp"
 
 namespace {
 
@@ -146,6 +147,24 @@ TEST_CASE("achievements_runtime", "default_factory_accepts_generic_memory_reader
     T_REQUIRE(runtime != nullptr);
     T_REQUIRE(runtime->snapshot().connectionState == gb::achievements::ConnectionState::LoggedOut);
     T_REQUIRE(runtime->serializeProgress().empty());
+    T_REQUIRE(runtime->shutdown());
+    transport.shutdown();
+}
+
+TEST_CASE("achievements_runtime", "default_factory_uses_owned_api_when_endpoint_configured") {
+    tests::ScopedEnvironmentVariable endpoint("GBEMU_OWNED_ACHIEVEMENTS_ENDPOINT", "https://example.test");
+    gb::frontend::RaHttpTransport transport([](const auto& request) {
+        const std::vector<std::uint8_t> body{'{','"','u','s','e','r','n','a','m','e','"',':','"','a','p','i','"','}'};
+        return gb::frontend::RaHttpResponse{request.id, request.channel, 200L, body, {}};
+    });
+    auto runtime = gb::achievements::makeDefaultAchievementRuntime(
+        [](std::uint32_t, std::uint8_t*, std::uint32_t) { return 0U; }, 5U, transport);
+    gb::achievements::SecretString token;
+    token.assign("token");
+    runtime->enqueueTokenLogin("api", std::move(token));
+    runtime->processPending();
+    T_REQUIRE(runtime->snapshot().connectionState == gb::achievements::ConnectionState::Online);
+    T_EQ(runtime->snapshot().profile.user.username, std::string("api"));
     T_REQUIRE(runtime->shutdown());
     transport.shutdown();
 }

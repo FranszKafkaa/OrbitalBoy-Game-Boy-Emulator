@@ -20,6 +20,12 @@ OwnedAchievementRuntime::OwnedAchievementRuntime(memory::MemoryReader reader)
 OwnedAchievementRuntime::OwnedAchievementRuntime(memory::MemoryReader reader, OwnedAchievementApi& api)
     : OwnedAchievementRuntime(std::move(reader)) { api_ = &api; }
 
+OwnedAchievementRuntime::OwnedAchievementRuntime(memory::MemoryReader reader, std::unique_ptr<OwnedAchievementApi> api)
+    : OwnedAchievementRuntime(std::move(reader)) {
+    apiOwner_ = std::move(api);
+    api_ = apiOwner_.get();
+}
+
 OwnedAchievementRuntime::~OwnedAchievementRuntime() { shutdown(); }
 
 bool OwnedAchievementRuntime::registerAchievement(std::string key, std::string title, std::string description,

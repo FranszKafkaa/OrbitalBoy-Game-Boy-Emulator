@@ -37,6 +37,7 @@ public:
     [[nodiscard]] std::vector<RaHttpResponse> takeCompleted(RaHttpChannel channel);
     [[nodiscard]] bool acceptingRequests() const;
     void shutdown();
+    [[nodiscard]] gb::achievements::protocol::HttpTransport& ownedTransport() noexcept { return transport_; }
 
 private:
     gb::achievements::protocol::HttpCancellationFlag cancellationFlag_;

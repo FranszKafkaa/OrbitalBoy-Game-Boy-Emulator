@@ -19,6 +19,7 @@ class OwnedAchievementRuntime final : public AchievementRuntime {
 public:
     explicit OwnedAchievementRuntime(memory::MemoryReader reader);
     OwnedAchievementRuntime(memory::MemoryReader reader, OwnedAchievementApi& api);
+    OwnedAchievementRuntime(memory::MemoryReader reader, std::unique_ptr<OwnedAchievementApi> api);
     ~OwnedAchievementRuntime() override;
 
     bool registerAchievement(std::string key, std::string title, std::string description,
@@ -58,6 +59,7 @@ private:
     SessionSnapshot snapshot_{};
     bool shutdown_ = false;
     OwnedAchievementApi* api_ = nullptr;
+    std::unique_ptr<OwnedAchievementApi> apiOwner_;
 };
 
 } // namespace gb::achievements
