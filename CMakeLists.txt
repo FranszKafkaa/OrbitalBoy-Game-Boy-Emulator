@@ -428,6 +428,24 @@ if (BUILD_TESTING)
     endif()
     add_test(NAME gbachievements_memory_adapter_tests COMMAND gbachievements_memory_adapter_tests)
 
+    add_executable(gbcore_frame_observer_tests
+        tests/test_main.cpp
+        tests/core_frame_observer_tests.cpp
+        src/core/gba/system.cpp
+        src/core/gba/memory.cpp
+        src/core/gba/cpu.cpp
+        src/core/gba/ppu.cpp
+        src/core/gba/apu.cpp
+    )
+    target_include_directories(gbcore_frame_observer_tests PRIVATE include)
+    target_link_libraries(gbcore_frame_observer_tests PRIVATE gbcore)
+    if (MSVC)
+        target_compile_options(gbcore_frame_observer_tests PRIVATE /W4 /EHsc)
+    else()
+        target_compile_options(gbcore_frame_observer_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME gbcore_frame_observer_tests COMMAND gbcore_frame_observer_tests)
+
     add_executable(gbachievement_models_tests
         tests/test_main.cpp
         tests/achievements/runtime/achievement_models_tests.cpp
