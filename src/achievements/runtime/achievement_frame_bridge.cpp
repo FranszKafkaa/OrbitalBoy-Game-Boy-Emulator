@@ -10,6 +10,7 @@ AchievementFrameBridge::AchievementFrameBridge(memory::MemoryReader reader)
 bool AchievementFrameBridge::addAchievement(std::string key, parser::ConditionTrigger trigger) {
     if (key.empty()) return false;
     for (const auto& entry : entries_) if (entry.key == key) return false;
+    if (trigger.source.empty()) trigger.source = key;
     entries_.push_back({std::move(key), std::move(trigger), false});
     return true;
 }
