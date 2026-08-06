@@ -419,6 +419,7 @@ if (BUILD_TESTING)
         src/core/gba/cpu.cpp
         src/core/gba/ppu.cpp
         src/core/gba/apu.cpp
+        src/core/gba/mgba_core.cpp
     )
     target_include_directories(gbachievements_memory_adapter_tests PRIVATE include)
     target_link_libraries(gbachievements_memory_adapter_tests PRIVATE gbcore)
@@ -437,6 +438,7 @@ if (BUILD_TESTING)
         src/core/gba/cpu.cpp
         src/core/gba/ppu.cpp
         src/core/gba/apu.cpp
+        src/core/gba/mgba_core.cpp
     )
     target_include_directories(gbcore_frame_observer_tests PRIVATE include)
     target_link_libraries(gbcore_frame_observer_tests PRIVATE gbcore)
@@ -459,6 +461,7 @@ if (BUILD_TESTING)
         src/core/gba/cpu.cpp
         src/core/gba/ppu.cpp
         src/core/gba/apu.cpp
+        src/core/gba/mgba_core.cpp
     )
     target_include_directories(gbachievements_frame_attachment_tests PRIVATE include)
     target_link_libraries(gbachievements_frame_attachment_tests PRIVATE gbcore)
