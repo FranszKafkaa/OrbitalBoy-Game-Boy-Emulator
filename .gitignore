@@ -8,7 +8,7 @@
 *.o
 *.obj
 *.exe
-
+.superpowers
 # ROMs locais
 *.gb
 *.gbc
