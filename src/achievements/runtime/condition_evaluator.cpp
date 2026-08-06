@@ -20,9 +20,8 @@ bool isFloat(parser::MemorySize size) noexcept {
 }
 
 bool isAdvancedFlag(parser::ConditionFlag flag) noexcept {
-    return flag == parser::ConditionFlag::Measured
-        || flag == parser::ConditionFlag::MeasuredPercent || flag == parser::ConditionFlag::MeasuredIf
-        || flag == parser::ConditionFlag::Remember;
+    (void)flag;
+    return false;
 }
 
 std::uint32_t bcd(std::uint32_t value) noexcept {
@@ -56,7 +55,12 @@ public:
             return true;
         }
         if (operand.kind == parser::OperandKind::Recall) {
-            return fail(ConditionEvaluationStatus::Unsupported, operand.span, "recall is unsupported");
+            const auto remembered = std::find_if(owner_.measured_.begin(), owner_.measured_.end(),
+                [this](const auto& entry) { return entry.source == owner_.activeSource_ && entry.remembered; });
+            if (remembered == owner_.measured_.end()) return fail(ConditionEvaluationStatus::MemoryError, operand.span, "recall before remember");
+            output.value = remembered->value;
+            output.mask = std::numeric_limits<std::uint32_t>::max();
+            return true;
         }
         if (isFloat(operand.memory.size)) {
             return fail(ConditionEvaluationStatus::Unsupported, operand.span, "floating memory is unsupported");
@@ -120,6 +124,37 @@ public:
 
     bool unsupported(parser::SourceSpan span, const char* reason) {
         return fail(ConditionEvaluationStatus::Unsupported, span, reason);
+    }
+
+    bool remember(const parser::Operand& operand) {
+        OperandValue value;
+        if (!this->operand(operand, value)) return false;
+        auto state = std::find_if(owner_.measured_.begin(), owner_.measured_.end(),
+            [this](const auto& entry) { return entry.source == owner_.activeSource_; });
+        if (state == owner_.measured_.end()) {
+            owner_.measured_.push_back({owner_.activeSource_, value.value, std::nullopt, true});
+        } else {
+            state->value = value.value;
+            state->remembered = true;
+        }
+        return true;
+    }
+
+    bool measure(const parser::Operand& operand, std::optional<std::uint32_t> target, bool percent) {
+        OperandValue value;
+        if (!this->operand(operand, value)) return false;
+        auto state = std::find_if(owner_.measured_.begin(), owner_.measured_.end(),
+            [this](const auto& entry) { return entry.source == owner_.activeSource_; });
+        if (state == owner_.measured_.end()) {
+            owner_.measured_.push_back({owner_.activeSource_, value.value, std::nullopt, false});
+            state = std::prev(owner_.measured_.end());
+        } else state->value = value.value;
+        if (percent) {
+            if (!target.has_value() || *target == 0U) return unsupported(operand.span, "measured percent denominator is invalid");
+            const auto scaled = static_cast<std::uint64_t>(value.value) * 100U / *target;
+            state->percent = static_cast<std::uint32_t>(std::min<std::uint64_t>(100U, scaled));
+        }
+        return true;
     }
 
 private:
@@ -202,7 +237,7 @@ bool preflight(const parser::ConditionGroup& group, ConditionEvaluation& result)
             return false;
         }
         const auto unsupportedOperand = [&result, &condition](const parser::Operand& operand) {
-            if (operand.kind == parser::OperandKind::Recall || (operand.kind == parser::OperandKind::Memory && isFloat(operand.memory.size))) {
+            if (operand.kind == parser::OperandKind::Memory && isFloat(operand.memory.size)) {
                 result = {ConditionEvaluationStatus::Unsupported, condition.span, "operand is unsupported"};
                 return true;
             }
@@ -253,6 +288,7 @@ ConditionEvaluator::ConditionEvaluator(memory::MemoryReader reader)
     : reader_(std::move(reader)) {}
 
 ConditionEvaluation ConditionEvaluator::evaluate(const parser::ConditionTrigger& trigger) {
+    activeSource_ = trigger.source;
     ConditionEvaluation unsupported;
     if (!preflight(trigger.core, unsupported)) return unsupported;
     for (const auto& group : trigger.alt) if (!preflight(group, unsupported)) return unsupported;
@@ -269,6 +305,28 @@ ConditionEvaluation ConditionEvaluator::evaluate(const parser::ConditionTrigger&
         std::uint32_t hitContribution = 0U;
         bool hitSubtract = false;
         for (const auto& condition : group.conditions) {
+            if (condition.flag == parser::ConditionFlag::Remember) {
+                if (!frame.remember(condition.left)) return GroupEvaluation{false, false, false, frame.error().status};
+                continue;
+            }
+            if (condition.flag == parser::ConditionFlag::Measured) {
+                if (!frame.measure(condition.left, std::nullopt, false)) return GroupEvaluation{false, false, false, frame.error().status};
+                continue;
+            }
+            if (condition.flag == parser::ConditionFlag::MeasuredPercent) {
+                if (!condition.right || condition.right->kind != parser::OperandKind::Constant
+                    || !frame.measure(condition.left, condition.right->constant, true)) {
+                    if (frame.error().status == ConditionEvaluationStatus::Waiting) frame.unsupported(condition.span, "measured percent denominator is invalid");
+                    return GroupEvaluation{false, false, false, frame.error().status};
+                }
+                continue;
+            }
+            if (condition.flag == parser::ConditionFlag::MeasuredIf) {
+                bool conditionPasses = false;
+                if (!expression(frame, condition, conditionPasses, addressOffset, source)) return GroupEvaluation{false, false, false, frame.error().status};
+                if (conditionPasses && !frame.measure(condition.left, std::nullopt, false)) return GroupEvaluation{false, false, false, frame.error().status};
+                continue;
+            }
             if (condition.flag == parser::ConditionFlag::AddHits || condition.flag == parser::ConditionFlag::SubHits) {
                 OperandValue contribution;
                 if (!frame.operand(condition.left, contribution)) return GroupEvaluation{false, false, false, frame.error().status};
@@ -369,15 +427,23 @@ ConditionEvaluation ConditionEvaluator::evaluate(const parser::ConditionTrigger&
         }
     }
     frame.commit();
-    if (!core.passes) return {ConditionEvaluationStatus::Waiting, {}, {}};
-    if (!alternatePasses) return {ConditionEvaluationStatus::Waiting, {}, {}};
-    if (hasTrigger && !triggerPasses) return {ConditionEvaluationStatus::Primed, {}, {}};
-    return {ConditionEvaluationStatus::Triggered, {}, {}};
+    ConditionEvaluation result;
+    if (!core.passes || !alternatePasses) result.status = ConditionEvaluationStatus::Waiting;
+    else if (hasTrigger && !triggerPasses) result.status = ConditionEvaluationStatus::Primed;
+    else result.status = ConditionEvaluationStatus::Triggered;
+    const auto measured = std::find_if(measured_.begin(), measured_.end(), [this](const auto& entry) { return entry.source == activeSource_; });
+    if (measured != measured_.end()) {
+        result.measuredValue = measured->value;
+        result.measuredPercent = measured->percent;
+    }
+    return result;
 }
 
 void ConditionEvaluator::reset() noexcept {
     histories_.clear();
     hitCounts_.clear();
+    measured_.clear();
+    activeSource_.clear();
 }
 
 } // namespace gb::achievements::runtime

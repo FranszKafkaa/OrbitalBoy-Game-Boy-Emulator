@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,8 @@ struct ConditionEvaluation {
     ConditionEvaluationStatus status = ConditionEvaluationStatus::Waiting;
     std::optional<parser::SourceSpan> sourceSpan{};
     std::string reason{};
+    std::optional<std::uint32_t> measuredValue{};
+    std::optional<std::uint32_t> measuredPercent{};
 };
 
 class ConditionEvaluator {
@@ -50,9 +53,18 @@ private:
         std::uint32_t count = 0U;
     };
 
+    struct MeasuredState {
+        std::string source{};
+        std::uint32_t value = 0U;
+        std::optional<std::uint32_t> percent{};
+        bool remembered = false;
+    };
+
     memory::MemoryReader reader_;
     std::vector<MemoryHistory> histories_;
     std::vector<HitCount> hitCounts_;
+    std::vector<MeasuredState> measured_;
+    std::string activeSource_;
 };
 
 } // namespace gb::achievements::runtime

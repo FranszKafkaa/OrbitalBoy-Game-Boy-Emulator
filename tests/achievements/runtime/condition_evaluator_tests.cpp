@@ -257,7 +257,7 @@ TEST_CASE("achievements_condition_evaluator", "reports_checked_arithmetic_memory
     auto advancedCondition = memoryEquals(0U, 1U);
     advancedCondition.flag = gb::achievements::parser::ConditionFlag::Measured;
     advanced.core.conditions.push_back(advancedCondition);
-    T_REQUIRE(evaluator.evaluate(advanced).status == ConditionEvaluationStatus::Unsupported);
+    T_REQUIRE(evaluator.evaluate(advanced).status == ConditionEvaluationStatus::Triggered);
 }
 
 TEST_CASE("achievements_condition_evaluator", "updates_alternate_state_and_honors_alternate_reset_when_core_fails") {
@@ -305,13 +305,78 @@ TEST_CASE("achievements_condition_evaluator", "combines_sources_and_indirect_add
     T_REQUIRE(evaluator.evaluate(indirect).status == ConditionEvaluationStatus::Triggered);
 }
 
-TEST_CASE("achievements_condition_evaluator", "rejects_unimplemented_chain_and_hit_combinations") {
+TEST_CASE("achievements_condition_evaluator", "measured_reports_value_without_blocking") {
     TestMemory memory{{1U}};
     ConditionTrigger trigger;
     auto condition = memoryEquals(0U, 1U);
     condition.flag = gb::achievements::parser::ConditionFlag::Measured;
     trigger.core.conditions.push_back(condition);
-    T_REQUIRE(ConditionEvaluator(memory.reader()).evaluate(trigger).status == ConditionEvaluationStatus::Unsupported);
+    const auto result = ConditionEvaluator(memory.reader()).evaluate(trigger);
+    T_REQUIRE(result.status == ConditionEvaluationStatus::Triggered);
+    T_REQUIRE(result.measuredValue.has_value() && *result.measuredValue == 1U);
+}
+
+TEST_CASE("achievements_condition_evaluator", "remember_recall_persists_and_reset_clears") {
+    TestMemory memory{{7U}};
+    ConditionEvaluator evaluator(memory.reader());
+    ConditionTrigger trigger;
+    auto remember = memoryEquals(0U, 0U);
+    remember.flag = gb::achievements::parser::ConditionFlag::Remember;
+    remember.op = Operator::None;
+    remember.right.reset();
+    trigger.core.conditions.push_back(remember);
+    auto recall = constantCondition(7U, Operator::Equal, 7U);
+    recall.left.kind = gb::achievements::parser::OperandKind::Recall;
+    trigger.core.conditions.push_back(recall);
+    T_REQUIRE(evaluator.evaluate(trigger).status == ConditionEvaluationStatus::Triggered);
+    evaluator.reset();
+    ConditionTrigger recallOnly;
+    recallOnly.core.conditions.push_back(recall);
+    T_REQUIRE(evaluator.evaluate(recallOnly).status == ConditionEvaluationStatus::MemoryError);
+}
+
+TEST_CASE("achievements_condition_evaluator", "recall_before_remember_is_safe_error") {
+    TestMemory memory{{1U}};
+    ConditionEvaluator evaluator(memory.reader());
+    ConditionTrigger trigger;
+    auto recall = constantCondition(1U, Operator::Equal, 0U);
+    recall.left.kind = gb::achievements::parser::OperandKind::Recall;
+    trigger.core.conditions.push_back(recall);
+    T_REQUIRE(evaluator.evaluate(trigger).status == ConditionEvaluationStatus::MemoryError);
+}
+
+TEST_CASE("achievements_condition_evaluator", "measured_percent_clamps_and_rejects_zero_range") {
+    TestMemory memory{{0U}};
+    ConditionEvaluator evaluator(memory.reader());
+    ConditionTrigger trigger;
+    auto measured = constantCondition(150U, Operator::None, 0U);
+    measured.flag = gb::achievements::parser::ConditionFlag::MeasuredPercent;
+    measured.right = gb::achievements::parser::Operand{};
+    measured.right->kind = gb::achievements::parser::OperandKind::Constant;
+    measured.right->constant = 100U;
+    trigger.core.conditions.push_back(measured);
+    auto result = evaluator.evaluate(trigger);
+    T_REQUIRE(result.status == ConditionEvaluationStatus::Triggered);
+    T_REQUIRE(result.measuredPercent.has_value() && *result.measuredPercent == 100U);
+    measured.right->constant = 0U;
+    trigger.core.conditions[0] = measured;
+    T_REQUIRE(evaluator.evaluate(trigger).status == ConditionEvaluationStatus::Unsupported);
+}
+
+TEST_CASE("achievements_condition_evaluator", "measured_if_updates_only_when_condition_passes") {
+    TestMemory memory{{2U}};
+    ConditionEvaluator evaluator(memory.reader());
+    ConditionTrigger trigger;
+    auto measuredIf = memoryEquals(0U, 2U);
+    measuredIf.flag = gb::achievements::parser::ConditionFlag::MeasuredIf;
+    trigger.core.conditions.push_back(measuredIf);
+    auto result = evaluator.evaluate(trigger);
+    T_REQUIRE(result.measuredValue.has_value() && *result.measuredValue == 2U);
+    memory.bytes[0] = 1U;
+    measuredIf.right->constant = 2U;
+    trigger.core.conditions[0] = measuredIf;
+    result = evaluator.evaluate(trigger);
+    T_REQUIRE(result.measuredValue.has_value() && *result.measuredValue == 2U);
 }
 
 TEST_CASE("achievements_condition_evaluator", "chains_and_next_or_next_truth") {
