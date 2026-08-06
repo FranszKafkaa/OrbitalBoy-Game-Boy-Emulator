@@ -406,6 +406,28 @@ if (BUILD_TESTING)
     endif()
     add_test(NAME gbachievements_frame_bridge_tests COMMAND gbachievements_frame_bridge_tests)
 
+    add_executable(gbachievements_memory_adapter_tests
+        tests/test_main.cpp
+        tests/achievements/adapters/memory_adapters_tests.cpp
+        tests/achievements/runtime/achievement_frame_clock_tests.cpp
+        src/achievements/adapters/memory_adapters.cpp
+        src/achievements/runtime/achievement_frame_bridge.cpp
+        src/achievements/runtime/condition_evaluator.cpp
+        src/core/gba/system.cpp
+        src/core/gba/memory.cpp
+        src/core/gba/cpu.cpp
+        src/core/gba/ppu.cpp
+        src/core/gba/apu.cpp
+    )
+    target_include_directories(gbachievements_memory_adapter_tests PRIVATE include)
+    target_link_libraries(gbachievements_memory_adapter_tests PRIVATE gbcore)
+    if (MSVC)
+        target_compile_options(gbachievements_memory_adapter_tests PRIVATE /W4 /EHsc)
+    else()
+        target_compile_options(gbachievements_memory_adapter_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME gbachievements_memory_adapter_tests COMMAND gbachievements_memory_adapter_tests)
+
     add_executable(gbachievement_models_tests
         tests/test_main.cpp
         tests/achievements/runtime/achievement_models_tests.cpp
