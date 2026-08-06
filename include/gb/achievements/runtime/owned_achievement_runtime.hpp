@@ -13,9 +13,12 @@ namespace gb { class GameBoy; namespace gba { class System; class MgbaCore; } }
 
 namespace gb::achievements {
 
+class OwnedAchievementApi;
+
 class OwnedAchievementRuntime final : public AchievementRuntime {
 public:
     explicit OwnedAchievementRuntime(memory::MemoryReader reader);
+    OwnedAchievementRuntime(memory::MemoryReader reader, OwnedAchievementApi& api);
     ~OwnedAchievementRuntime() override;
 
     bool registerAchievement(std::string key, std::string title, std::string description,
@@ -54,6 +57,7 @@ private:
     std::vector<UiEvent> events_;
     SessionSnapshot snapshot_{};
     bool shutdown_ = false;
+    OwnedAchievementApi* api_ = nullptr;
 };
 
 } // namespace gb::achievements

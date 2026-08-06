@@ -1,6 +1,8 @@
 #include <array>
 
 #include "gb/achievements/runtime/owned_achievement_runtime.hpp"
+#include "gb/achievements/runtime/owned_achievement_api.hpp"
+#include "gb/achievements/protocol/http_transport.hpp"
 
 #include "../../test_framework.hpp"
 
@@ -61,6 +63,37 @@ TEST_CASE("owned_achievement_runtime", "login_logout_and_load_game_preserve_sess
     runtime.processPending();
     T_REQUIRE(runtime.snapshot().connectionState == ConnectionState::LoggedOut);
     T_REQUIRE(runtime.shutdown());
+}
+
+TEST_CASE("owned_achievement_runtime", "owned_api_parses_tolerant_login_response") {
+    bool sawSecretWipe = false;
+    protocol::HttpTransport transport(
+        [](const auto& request) {
+            return protocol::HttpResponse{request.id, request.channel, 200L,
+                std::vector<std::uint8_t>{'{','"','u','s','e','r','n','a','m','e','"',':','"','u','"',',','"','d','i','s','p','l','a','y','_','n','a','m','e','"',':','"','U','s','e','r','"',',','"','s','c','o','r','e','H','a','r','d','c','o','r','e','"',':','4','2','}'}, {}};
+        },
+        [&sawSecretWipe](const std::uint8_t*, std::size_t) { sawSecretWipe = true; }
+    );
+    OwnedAchievementApi api(transport, "https://example.test");
+    SecretString token;
+    token.assign("secret");
+    const auto result = api.loginToken("u", std::move(token));
+    T_REQUIRE(result.ok);
+    T_EQ(result.user.displayName, std::string("User"));
+    T_EQ(result.user.scoreHardcore, 42U);
+    T_REQUIRE(sawSecretWipe);
+    transport.shutdown();
+}
+
+TEST_CASE("owned_achievement_runtime", "owned_api_rejects_malformed_and_http_error") {
+    protocol::HttpTransport transport([](const auto& request) {
+        return protocol::HttpResponse{request.id, request.channel, 500L, {}, "server"};
+    });
+    OwnedAchievementApi api(transport, "https://example.test");
+    SecretString token;
+    token.assign("secret");
+    T_REQUIRE(!api.loginToken("u", std::move(token)).ok);
+    transport.shutdown();
 }
 
 } // namespace

@@ -7,6 +7,7 @@
 #include "gb/core/gameboy.hpp"
 #include "gb/core/gba/mgba_core.hpp"
 #include "gb/core/gba/system.hpp"
+#include "gb/achievements/runtime/owned_achievement_api.hpp"
 
 namespace gb::achievements {
 
@@ -15,6 +16,9 @@ OwnedAchievementRuntime::OwnedAchievementRuntime(memory::MemoryReader reader)
     snapshot_.connectionState = ConnectionState::LoggedOut;
     bridge_.setEventCallback([this](const auto& event) { handleFrameEvent(event); });
 }
+
+OwnedAchievementRuntime::OwnedAchievementRuntime(memory::MemoryReader reader, OwnedAchievementApi& api)
+    : OwnedAchievementRuntime(std::move(reader)) { api_ = &api; }
 
 OwnedAchievementRuntime::~OwnedAchievementRuntime() { shutdown(); }
 
@@ -53,6 +57,21 @@ void OwnedAchievementRuntime::processPending() {
             continue;
         }
         if (command.kind == CommandKind::Login || command.kind == CommandKind::TokenLogin) {
+            if (api_ != nullptr) {
+                const auto result = command.kind == CommandKind::TokenLogin
+                    ? api_->loginToken(command.username, std::move(command.secret))
+                    : api_->loginPassword(command.username, std::move(command.secret));
+                if (!result.ok) {
+                    snapshot_.connectionState = ConnectionState::Error;
+                    snapshot_.errorText = result.error;
+                } else {
+                    snapshot_.connectionState = ConnectionState::Online;
+                    snapshot_.profile.user = result.user;
+                    snapshot_.currentGame = result.game;
+                    snapshot_.errorText.clear();
+                }
+                continue;
+            }
             if (command.username.empty() || command.secret.empty()) {
                 snapshot_.connectionState = ConnectionState::Error;
                 snapshot_.errorText = "credentials missing";
