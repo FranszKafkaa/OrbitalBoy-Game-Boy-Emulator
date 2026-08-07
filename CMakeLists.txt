@@ -215,34 +215,35 @@ endif()
 if (GBEMU_ENABLE_RETROACHIEVEMENTS)
     enable_language(C)
     find_package(CURL REQUIRED)
-    add_subdirectory(third_party/rcheevos EXCLUDE_FROM_ALL)
     target_sources(gbfrontend_support PRIVATE
         src/achievements/adapters/rcheevos/achievement_runtime_factory.cpp
-        src/achievements/adapters/rcheevos/rcheevos_achievement_runtime.cpp
         src/achievements/adapters/curl/curl_http_executor.cpp
         src/app/frontend/realtime/retroachievements_http.cpp
         src/app/frontend/realtime/retroachievements_image_cache.cpp
         src/app/frontend/realtime/retroachievements_lifecycle.cpp
         src/app/frontend/realtime/retroachievements_progress.cpp
-        src/app/frontend/realtime/retroachievements_session.cpp
         src/app/frontend/realtime/retroachievements_ui.cpp
     )
-    target_include_directories(gbfrontend_support PRIVATE third_party/rcheevos/src)
-    target_link_libraries(gbfrontend_support PUBLIC rcheevos CURL::libcurl)
+    target_link_libraries(gbfrontend_support PUBLIC CURL::libcurl)
     if (WIN32)
         target_link_libraries(gbfrontend_support PRIVATE bcrypt)
     endif()
-    target_compile_definitions(gbfrontend_support PUBLIC
-        GBEMU_ENABLE_RETROACHIEVEMENTS=1
-        RC_CLIENT_SUPPORTS_HASH=1
-    )
+    target_compile_definitions(gbfrontend_support PUBLIC GBEMU_ENABLE_RETROACHIEVEMENTS=1)
     if (GBEMU_ENABLE_LEGACY_RETROACHIEVEMENTS)
+        add_subdirectory(third_party/rcheevos EXCLUDE_FROM_ALL)
+        target_sources(gbfrontend_support PRIVATE
+            src/achievements/adapters/rcheevos/rcheevos_achievement_runtime.cpp
+            src/app/frontend/realtime/retroachievements_session.cpp
+        )
+        target_include_directories(gbfrontend_support PRIVATE third_party/rcheevos/src)
+        target_link_libraries(gbfrontend_support PUBLIC rcheevos)
         target_compile_definitions(gbfrontend_support PUBLIC GBEMU_ENABLE_LEGACY_RETROACHIEVEMENTS=1)
+        target_compile_definitions(gbfrontend_support PUBLIC RC_CLIENT_SUPPORTS_HASH=1)
+        list(APPEND GBEMU_TEST_SOURCES
+            tests/retroachievements_tests.cpp
+            tests/achievements/protocol/legacy_ra_http_forward_declaration_tests.cpp
+        )
     endif()
-    list(APPEND GBEMU_TEST_SOURCES
-        tests/retroachievements_tests.cpp
-        tests/achievements/protocol/legacy_ra_http_forward_declaration_tests.cpp
-    )
 endif()
 
 add_executable(gbemu ${GBEMU_APP_SOURCES})

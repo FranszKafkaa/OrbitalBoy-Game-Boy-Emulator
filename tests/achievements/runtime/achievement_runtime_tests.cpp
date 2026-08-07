@@ -4,8 +4,10 @@
 #include <vector>
 
 #include "gb/achievements/runtime/achievement_runtime.hpp"
-#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+#if defined(GBEMU_ENABLE_RETROACHIEVEMENTS) && defined(GBEMU_ENABLE_LEGACY_RETROACHIEVEMENTS)
 #include "gb/achievements/adapters/rcheevos/rcheevos_achievement_runtime.hpp"
+#endif
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
 #include "gb/achievements/runtime/achievement_runtime_factory.hpp"
 #include "gb/app/frontend/realtime/retroachievements_http.hpp"
 #include "gb/core/gameboy.hpp"
@@ -135,6 +137,7 @@ TEST_CASE("achievements_runtime", "default_factory_returns_runtime_for_gameboy")
     transport.shutdown();
 }
 
+#ifdef GBEMU_ENABLE_LEGACY_RETROACHIEVEMENTS
 TEST_CASE("achievements_runtime", "factory_uses_legacy_runtime_when_requested") {
     tests::ScopedEnvironmentVariable legacy("GBEMU_USE_LEGACY_RETROACHIEVEMENTS", "1");
     tests::ScopedEnvironmentVariable endpoint("GBEMU_OWNED_ACHIEVEMENTS_ENDPOINT", nullptr);
@@ -149,6 +152,7 @@ TEST_CASE("achievements_runtime", "factory_uses_legacy_runtime_when_requested") 
     T_REQUIRE(runtime->shutdown());
     transport.shutdown();
 }
+#endif
 
 TEST_CASE("achievements_runtime", "default_factory_accepts_generic_memory_reader_for_gba") {
     auto transport = makeTransport();
