@@ -26,6 +26,8 @@ option(GBEMU_ENABLE_GBA "Build native mGBA runtime support" ON)
 option(GBEMU_BUILD_EXPERIMENTAL_GBA "Build the in-house experimental GBA core and tests" OFF)
 option(GBEMU_ENABLE_RETROACHIEVEMENTS "Build RetroAchievements support for GB/GBC/GBA" ON)
 set(RCHEEVOS_ROOT "" CACHE PATH "Root directory of an external rcheevos installation")
+option(GBEMU_FETCH_RCHEEVOS "Download rcheevos automatically into the build directory when no external installation is supplied" ON)
+set(GBEMU_RCHEEVOS_VERSION "11.2.0" CACHE STRING "Pinned rcheevos release used by FetchContent")
 
 if (GBEMU_ENABLE_GBA)
     find_path(MGBA_INCLUDE_DIR mgba/core/core.h)
@@ -194,17 +196,35 @@ if (GBEMU_ENABLE_RETROACHIEVEMENTS)
             "${RCHEEVOS_ROOT}/lib"
             "${RCHEEVOS_ROOT}/lib64"
     )
-    if (NOT RCHEEVOS_INCLUDE_DIR OR NOT RCHEEVOS_LIBRARY)
-        message(FATAL_ERROR
-            "GBEMU_ENABLE_RETROACHIEVEMENTS=ON requires an external rcheevos installation. "
-            "Set -DRCHEEVOS_ROOT=/path/to/rcheevos (containing include/rc_client.h and lib/librcheevos), "
-            "or disable with -DGBEMU_ENABLE_RETROACHIEVEMENTS=OFF.")
+    if ((NOT RCHEEVOS_INCLUDE_DIR OR NOT RCHEEVOS_LIBRARY) AND GBEMU_FETCH_RCHEEVOS AND NOT RCHEEVOS_ROOT)
+        include(FetchContent)
+        FetchContent_Declare(
+            rcheevos
+            GIT_REPOSITORY https://github.com/RetroAchievements/rcheevos.git
+            GIT_TAG ${GBEMU_RCHEEVOS_VERSION}
+            GIT_SHALLOW TRUE
+        )
+        FetchContent_MakeAvailable(rcheevos)
+        if (TARGET rcheevos)
+            set(RCHEEVOS_LINK_TARGET rcheevos)
+        elseif (TARGET rcheevos_static)
+            set(RCHEEVOS_LINK_TARGET rcheevos_static)
+        endif()
     endif()
-    add_library(rcheevos_external UNKNOWN IMPORTED)
-    set_target_properties(rcheevos_external PROPERTIES
-        IMPORTED_LOCATION "${RCHEEVOS_LIBRARY}"
-        INTERFACE_INCLUDE_DIRECTORIES "${RCHEEVOS_INCLUDE_DIR}"
-    )
+    if (NOT RCHEEVOS_LINK_TARGET AND (NOT RCHEEVOS_INCLUDE_DIR OR NOT RCHEEVOS_LIBRARY))
+        message(FATAL_ERROR
+            "Unable to find rcheevos. Install it externally with -DRCHEEVOS_ROOT=/path, "
+            "or allow the automatic download with -DGBEMU_FETCH_RCHEEVOS=ON. "
+            "Disable RA only with -DGBEMU_ENABLE_RETROACHIEVEMENTS=OFF.")
+    endif()
+    if (NOT RCHEEVOS_LINK_TARGET)
+        add_library(rcheevos_external UNKNOWN IMPORTED)
+        set_target_properties(rcheevos_external PROPERTIES
+            IMPORTED_LOCATION "${RCHEEVOS_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${RCHEEVOS_INCLUDE_DIR}"
+        )
+        set(RCHEEVOS_LINK_TARGET rcheevos_external)
+    endif()
     target_sources(gbfrontend_support PRIVATE
         src/app/frontend/realtime/retroachievements_http.cpp
         src/app/frontend/realtime/retroachievements_image_cache.cpp
@@ -213,7 +233,7 @@ if (GBEMU_ENABLE_RETROACHIEVEMENTS)
         src/app/frontend/realtime/retroachievements_session.cpp
         src/app/frontend/realtime/retroachievements_ui.cpp
     )
-    target_link_libraries(gbfrontend_support PUBLIC rcheevos_external CURL::libcurl)
+    target_link_libraries(gbfrontend_support PUBLIC ${RCHEEVOS_LINK_TARGET} CURL::libcurl)
     if (WIN32)
         target_link_libraries(gbfrontend_support PRIVATE bcrypt)
     endif()
