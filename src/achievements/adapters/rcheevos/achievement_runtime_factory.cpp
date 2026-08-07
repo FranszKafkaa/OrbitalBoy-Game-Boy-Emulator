@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "gb/achievements/adapters/gameboy_memory_reader.hpp"
+#include "gb/achievements/adapters/rcheevos/rcheevos_achievement_runtime.hpp"
 #include "gb/achievements/runtime/owned_achievement_runtime.hpp"
 #include "gb/achievements/runtime/owned_achievement_api.hpp"
 #include "gb/app/frontend/realtime/retroachievements_config.hpp"
@@ -17,12 +18,19 @@ std::string ownedApiEndpoint() {
     const char* value = std::getenv("GBEMU_OWNED_ACHIEVEMENTS_ENDPOINT");
     return value == nullptr ? std::string{} : std::string(value);
 }
+
+bool legacyRequested() {
+    const char* value = std::getenv("GBEMU_USE_LEGACY_RETROACHIEVEMENTS");
+    return value != nullptr && std::string(value) == "1";
+}
 }
 
 std::unique_ptr<AchievementRuntime> makeDefaultAchievementRuntime(
     gb::GameBoy& gameBoy,
     gb::frontend::RaHttpTransport& transport
 ) {
+    // Optional legacy path restores Fire Emblem identification; owned remains the default.
+    if (legacyRequested()) return std::make_unique<RcheevosAchievementRuntime>(gameBoy, transport);
     (void)transport;
     const auto endpoint = ownedApiEndpoint();
     std::unique_ptr<OwnedAchievementRuntime> runtime;
@@ -38,6 +46,7 @@ std::unique_ptr<AchievementRuntime> makeDefaultAchievementRuntime(
     gb::frontend::RaConfig config,
     RaConfigPersistence persistConfig
 ) {
+    if (legacyRequested()) return std::make_unique<RcheevosAchievementRuntime>(gameBoy, transport, std::move(config), std::move(persistConfig));
     (void)transport;
     (void)config;
     (void)persistConfig;
@@ -54,6 +63,7 @@ std::unique_ptr<AchievementRuntime> makeDefaultAchievementRuntime(
     std::uint32_t defaultConsoleId,
     gb::frontend::RaHttpTransport& transport
 ) {
+    if (legacyRequested()) return std::make_unique<RcheevosAchievementRuntime>(std::move(memoryReader), defaultConsoleId, transport);
     (void)defaultConsoleId;
     (void)transport;
     memory::MemoryReader reader = [memoryReader = std::move(memoryReader)](std::uint32_t address, std::uint8_t* buffer, std::size_t count) {
@@ -73,6 +83,7 @@ std::unique_ptr<AchievementRuntime> makeDefaultAchievementRuntime(
     gb::frontend::RaConfig config,
     RaConfigPersistence persistConfig
 ) {
+    if (legacyRequested()) return std::make_unique<RcheevosAchievementRuntime>(std::move(memoryReader), defaultConsoleId, transport, std::move(config), std::move(persistConfig));
     (void)config;
     (void)persistConfig;
     return makeDefaultAchievementRuntime(std::move(memoryReader), defaultConsoleId, transport);

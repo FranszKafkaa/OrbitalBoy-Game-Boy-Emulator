@@ -5,6 +5,7 @@
 
 #include "gb/achievements/runtime/achievement_runtime.hpp"
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+#include "gb/achievements/adapters/rcheevos/rcheevos_achievement_runtime.hpp"
 #include "gb/achievements/runtime/achievement_runtime_factory.hpp"
 #include "gb/app/frontend/realtime/retroachievements_http.hpp"
 #include "gb/core/gameboy.hpp"
@@ -130,6 +131,21 @@ TEST_CASE("achievements_runtime", "default_factory_returns_runtime_for_gameboy")
     runtime->processPending();
     runtime->idle();
     T_REQUIRE(runtime->takeEvents().empty());
+    T_REQUIRE(runtime->shutdown());
+    transport.shutdown();
+}
+
+TEST_CASE("achievements_runtime", "factory_uses_legacy_runtime_when_requested") {
+    tests::ScopedEnvironmentVariable legacy("GBEMU_USE_LEGACY_RETROACHIEVEMENTS", "1");
+    tests::ScopedEnvironmentVariable endpoint("GBEMU_OWNED_ACHIEVEMENTS_ENDPOINT", nullptr);
+    gb::GameBoy gameBoy;
+    auto transport = makeTransport();
+
+    auto runtime = gb::achievements::makeDefaultAchievementRuntime(gameBoy, transport);
+
+    T_REQUIRE(runtime != nullptr);
+    T_REQUIRE(dynamic_cast<gb::achievements::RcheevosAchievementRuntime*>(runtime.get()) != nullptr);
+    T_REQUIRE(runtime->snapshot().connectionState == gb::achievements::ConnectionState::LoggedOut);
     T_REQUIRE(runtime->shutdown());
     transport.shutdown();
 }
