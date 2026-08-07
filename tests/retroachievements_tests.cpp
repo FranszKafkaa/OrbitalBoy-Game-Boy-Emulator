@@ -5177,6 +5177,27 @@ TEST_CASE("retroachievements", "http_user_agent_identifies_platform_and_rcheevos
     T_EQ(std::string(gb::frontend::retroAchievementsUserAgent()), std::string(expected));
 }
 
+TEST_CASE("retroachievements", "http_legacy_names_keep_canonical_values_and_transport_wrapper") {
+    T_REQUIRE((std::is_same_v<
+        gb::frontend::RaHttpRequest,
+        gb::achievements::protocol::HttpRequest
+    >));
+    T_REQUIRE((std::is_same_v<
+        gb::frontend::RaHttpResponse,
+        gb::achievements::protocol::HttpResponse
+    >));
+    T_REQUIRE((!std::is_same_v<
+        gb::frontend::RaHttpTransport,
+        gb::achievements::protocol::HttpTransport
+    >));
+    const gb::frontend::RaHttpRequest request{
+        1U, gb::frontend::RaHttpChannel::Image, "https://example.invalid/image", {}
+    };
+    const auto policy = gb::frontend::makeRaHttpRequestPolicy(request);
+    T_REQUIRE(policy.redirectProtocols == gb::frontend::RaHttpRedirectProtocols::HttpsOnly);
+    T_EQ(gb::frontend::kRaHttpRequestTimeout.count(), 15000L);
+}
+
 TEST_CASE("retroachievements", "committed_frame_restores_after_identification_before_do_frame") {
     gb::frontend::RaDeferredProgressRestore deferred;
     deferred.stage(gb::frontend::RaStoredProgress{

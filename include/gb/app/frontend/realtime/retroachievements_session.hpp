@@ -11,6 +11,7 @@
 #include "rc_client.h"
 
 #include "gb/app/frontend/realtime/retroachievements_config.hpp"
+#include "gb/app/frontend/realtime/retroachievements_http.hpp"
 #include "gb/app/frontend/realtime/retroachievements_models.hpp"
 #include "gb/app/frontend/realtime/secure_string.hpp"
 
@@ -19,8 +20,6 @@ class GameBoy;
 }
 
 namespace gb::frontend {
-
-class RaHttpTransport;
 
 class RaClientApi {
 public:

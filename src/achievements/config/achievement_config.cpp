@@ -1,7 +1,4 @@
-#include "gb/app/frontend/realtime/retroachievements_config.hpp"
-
-#include "gb/app/frontend/realtime/private_file_io.hpp"
-#include "gb/app/frontend/realtime/secure_string.hpp"
+#include "gb/achievements/config/achievement_config.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -14,7 +11,7 @@
 #include <system_error>
 #include <utility>
 
-namespace gb::frontend {
+namespace gb::achievements {
 namespace {
 
 constexpr std::size_t kMaxStoredValueBytes = 4U * 1024U;
@@ -23,7 +20,7 @@ constexpr int kQuarantineAttempts = 32;
 
 void wipeString(
     std::string& value,
-    const RaConfigWipeObserver& observer = {}
+    const AchievementConfigWipeObserver& observer = {}
 ) {
     (void)secureEraseStringStorage(value, observer);
 }
@@ -53,7 +50,7 @@ void appendEscapedValue(std::string& destination, std::string_view value) {
 bool unescapeValueInto(
     std::string_view value,
     std::string& destination,
-    const RaConfigWipeObserver& observer
+    const AchievementConfigWipeObserver& observer
 ) {
     wipeString(destination, observer);
     destination.reserve(value.size());
@@ -100,7 +97,7 @@ std::optional<bool> parseBoolean(std::string_view value) {
     return std::nullopt;
 }
 
-std::string serializeConfig(const RaConfig& config) {
+std::string serializeConfig(const AchievementConfig& config) {
     std::string serialized;
     serialized.reserve(config.username.size() + config.token.size() + 96U);
     serialized += "version=1\nusername=";
@@ -129,7 +126,7 @@ bool quarantineConfig(
     const std::filesystem::path& source,
     bool sensitive
 ) {
-    if (sensitive && !detail::makeFileOwnerPrivate(source)) {
+    if (sensitive && !storage::makeFileOwnerPrivate(source)) {
         return false;
     }
     for (int attempt = 0; attempt < kQuarantineAttempts; ++attempt) {
@@ -139,7 +136,7 @@ bool quarantineConfig(
             continue;
         }
         bool entryChanged = false;
-        if (detail::renameFileDurably(
+        if (storage::renameFileDurably(
                 source,
                 quarantine,
                 &entryChanged
@@ -155,13 +152,13 @@ bool quarantineConfig(
 
 } // namespace
 
-RaConfig::RaConfig(
+AchievementConfig::AchievementConfig(
     int versionValue,
     std::string_view usernameValue,
     std::string_view tokenValue,
     bool autoLoginValue,
     bool showNotificationsValue,
-    RaConfigWipeObserver wipeObserver
+    AchievementConfigWipeObserver wipeObserver
 )
     : version(versionValue),
       username(usernameValue),
@@ -173,11 +170,11 @@ RaConfig::RaConfig(
     }
 }
 
-RaConfig::~RaConfig() {
+AchievementConfig::~AchievementConfig() {
     clearToken();
 }
 
-RaConfig::RaConfig(const RaConfig& other)
+AchievementConfig::AchievementConfig(const AchievementConfig& other)
     : version(other.version),
       username(other.username),
       autoLogin(other.autoLogin),
@@ -188,7 +185,7 @@ RaConfig::RaConfig(const RaConfig& other)
     }
 }
 
-RaConfig& RaConfig::operator=(const RaConfig& other) {
+AchievementConfig& AchievementConfig::operator=(const AchievementConfig& other) {
     if (this != &other) {
         clearToken();
         version = other.version;
@@ -203,7 +200,7 @@ RaConfig& RaConfig::operator=(const RaConfig& other) {
     return *this;
 }
 
-RaConfig::RaConfig(RaConfig&& other)
+AchievementConfig::AchievementConfig(AchievementConfig&& other)
     : version(other.version),
       username(std::move(other.username)),
       autoLogin(other.autoLogin),
@@ -215,7 +212,7 @@ RaConfig::RaConfig(RaConfig&& other)
     other.clearToken();
 }
 
-RaConfig& RaConfig::operator=(RaConfig&& other) {
+AchievementConfig& AchievementConfig::operator=(AchievementConfig&& other) {
     if (this != &other) {
         clearToken();
         version = other.version;
@@ -231,30 +228,30 @@ RaConfig& RaConfig::operator=(RaConfig&& other) {
     return *this;
 }
 
-void RaConfig::assignToken(std::string_view value) {
+void AchievementConfig::assignToken(std::string_view value) {
     clearToken();
     if (!value.empty()) {
         token.assign(value.data(), value.size());
     }
 }
 
-void RaConfig::assignTokenAndErase(std::string& source) {
+void AchievementConfig::assignTokenAndErase(std::string& source) {
     assignToken(std::string_view(source.data(), source.size()));
     wipeString(source, wipeObserver_);
 }
 
-void RaConfig::transferTokenTo(RaSecretString& destination) {
+void AchievementConfig::transferTokenTo(SecretString& destination) {
     destination.assign(std::string_view(token.data(), token.size()));
     clearToken();
 }
 
-void RaConfig::clearToken() {
+void AchievementConfig::clearToken() {
     wipeString(token, wipeObserver_);
 }
 
-RaConfig loadRetroAchievementsConfig(
+AchievementConfig loadAchievementConfig(
     const std::string& path,
-    RaConfigWipeObserver wipeObserver
+    AchievementConfigWipeObserver wipeObserver
 ) {
     std::ifstream in(path, std::ios::binary | std::ios::ate);
     if (!in) {
@@ -270,7 +267,7 @@ RaConfig loadRetroAchievementsConfig(
         return {};
     }
 
-    RaConfig config{1, {}, {}, true, true, wipeObserver};
+    AchievementConfig config{1, {}, {}, true, true, wipeObserver};
     bool hasValidVersion = false;
     std::string line;
     while (std::getline(in, line)) {
@@ -334,10 +331,10 @@ RaConfig loadRetroAchievementsConfig(
     return config;
 }
 
-bool saveRetroAchievementsConfigWithHooks(
+bool saveAchievementConfigWithHooks(
     const std::string& path,
-    const RaConfig& config,
-    const detail::PrivateFileIoHooks* hooks
+    const AchievementConfig& config,
+    const storage::PrivateFileIoHooks* hooks
 ) {
     if (path.empty() || config.version != 1
         || !isSafeStoredValue(config.username)
@@ -349,7 +346,7 @@ bool saveRetroAchievementsConfigWithHooks(
         wipeString(serialized);
         return false;
     }
-    const bool saved = detail::writePrivateFileAtomically(
+    const bool saved = storage::writePrivateFileAtomically(
         std::filesystem::path(path),
         std::string_view(serialized),
         hooks
@@ -358,17 +355,17 @@ bool saveRetroAchievementsConfigWithHooks(
     return saved;
 }
 
-bool saveRetroAchievementsConfig(
+bool saveAchievementConfig(
     const std::string& path,
-    const RaConfig& config
+    const AchievementConfig& config
 ) {
-    return saveRetroAchievementsConfigWithHooks(path, config, nullptr);
+    return saveAchievementConfigWithHooks(path, config, nullptr);
 }
 
-bool invalidateRetroAchievementsConfig(
+bool invalidateAchievementConfig(
     const std::string& path,
     bool* quarantinedSensitiveData,
-    const detail::PrivateFileIoHooks* hooks
+    const storage::PrivateFileIoHooks* hooks
 ) {
     if (quarantinedSensitiveData) {
         *quarantinedSensitiveData = false;
@@ -389,10 +386,10 @@ bool invalidateRetroAchievementsConfig(
         return false;
     }
 
-    const RaConfig emptyConfig{1, {}, {}, false, true};
-    if (saveRetroAchievementsConfigWithHooks(path, emptyConfig, hooks)) {
+    const AchievementConfig emptyConfig{1, {}, {}, false, true};
+    if (saveAchievementConfigWithHooks(path, emptyConfig, hooks)) {
         bool entryChanged = false;
-        if (detail::removeFileDurably(source, &entryChanged, hooks)) {
+        if (storage::removeFileDurably(source, &entryChanged, hooks)) {
             return true;
         }
         if (entryChanged) {
@@ -410,4 +407,4 @@ bool invalidateRetroAchievementsConfig(
     return true;
 }
 
-} // namespace gb::frontend
+} // namespace gb::achievements

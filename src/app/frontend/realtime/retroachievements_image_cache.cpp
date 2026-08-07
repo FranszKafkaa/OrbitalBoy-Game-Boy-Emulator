@@ -2,15 +2,13 @@
 
 #include "gb/app/frontend/realtime/retroachievements_http.hpp"
 #include "gb/app/runtime_paths.hpp"
-
-#include "rhash/md5.h"
+#include "gb/achievements/hashing/md5.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <array>
 #include <cctype>
 #include <cerrno>
-#include <climits>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -406,29 +404,7 @@ std::optional<std::uint64_t> allocateImageRequestId() {
 }
 
 std::string cacheKey(std::string_view url) {
-    md5_state_t state;
-    md5_byte_t digest[16]{};
-    md5_init(&state);
-    std::size_t offset = 0;
-    while (offset < url.size()) {
-        const std::size_t count = std::min<std::size_t>(url.size() - offset, INT_MAX);
-        md5_append(
-            &state,
-            reinterpret_cast<const md5_byte_t*>(url.data() + offset),
-            static_cast<int>(count)
-        );
-        offset += count;
-    }
-    md5_finish(&state, digest);
-
-    static constexpr char hex[] = "0123456789abcdef";
-    std::string result;
-    result.reserve(32);
-    for (const md5_byte_t byte : digest) {
-        result.push_back(hex[(byte >> 4U) & 0x0FU]);
-        result.push_back(hex[byte & 0x0FU]);
-    }
-    return result;
+    return gb::achievements::hashing::md5(url).hexLowercase();
 }
 
 RetroAchievementsImageCache::RetroAchievementsImageCache(

@@ -5,13 +5,15 @@
 #include "gb/app/frontend/realtime/save_slots.hpp"
 #include "gb/app/frontend/realtime/top_menu.hpp"
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+#include "gb/achievements/runtime/frontend_achievement_bridge.hpp"
+#include "gb/achievements/runtime/hardcore_frontend_bridge.hpp"
+#include "gb/achievements/runtime/achievement_runtime_factory.hpp"
 #include "gb/app/frontend/realtime/retroachievements_config.hpp"
 #include "gb/app/frontend/realtime/retroachievements_http.hpp"
 #include "gb/app/frontend/realtime/retroachievements_image_cache.hpp"
 #include "gb/app/frontend/realtime/retroachievements_lifecycle.hpp"
 #include "gb/app/frontend/realtime/retroachievements_memory.hpp"
 #include "gb/app/frontend/realtime/retroachievements_progress.hpp"
-#include "gb/app/frontend/realtime/retroachievements_session.hpp"
 #include "gb/app/frontend/realtime/retroachievements_ui.hpp"
 #include "gb/app/runtime_paths.hpp"
 #endif
@@ -1232,7 +1234,7 @@ int runGbaRealtimeCommon(
         raHttpTransport,
         gb::retroAchievementsCacheDirectory()
     );
-    std::unique_ptr<RetroAchievementsSession> raSession{};
+    std::unique_ptr<gb::achievements::AchievementRuntime> raSession{};
     RaSessionSnapshot raSnapshot{};
     raSnapshot.connectionState = RaConnectionState::LoggedOut;
     RaLoginModalState raLoginModal{};
@@ -1254,6 +1256,16 @@ int runGbaRealtimeCommon(
     };
 
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+    gb::achievements::runtime::FrontendAchievementBridge ownedAchievements(
+        [&](const auto& event) {
+            if (event.kind == gb::achievements::runtime::FrameEventKind::Unlocked) {
+                setMessage("ACHIEVEMENT " + event.key, 180);
+            } else {
+                setMessage("ACHIEVEMENT ERROR", 120);
+            }
+        }
+    );
+    ownedAchievements.attach(core);
     RaConfig raConfig = loadRetroAchievementsConfig(raConfigPath);
     raShowNotifications = raConfig.showNotifications;
     RaConfig raSessionConfig{
@@ -1275,7 +1287,7 @@ int runGbaRealtimeCommon(
             numBytes
         );
     };
-    raSession = std::make_unique<RetroAchievementsSession>(
+    raSession = gb::achievements::makeDefaultAchievementRuntime(
         std::move(raMemoryReader),
         5U,
         raHttpTransport,
@@ -1433,6 +1445,9 @@ int runGbaRealtimeCommon(
         clearAudio();
         if (loaded) {
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+            gb::achievements::notifyOwnedHardcoreMutation(raSession.get(), "save-state load");
+#endif
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
             const auto stateImage = readRetroAchievementsStateFile(loadedPath);
             if (stateImage.has_value()) {
                 raDeferredProgress.stage(loadRetroAchievementsProgressV2(
@@ -1532,7 +1547,11 @@ int runGbaRealtimeCommon(
             setMessage("MEM " + hex32(debugAddress));
         } else if (debugEdit.field == GbaDebugEditField::Value) {
             const u8 value = static_cast<u8>(*parsed & 0xFFU);
-            setMessage(core.debugWrite8(debugAddress, value) ? "WRITE " + hex32(debugAddress) + "=" + hex8(value) : "MEM WRITE FAIL");
+            const bool wrote = core.debugWrite8(debugAddress, value);
+#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
+            if (wrote) gb::achievements::notifyOwnedHardcoreMutation(raSession.get(), "debugger memory write");
+#endif
+            setMessage(wrote ? "WRITE " + hex32(debugAddress) + "=" + hex8(value) : "MEM WRITE FAIL");
         }
         cancelDebugEdit();
     };
