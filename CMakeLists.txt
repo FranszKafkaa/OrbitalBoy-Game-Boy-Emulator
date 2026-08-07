@@ -24,7 +24,8 @@ option(GBEMU_USE_SDL2 "Build with SDL2 real-time frontend when available" ON)
 option(GBEMU_BUILD_MCP "Build read-only OrbitalBoy RunLab MCP stdio adapter" OFF)
 option(GBEMU_ENABLE_GBA "Build native mGBA runtime support" ON)
 option(GBEMU_BUILD_EXPERIMENTAL_GBA "Build the in-house experimental GBA core and tests" OFF)
-option(GBEMU_ENABLE_RETROACHIEVEMENTS "Build RetroAchievements support for GB/GBC/GBA" OFF)
+option(GBEMU_ENABLE_RETROACHIEVEMENTS "Build RetroAchievements support for GB/GBC/GBA" ON)
+set(RCHEEVOS_ROOT "" CACHE PATH "Root directory of an external rcheevos installation")
 
 if (GBEMU_ENABLE_GBA)
     find_path(MGBA_INCLUDE_DIR mgba/core/core.h)
@@ -181,7 +182,29 @@ endif()
 if (GBEMU_ENABLE_RETROACHIEVEMENTS)
     enable_language(C)
     find_package(CURL REQUIRED)
-    add_subdirectory(third_party/rcheevos EXCLUDE_FROM_ALL)
+    find_path(RCHEEVOS_INCLUDE_DIR
+        NAMES rc_client.h
+        HINTS
+            "${RCHEEVOS_ROOT}/include"
+            "${RCHEEVOS_ROOT}/src"
+    )
+    find_library(RCHEEVOS_LIBRARY
+        NAMES rcheevos rc_client
+        HINTS
+            "${RCHEEVOS_ROOT}/lib"
+            "${RCHEEVOS_ROOT}/lib64"
+    )
+    if (NOT RCHEEVOS_INCLUDE_DIR OR NOT RCHEEVOS_LIBRARY)
+        message(FATAL_ERROR
+            "GBEMU_ENABLE_RETROACHIEVEMENTS=ON requires an external rcheevos installation. "
+            "Set -DRCHEEVOS_ROOT=/path/to/rcheevos (containing include/rc_client.h and lib/librcheevos), "
+            "or disable with -DGBEMU_ENABLE_RETROACHIEVEMENTS=OFF.")
+    endif()
+    add_library(rcheevos_external UNKNOWN IMPORTED)
+    set_target_properties(rcheevos_external PROPERTIES
+        IMPORTED_LOCATION "${RCHEEVOS_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${RCHEEVOS_INCLUDE_DIR}"
+    )
     target_sources(gbfrontend_support PRIVATE
         src/app/frontend/realtime/retroachievements_http.cpp
         src/app/frontend/realtime/retroachievements_image_cache.cpp
@@ -190,8 +213,7 @@ if (GBEMU_ENABLE_RETROACHIEVEMENTS)
         src/app/frontend/realtime/retroachievements_session.cpp
         src/app/frontend/realtime/retroachievements_ui.cpp
     )
-    target_include_directories(gbfrontend_support PRIVATE third_party/rcheevos/src)
-    target_link_libraries(gbfrontend_support PUBLIC rcheevos CURL::libcurl)
+    target_link_libraries(gbfrontend_support PUBLIC rcheevos_external CURL::libcurl)
     if (WIN32)
         target_link_libraries(gbfrontend_support PRIVATE bcrypt)
     endif()
