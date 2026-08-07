@@ -1,4 +1,4 @@
-#include "gb/achievements/storage/private_file_io.hpp"
+#include "gb/app/frontend/realtime/private_file_io.hpp"
 
 #include <atomic>
 #include <cerrno>
@@ -22,7 +22,7 @@
 #include <unistd.h>
 #endif
 
-namespace gb::achievements::storage {
+namespace gb::frontend::detail {
 namespace {
 
 constexpr int kTemporaryFileAttempts = 32;
@@ -675,4 +675,4 @@ bool makeFileOwnerPrivate(const std::filesystem::path& path) {
 #endif
 }
 
-} // namespace gb::achievements::storage
+} // namespace gb::frontend::detail

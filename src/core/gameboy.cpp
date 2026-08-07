@@ -3,7 +3,6 @@
 #include <fstream>
 #include <iterator>
 #include <vector>
-#include <utility>
 
 namespace gb {
 
@@ -75,9 +74,6 @@ void GameBoy::runFrame() {
                 break;
             }
         }
-        if (frameObserver_) {
-            try { frameObserver_(); } catch (...) { }
-        }
         return;
     }
 
@@ -87,13 +83,6 @@ void GameBoy::runFrame() {
     while (elapsed < frameCycles) {
         elapsed += step();
     }
-    if (frameObserver_) {
-        try { frameObserver_(); } catch (...) { }
-    }
-}
-
-void GameBoy::setFrameObserver(FrameObserver observer) {
-    frameObserver_ = std::move(observer);
 }
 
 const Cartridge& GameBoy::cartridge() const {

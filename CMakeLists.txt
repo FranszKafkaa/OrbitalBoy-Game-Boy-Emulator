@@ -25,7 +25,6 @@ option(GBEMU_BUILD_MCP "Build read-only OrbitalBoy RunLab MCP stdio adapter" OFF
 option(GBEMU_ENABLE_GBA "Build native mGBA runtime support" ON)
 option(GBEMU_BUILD_EXPERIMENTAL_GBA "Build the in-house experimental GBA core and tests" OFF)
 option(GBEMU_ENABLE_RETROACHIEVEMENTS "Build RetroAchievements support for GB/GBC/GBA" OFF)
-option(GBEMU_ENABLE_LEGACY_RETROACHIEVEMENTS "Keep legacy rcheevos compatibility adapter available" OFF)
 
 if (GBEMU_ENABLE_GBA)
     find_path(MGBA_INCLUDE_DIR mgba/core/core.h)
@@ -76,27 +75,6 @@ set(GBEMU_APP_SOURCES
 )
 
 set(GBEMU_REALTIME_SUPPORT_SOURCES
-    src/achievements/runtime/frontend_achievement_bridge.cpp
-    src/achievements/runtime/owned_achievement_runtime.cpp
-    src/achievements/runtime/owned_achievement_api.cpp
-    src/achievements/runtime/hardcore_frontend_bridge.cpp
-    src/achievements/protocol/http_transport.cpp
-    src/achievements/protocol/json_parser.cpp
-    src/achievements/protocol/json_value.cpp
-    src/achievements/runtime/achievement_frame_attachment.cpp
-    src/achievements/runtime/achievement_frame_bridge.cpp
-    src/achievements/runtime/condition_evaluator.cpp
-    src/achievements/adapters/memory_adapters.cpp
-    src/core/gba/system.cpp
-    src/core/gba/memory.cpp
-    src/core/gba/cpu.cpp
-    src/core/gba/ppu.cpp
-    src/core/gba/apu.cpp
-    src/achievements/runtime/achievement_runtime.cpp
-    src/achievements/security/secret_string.cpp
-    src/achievements/protocol/http_transport.cpp
-    src/achievements/config/achievement_config.cpp
-    src/achievements/storage/private_file_io.cpp
     src/app/frontend/realtime_options.cpp
     src/app/frontend/realtime/debug_session.cpp
     src/app/frontend/realtime/emulation_worker.cpp
@@ -112,6 +90,9 @@ set(GBEMU_REALTIME_SUPPORT_SOURCES
     src/app/frontend/realtime/control_bindings.cpp
     src/app/frontend/realtime/link_transport.cpp
     src/app/frontend/realtime/network_config.cpp
+    src/app/frontend/realtime/private_file_io.cpp
+    src/app/frontend/realtime/secure_string.cpp
+    src/app/frontend/realtime/retroachievements_config.cpp
     src/app/frontend/realtime/retroachievements_memory.cpp
     src/app/frontend/realtime/top_menu.cpp
     src/app/frontend/realtime/ui_message_queue.cpp
@@ -142,10 +123,6 @@ set(GBEMU_TEST_SOURCES
     tests/peripheral_tests.cpp
     tests/state_and_options_tests.cpp
     tests/frontend_feature_tests.cpp
-    tests/achievements/config/achievement_config_compatibility_tests.cpp
-    tests/achievements/security/secret_string_compatibility_tests.cpp
-    tests/achievements/runtime/achievement_runtime_tests.cpp
-    tests/achievements/runtime/achievement_models_tests.cpp
 )
 
 if (WIN32 AND GBEMU_USE_SDL2)
@@ -174,17 +151,6 @@ add_library(gbcore ${GBEMU_CORE_SOURCES})
 
 target_include_directories(gbcore PUBLIC include)
 
-add_library(gbachievements_hashing
-    src/achievements/hashing/md5.cpp
-    src/achievements/hashing/rom_hasher.cpp
-)
-target_include_directories(gbachievements_hashing PUBLIC include)
-if (MSVC)
-    target_compile_options(gbachievements_hashing PRIVATE /W4 /EHsc)
-else()
-    target_compile_options(gbachievements_hashing PRIVATE -Wall -Wextra -Wpedantic)
-endif()
-
 add_library(gbgba_mgba src/core/gba/mgba_core.cpp)
 target_include_directories(gbgba_mgba PUBLIC include)
 if (GBEMU_ENABLE_GBA)
@@ -203,7 +169,7 @@ endif()
 
 add_library(gbfrontend_support ${GBEMU_FRONTEND_SUPPORT_SOURCES})
 target_include_directories(gbfrontend_support PUBLIC include)
-target_link_libraries(gbfrontend_support PUBLIC gbcore gbachievements_hashing)
+target_link_libraries(gbfrontend_support PUBLIC gbcore)
 if (WIN32)
     target_link_libraries(gbfrontend_support PRIVATE advapi32)
 endif()
@@ -215,35 +181,25 @@ endif()
 if (GBEMU_ENABLE_RETROACHIEVEMENTS)
     enable_language(C)
     find_package(CURL REQUIRED)
+    add_subdirectory(third_party/rcheevos EXCLUDE_FROM_ALL)
     target_sources(gbfrontend_support PRIVATE
-        src/achievements/adapters/rcheevos/achievement_runtime_factory.cpp
-        src/achievements/adapters/curl/curl_http_executor.cpp
         src/app/frontend/realtime/retroachievements_http.cpp
         src/app/frontend/realtime/retroachievements_image_cache.cpp
         src/app/frontend/realtime/retroachievements_lifecycle.cpp
         src/app/frontend/realtime/retroachievements_progress.cpp
+        src/app/frontend/realtime/retroachievements_session.cpp
         src/app/frontend/realtime/retroachievements_ui.cpp
     )
-    target_link_libraries(gbfrontend_support PUBLIC CURL::libcurl)
+    target_include_directories(gbfrontend_support PRIVATE third_party/rcheevos/src)
+    target_link_libraries(gbfrontend_support PUBLIC rcheevos CURL::libcurl)
     if (WIN32)
         target_link_libraries(gbfrontend_support PRIVATE bcrypt)
     endif()
-    target_compile_definitions(gbfrontend_support PUBLIC GBEMU_ENABLE_RETROACHIEVEMENTS=1)
-    if (GBEMU_ENABLE_LEGACY_RETROACHIEVEMENTS)
-        add_subdirectory(third_party/rcheevos EXCLUDE_FROM_ALL)
-        target_sources(gbfrontend_support PRIVATE
-            src/achievements/adapters/rcheevos/rcheevos_achievement_runtime.cpp
-            src/app/frontend/realtime/retroachievements_session.cpp
-        )
-        target_include_directories(gbfrontend_support PRIVATE third_party/rcheevos/src)
-        target_link_libraries(gbfrontend_support PUBLIC rcheevos)
-        target_compile_definitions(gbfrontend_support PUBLIC GBEMU_ENABLE_LEGACY_RETROACHIEVEMENTS=1)
-        target_compile_definitions(gbfrontend_support PUBLIC RC_CLIENT_SUPPORTS_HASH=1)
-        list(APPEND GBEMU_TEST_SOURCES
-            tests/retroachievements_tests.cpp
-            tests/achievements/protocol/legacy_ra_http_forward_declaration_tests.cpp
-        )
-    endif()
+    target_compile_definitions(gbfrontend_support PUBLIC
+        GBEMU_ENABLE_RETROACHIEVEMENTS=1
+        RC_CLIENT_SUPPORTS_HASH=1
+    )
+    list(APPEND GBEMU_TEST_SOURCES tests/retroachievements_tests.cpp)
 endif()
 
 add_executable(gbemu ${GBEMU_APP_SOURCES})
@@ -308,260 +264,10 @@ if (GBEMU_BUILD_MCP)
 endif()
 
 if (BUILD_TESTING)
-    add_executable(gbachievements_hashing_tests
-        tests/test_main.cpp
-        tests/achievements/hashing/rom_hashing_tests.cpp
-    )
-    target_include_directories(gbachievements_hashing_tests PRIVATE include)
-    target_link_libraries(gbachievements_hashing_tests PRIVATE gbachievements_hashing)
-    if (MSVC)
-        target_compile_options(gbachievements_hashing_tests PRIVATE /W4 /EHsc)
-    else()
-        target_compile_options(gbachievements_hashing_tests PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME gbachievements_hashing_tests COMMAND gbachievements_hashing_tests)
-
-    add_executable(gbachievements_config_storage_tests
-        tests/test_main.cpp
-        tests/achievements/config/achievement_config_tests.cpp
-        tests/achievements/storage/private_file_io_tests.cpp
-        src/achievements/config/achievement_config.cpp
-        src/achievements/storage/private_file_io.cpp
-        src/achievements/security/secret_string.cpp
-    )
-    target_include_directories(gbachievements_config_storage_tests PRIVATE include)
-    if (WIN32)
-        target_link_libraries(gbachievements_config_storage_tests PRIVATE advapi32)
-    endif()
-    if (MSVC)
-        target_compile_options(gbachievements_config_storage_tests PRIVATE /W4 /EHsc)
-    else()
-        target_compile_options(gbachievements_config_storage_tests PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(
-        NAME gbachievements_config_storage_tests
-        COMMAND gbachievements_config_storage_tests
-    )
-
-    add_executable(gbachievements_security_tests
-        tests/test_main.cpp
-        tests/achievements/security/secret_string_tests.cpp
-        src/achievements/security/secret_string.cpp
-    )
-    target_include_directories(gbachievements_security_tests PRIVATE include)
-    if (MSVC)
-        target_compile_options(gbachievements_security_tests PRIVATE /W4 /EHsc)
-    else()
-        target_compile_options(gbachievements_security_tests PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME gbachievements_security_tests COMMAND gbachievements_security_tests)
-
-    add_executable(gbachievements_http_transport_tests
-        tests/test_main.cpp
-        tests/achievements/protocol/http_transport_tests.cpp
-        src/achievements/protocol/http_transport.cpp
-        src/achievements/security/secret_string.cpp
-    )
-    target_include_directories(gbachievements_http_transport_tests PRIVATE include)
-    if (MSVC)
-        target_compile_options(gbachievements_http_transport_tests PRIVATE /W4 /EHsc)
-    else()
-        target_compile_options(gbachievements_http_transport_tests PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME gbachievements_http_transport_tests COMMAND gbachievements_http_transport_tests)
-
-    # Deliberately isolated from application and transport dependencies.
-    add_executable(gbachievements_json_parser_tests
-        tests/test_main.cpp
-        tests/achievements/protocol/json_parser_tests.cpp
-        src/achievements/protocol/json_value.cpp
-        src/achievements/protocol/json_parser.cpp
-    )
-    target_include_directories(gbachievements_json_parser_tests PRIVATE include)
-    if (MSVC)
-        target_compile_options(gbachievements_json_parser_tests PRIVATE /W4 /EHsc)
-    else()
-        target_compile_options(gbachievements_json_parser_tests PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME gbachievements_json_parser_tests COMMAND gbachievements_json_parser_tests)
-
-    # Deliberately isolated from application, runtime, and rcheevos dependencies.
-    add_executable(gbachievements_condition_parser_tests
-        tests/test_main.cpp
-        tests/achievements/parser/condition_parser_tests.cpp
-        src/achievements/parser/condition_parser.cpp
-    )
-    target_include_directories(gbachievements_condition_parser_tests PRIVATE include)
-    if (MSVC)
-        target_compile_options(gbachievements_condition_parser_tests PRIVATE /W4 /EHsc)
-    else()
-        target_compile_options(gbachievements_condition_parser_tests PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME gbachievements_condition_parser_tests COMMAND gbachievements_condition_parser_tests)
-
-    # Deliberately isolated from live achievement runtime and rcheevos dependencies.
-    add_executable(gbachievements_condition_evaluator_tests
-        tests/test_main.cpp
-        tests/achievements/runtime/condition_evaluator_tests.cpp
-        src/achievements/runtime/condition_evaluator.cpp
-    )
-    target_include_directories(gbachievements_condition_evaluator_tests PRIVATE include)
-    if (MSVC)
-        target_compile_options(gbachievements_condition_evaluator_tests PRIVATE /W4 /EHsc)
-    else()
-        target_compile_options(gbachievements_condition_evaluator_tests PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME gbachievements_condition_evaluator_tests COMMAND gbachievements_condition_evaluator_tests)
-
-    add_executable(gbachievements_frame_bridge_tests
-        tests/test_main.cpp
-        tests/achievements/runtime/achievement_frame_bridge_tests.cpp
-        src/achievements/runtime/achievement_frame_bridge.cpp
-        src/achievements/runtime/condition_evaluator.cpp
-    )
-    target_include_directories(gbachievements_frame_bridge_tests PRIVATE include)
-    if (MSVC)
-        target_compile_options(gbachievements_frame_bridge_tests PRIVATE /W4 /EHsc)
-    else()
-        target_compile_options(gbachievements_frame_bridge_tests PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME gbachievements_frame_bridge_tests COMMAND gbachievements_frame_bridge_tests)
-
-    add_executable(gbachievements_memory_adapter_tests
-        tests/test_main.cpp
-        tests/achievements/adapters/memory_adapters_tests.cpp
-        tests/achievements/runtime/achievement_frame_clock_tests.cpp
-        src/achievements/adapters/memory_adapters.cpp
-        src/achievements/runtime/achievement_frame_bridge.cpp
-        src/achievements/runtime/condition_evaluator.cpp
-        src/core/gba/system.cpp
-        src/core/gba/memory.cpp
-        src/core/gba/cpu.cpp
-        src/core/gba/ppu.cpp
-        src/core/gba/apu.cpp
-        src/core/gba/mgba_core.cpp
-    )
-    target_include_directories(gbachievements_memory_adapter_tests PRIVATE include)
-    target_link_libraries(gbachievements_memory_adapter_tests PRIVATE gbcore)
-    if (MSVC)
-        target_compile_options(gbachievements_memory_adapter_tests PRIVATE /W4 /EHsc)
-    else()
-        target_compile_options(gbachievements_memory_adapter_tests PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME gbachievements_memory_adapter_tests COMMAND gbachievements_memory_adapter_tests)
-
-    add_executable(gbcore_frame_observer_tests
-        tests/test_main.cpp
-        tests/core_frame_observer_tests.cpp
-        src/core/gba/system.cpp
-        src/core/gba/memory.cpp
-        src/core/gba/cpu.cpp
-        src/core/gba/ppu.cpp
-        src/core/gba/apu.cpp
-        src/core/gba/mgba_core.cpp
-    )
-    target_include_directories(gbcore_frame_observer_tests PRIVATE include)
-    target_link_libraries(gbcore_frame_observer_tests PRIVATE gbcore)
-    if (MSVC)
-        target_compile_options(gbcore_frame_observer_tests PRIVATE /W4 /EHsc)
-    else()
-        target_compile_options(gbcore_frame_observer_tests PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME gbcore_frame_observer_tests COMMAND gbcore_frame_observer_tests)
-
-    add_executable(gbachievements_frame_attachment_tests
-        tests/test_main.cpp
-        tests/achievements/runtime/achievement_frame_attachment_tests.cpp
-        src/achievements/runtime/achievement_frame_attachment.cpp
-        src/achievements/runtime/achievement_frame_bridge.cpp
-        src/achievements/runtime/condition_evaluator.cpp
-        src/achievements/adapters/memory_adapters.cpp
-        src/core/gba/system.cpp
-        src/core/gba/memory.cpp
-        src/core/gba/cpu.cpp
-        src/core/gba/ppu.cpp
-        src/core/gba/apu.cpp
-        src/core/gba/mgba_core.cpp
-    )
-    target_include_directories(gbachievements_frame_attachment_tests PRIVATE include)
-    target_link_libraries(gbachievements_frame_attachment_tests PRIVATE gbcore)
-    if (MSVC)
-        target_compile_options(gbachievements_frame_attachment_tests PRIVATE /W4 /EHsc)
-    else()
-        target_compile_options(gbachievements_frame_attachment_tests PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME gbachievements_frame_attachment_tests COMMAND gbachievements_frame_attachment_tests)
-
-    add_executable(gbfrontend_achievement_bridge_tests
-        tests/test_main.cpp
-        tests/achievements/runtime/frontend_achievement_bridge_tests.cpp
-        src/achievements/runtime/frontend_achievement_bridge.cpp
-        src/achievements/runtime/achievement_frame_attachment.cpp
-        src/achievements/runtime/achievement_frame_bridge.cpp
-        src/achievements/runtime/condition_evaluator.cpp
-        src/achievements/adapters/memory_adapters.cpp
-        src/core/gba/system.cpp
-        src/core/gba/memory.cpp
-        src/core/gba/cpu.cpp
-        src/core/gba/ppu.cpp
-        src/core/gba/apu.cpp
-    )
-    target_include_directories(gbfrontend_achievement_bridge_tests PRIVATE include)
-    target_link_libraries(gbfrontend_achievement_bridge_tests PRIVATE gbcore gbgba_mgba)
-    if (MSVC)
-        target_compile_options(gbfrontend_achievement_bridge_tests PRIVATE /W4 /EHsc)
-    else()
-        target_compile_options(gbfrontend_achievement_bridge_tests PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME gbfrontend_achievement_bridge_tests COMMAND gbfrontend_achievement_bridge_tests)
-
-    add_executable(gbachievements_owned_runtime_tests
-        tests/test_main.cpp
-        tests/achievements/runtime/owned_achievement_runtime_tests.cpp
-        src/achievements/runtime/owned_achievement_runtime.cpp
-        src/achievements/runtime/owned_achievement_api.cpp
-        src/achievements/runtime/hardcore_frontend_bridge.cpp
-        src/achievements/protocol/http_transport.cpp
-        src/achievements/protocol/json_parser.cpp
-        src/achievements/protocol/json_value.cpp
-        src/achievements/runtime/achievement_runtime.cpp
-        src/achievements/runtime/achievement_frame_attachment.cpp
-        src/achievements/runtime/achievement_frame_bridge.cpp
-        src/achievements/runtime/condition_evaluator.cpp
-        src/achievements/security/secret_string.cpp
-        src/achievements/adapters/memory_adapters.cpp
-        src/core/gba/system.cpp
-        src/core/gba/memory.cpp
-        src/core/gba/cpu.cpp
-        src/core/gba/ppu.cpp
-        src/core/gba/apu.cpp
-        src/core/gba/mgba_core.cpp
-    )
-    target_include_directories(gbachievements_owned_runtime_tests PRIVATE include)
-    target_link_libraries(gbachievements_owned_runtime_tests PRIVATE gbcore)
-    if (MSVC)
-        target_compile_options(gbachievements_owned_runtime_tests PRIVATE /W4 /EHsc)
-    else()
-        target_compile_options(gbachievements_owned_runtime_tests PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME gbachievements_owned_runtime_tests COMMAND gbachievements_owned_runtime_tests)
-
-    add_executable(gbachievement_models_tests
-        tests/test_main.cpp
-        tests/achievements/runtime/achievement_models_tests.cpp
-    )
-    target_include_directories(gbachievement_models_tests PRIVATE include)
-    if (MSVC)
-        target_compile_options(gbachievement_models_tests PRIVATE /W4 /EHsc)
-    else()
-        target_compile_options(gbachievement_models_tests PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-    add_test(NAME gbachievement_models_tests COMMAND gbachievement_models_tests)
-
     add_executable(gbemu_tests
         ${GBEMU_TEST_SOURCES}
     )
-    target_link_libraries(gbemu_tests PRIVATE gbfrontend_support gbgba_mgba)
+    target_link_libraries(gbemu_tests PRIVATE gbfrontend_support)
     if (SDL2_FOUND)
         target_sources(gbemu_tests PRIVATE
             src/app/frontend/debug_ui.cpp

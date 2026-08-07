@@ -1,25 +1,57 @@
 #pragma once
 
+#include <cstdint>
+#include <chrono>
+#include <functional>
+#include <memory>
+#include <string>
 #include <string_view>
-
-#include "gb/achievements/protocol/http_transport.hpp"
+#include <vector>
 
 namespace gb::frontend {
 
-using RaHttpChannel = gb::achievements::protocol::HttpChannel;
-using RaHttpRequest = gb::achievements::protocol::HttpRequest;
-using RaHttpResponse = gb::achievements::protocol::HttpResponse;
-using RaHttpExecutor = gb::achievements::protocol::HttpExecutor;
-using RaHttpMethod = gb::achievements::protocol::HttpMethod;
-using RaHttpRedirectProtocols = gb::achievements::protocol::HttpRedirectProtocols;
-using RaHttpRequestPolicy = gb::achievements::protocol::HttpRequestPolicy;
+inline constexpr std::chrono::milliseconds kRaHttpRequestTimeout{15000};
 
-inline constexpr auto kRaHttpRequestTimeout = gb::achievements::protocol::kHttpRequestTimeout;
+enum class RaHttpChannel {
+    Api,
+    Image,
+};
 
-[[nodiscard]] inline RaHttpRequestPolicy makeRaHttpRequestPolicy(const RaHttpRequest& request) {
-    return gb::achievements::protocol::makeHttpRequestPolicy(request);
-}
+struct RaHttpRequest {
+    std::uint64_t id = 0;
+    RaHttpChannel channel = RaHttpChannel::Api;
+    std::string url;
+    std::string postData;
+};
 
+struct RaHttpResponse {
+    std::uint64_t id = 0;
+    RaHttpChannel channel = RaHttpChannel::Api;
+    long statusCode = 0;
+    std::vector<std::uint8_t> body;
+    std::string error;
+};
+
+using RaHttpExecutor = std::function<RaHttpResponse(const RaHttpRequest&)>;
+
+enum class RaHttpMethod {
+    Get,
+    Post,
+};
+
+enum class RaHttpRedirectProtocols {
+    HttpAndHttps,
+    HttpsOnly,
+};
+
+struct RaHttpRequestPolicy {
+    RaHttpMethod method = RaHttpMethod::Get;
+    long followLocation = 1L;
+    long maxRedirects = 3L;
+    RaHttpRedirectProtocols redirectProtocols = RaHttpRedirectProtocols::HttpAndHttps;
+};
+
+[[nodiscard]] RaHttpRequestPolicy makeRaHttpRequestPolicy(const RaHttpRequest& request);
 [[nodiscard]] std::string_view retroAchievementsUserAgent() noexcept;
 
 class RaHttpTransport {
@@ -37,11 +69,10 @@ public:
     [[nodiscard]] std::vector<RaHttpResponse> takeCompleted(RaHttpChannel channel);
     [[nodiscard]] bool acceptingRequests() const;
     void shutdown();
-    [[nodiscard]] gb::achievements::protocol::HttpTransport& ownedTransport() noexcept { return transport_; }
 
 private:
-    gb::achievements::protocol::HttpCancellationFlag cancellationFlag_;
-    gb::achievements::protocol::HttpTransport transport_;
+    class Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 } // namespace gb::frontend

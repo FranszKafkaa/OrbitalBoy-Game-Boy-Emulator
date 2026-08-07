@@ -8,9 +8,10 @@
 #include <string_view>
 
 #include "gb/app/frontend/realtime/retroachievements_models.hpp"
-#include "gb/app/frontend/realtime/retroachievements_http.hpp"
 
 namespace gb::frontend {
+
+class RaHttpTransport;
 
 [[nodiscard]] std::string cacheKey(std::string_view url);
 

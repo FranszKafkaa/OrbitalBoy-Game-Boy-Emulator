@@ -1,40 +1,60 @@
 #pragma once
 
+#include <cstddef>
+#include <functional>
 #include <string>
-#include <utility>
+#include <string_view>
 
-#include "gb/achievements/config/achievement_config.hpp"
-#include "gb/app/frontend/realtime/private_file_io.hpp"
+#include "gb/app/frontend/realtime/secure_string.hpp"
 
 namespace gb::frontend {
 
-using RaConfigWipeObserver = gb::achievements::AchievementConfigWipeObserver;
-using RaConfig = gb::achievements::AchievementConfig;
+namespace detail {
+struct PrivateFileIoHooks;
+}
 
-inline RaConfig loadRetroAchievementsConfig(
+using RaConfigWipeObserver = SecureStringWipeObserver;
+
+struct RaConfig {
+    RaConfig(
+        int versionValue = 1,
+        std::string_view usernameValue = {},
+        std::string_view tokenValue = {},
+        bool autoLoginValue = true,
+        bool showNotificationsValue = true,
+        RaConfigWipeObserver wipeObserver = {}
+    );
+    ~RaConfig();
+
+    RaConfig(const RaConfig& other);
+    RaConfig& operator=(const RaConfig& other);
+    RaConfig(RaConfig&& other);
+    RaConfig& operator=(RaConfig&& other);
+
+    void assignToken(std::string_view value);
+    void assignTokenAndErase(std::string& source);
+    void transferTokenTo(RaSecretString& destination);
+    void clearToken();
+
+    int version = 1;
+    std::string username;
+    std::string token;
+    bool autoLogin = true;
+    bool showNotifications = true;
+
+private:
+    RaConfigWipeObserver wipeObserver_{};
+};
+
+RaConfig loadRetroAchievementsConfig(
     const std::string& path,
     RaConfigWipeObserver wipeObserver = {}
-) {
-    return gb::achievements::loadAchievementConfig(path, std::move(wipeObserver));
-}
-
-inline bool saveRetroAchievementsConfig(
-    const std::string& path,
-    const RaConfig& config
-) {
-    return gb::achievements::saveAchievementConfig(path, config);
-}
-
-inline bool invalidateRetroAchievementsConfig(
+);
+bool saveRetroAchievementsConfig(const std::string& path, const RaConfig& config);
+bool invalidateRetroAchievementsConfig(
     const std::string& path,
     bool* quarantinedSensitiveData = nullptr,
     const detail::PrivateFileIoHooks* hooks = nullptr
-) {
-    return gb::achievements::invalidateAchievementConfig(
-        path,
-        quarantinedSensitiveData,
-        hooks
-    );
-}
+);
 
 } // namespace gb::frontend

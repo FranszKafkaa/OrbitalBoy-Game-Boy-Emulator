@@ -27,7 +27,6 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
-#include <utility>
 
 namespace gb::gba {
 
@@ -290,13 +289,6 @@ void MgbaCore::runFrame() {
     impl_->core->setKeys(impl_->core, inputToMgbaKeys(impl_->input));
     impl_->core->runFrame(impl_->core);
     Impl::postVideoFrame(&impl_->av, impl_->videoBuffer.data(), ScreenWidth);
-    if (frameObserver_) {
-        try { frameObserver_(); } catch (...) { }
-    }
-}
-
-void MgbaCore::setFrameObserver(FrameObserver observer) {
-    frameObserver_ = std::move(observer);
 }
 
 void MgbaCore::stepInstruction() {
@@ -499,7 +491,6 @@ bool MgbaCore::loadRomFromFile(const std::string&) { return false; }
 void MgbaCore::unload() {}
 void MgbaCore::setInputState(const InputState&) {}
 void MgbaCore::runFrame() {}
-void MgbaCore::setFrameObserver(FrameObserver observer) { frameObserver_ = std::move(observer); }
 void MgbaCore::stepInstruction() {}
 const std::array<u16, MgbaCore::FramebufferSize>& MgbaCore::framebuffer() const {
     static const std::array<u16, FramebufferSize> empty{};

@@ -10,7 +10,6 @@
 #include <iostream>
 #include <optional>
 #include <sstream>
-#include <utility>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -556,10 +555,6 @@ const System::FrameProfile& System::lastFrameProfile() const {
     return lastFrameProfile_;
 }
 
-void System::setFrameObserver(FrameObserver observer) {
-    frameObserver_ = std::move(observer);
-}
-
 const CpuArm7tdmi& System::cpu() const {
     return cpu_;
 }
@@ -678,9 +673,6 @@ void System::runFrame(bool renderFrame) {
         if (logEvery > 0 && (frameCounter_ % static_cast<std::uint32_t>(logEvery)) == 0U) {
             logGbaFrameSceneState(*this, frameCounter_);
         }
-    }
-    if (frameObserver_) {
-        try { frameObserver_(); } catch (...) { }
     }
 }
 

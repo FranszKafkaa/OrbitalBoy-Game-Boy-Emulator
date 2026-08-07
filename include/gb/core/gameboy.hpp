@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <functional>
 #include <string>
 #include <vector>
 
@@ -13,7 +12,6 @@ namespace gb {
 
 class GameBoy {
 public:
-    using FrameObserver = std::function<void()>;
     struct SaveState {
         Cartridge::State cartridge{};
         Bus::State bus{};
@@ -30,7 +28,6 @@ public:
 
     u32 step();
     void runFrame();
-    void setFrameObserver(FrameObserver observer);
 
     [[nodiscard]] const Cartridge& cartridge() const;
     [[nodiscard]] CPU& cpu();
@@ -55,7 +52,6 @@ private:
     Bus bus_{cartridge_};
     CPU cpu_{bus_};
     bool preciseTiming_ = false;
-    FrameObserver frameObserver_;
 };
 
 } // namespace gb

@@ -30,14 +30,12 @@
 #include "gb/app/frontend/realtime/netplay_session.hpp"
 #include "gb/app/frontend/realtime/realtime_session.hpp"
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
-#include "gb/achievements/runtime/frontend_achievement_bridge.hpp"
-#include "gb/achievements/runtime/hardcore_frontend_bridge.hpp"
-#include "gb/achievements/runtime/achievement_runtime_factory.hpp"
 #include "gb/app/frontend/realtime/retroachievements_config.hpp"
 #include "gb/app/frontend/realtime/retroachievements_http.hpp"
 #include "gb/app/frontend/realtime/retroachievements_image_cache.hpp"
 #include "gb/app/frontend/realtime/retroachievements_lifecycle.hpp"
 #include "gb/app/frontend/realtime/retroachievements_progress.hpp"
+#include "gb/app/frontend/realtime/retroachievements_session.hpp"
 #include "gb/app/frontend/realtime/retroachievements_ui.hpp"
 #include "gb/app/runtime_paths.hpp"
 #endif
@@ -288,23 +286,13 @@ int RealtimeSession::run() {
     int paletteMenuIndex = static_cast<int>(paletteMode);
     UiMessageQueue workerUiMessages;
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
-    gb::achievements::runtime::FrontendAchievementBridge ownedAchievements(
-        [&](const auto& event) {
-            if (event.kind == gb::achievements::runtime::FrameEventKind::Unlocked) {
-                workerUiMessages.post("ACHIEVEMENT " + event.key, 180);
-            } else {
-                workerUiMessages.post("ACHIEVEMENT ERROR", 120);
-            }
-        }
-    );
-    ownedAchievements.attach(gb);
     const std::string raConfigPath = gb::retroAchievementsConfigPath();
     RaHttpTransport raHttpTransport{};
     RetroAchievementsImageCache raImageCache(
         raHttpTransport,
         gb::retroAchievementsCacheDirectory()
     );
-    gb::achievements::AchievementRuntime* raOwnerSession = nullptr;
+    RetroAchievementsSession* raOwnerSession = nullptr;
     FrameTimeline timeline(
         gb,
         [&]() {
@@ -347,7 +335,6 @@ int RealtimeSession::run() {
     std::mutex raPublicationMutex{};
     std::vector<RaUiEvent> raPublishedEvents{};
     std::atomic<bool> raShowNotifications{true};
-    gb::achievements::AchievementRuntime* ownedRuntimeForMutation = nullptr;
     RaRuntimeCommandQueue raCommandQueue{32};
     const auto enqueueRaCommand = [&](RaRuntimeCommand command) {
         if (!raCommandQueue.enqueue(std::move(command))) {
@@ -550,9 +537,6 @@ int RealtimeSession::run() {
         {
             std::lock_guard<std::mutex> gbLock(gbMutex);
             gb.bus().write(address, value);
-#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
-            gb::achievements::notifyOwnedHardcoreMutation(ownedRuntimeForMutation, "debugger memory write");
-#endif
             if (memoryWatch.address == address) {
                 resetMemoryWatch(memoryWatch, gb.bus());
             }
@@ -1015,9 +999,6 @@ int RealtimeSession::run() {
             audioRing.clear();
         }
         if (loaded || loadedLegacy) {
-#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
-            gb::achievements::notifyOwnedHardcoreMutation(ownedRuntimeForMutation, "save-state load");
-#endif
             char msg[40];
             std::snprintf(msg, sizeof(msg), "STATE LOADED S%d", activeSaveSlot);
             uiMessage = msg;
@@ -1251,7 +1232,7 @@ int RealtimeSession::run() {
         std::cout << "[MT][EMU] worker iniciado\n";
 #ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
         RaConfig raConfig{};
-        std::unique_ptr<gb::achievements::AchievementRuntime> raSession{};
+        std::unique_ptr<RetroAchievementsSession> raSession{};
         RaRealtimeLifecycleCoordinator raLifecycle{};
         RaLifecycleActions raActions{};
         bool captureRaTimelineThisFrame = false;
@@ -1321,7 +1302,7 @@ int RealtimeSession::run() {
                 raConfig.autoLogin,
                 raConfig.showNotifications,
             };
-            raSession = gb::achievements::makeDefaultAchievementRuntime(
+            raSession = std::make_unique<RetroAchievementsSession>(
                 gb,
                 raHttpTransport,
                 std::move(sessionConfig),
@@ -1359,7 +1340,6 @@ int RealtimeSession::run() {
                 }
             );
             raOwnerSession = raSession.get();
-            ownedRuntimeForMutation = raSession.get();
         };
         raActions.tokenLogin = [&]() {
             if (raSession && raConfig.autoLogin
@@ -1574,9 +1554,6 @@ int RealtimeSession::run() {
                 }
                 case RaRuntimeCommandType::TimelineBack:
                     if (timeline.stepBack(gb)) {
-#ifdef GBEMU_ENABLE_RETROACHIEVEMENTS
-                        gb::achievements::notifyOwnedHardcoreMutation(ownedRuntimeForMutation, "timeline rewind");
-#endif
                         enqueueRawFrameLocked();
                         resetMemoryWatch(memoryWatch, gb.bus());
                         workerUiMessages.post(frameTimelineLabel(timeline), 120);

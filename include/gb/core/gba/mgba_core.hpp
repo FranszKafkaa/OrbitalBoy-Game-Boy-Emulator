@@ -2,7 +2,6 @@
 
 #include <array>
 #include <cstdint>
-#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -15,7 +14,6 @@ namespace gb::gba {
 
 class MgbaCore {
 public:
-    using FrameObserver = std::function<void()>;
     static constexpr int ScreenWidth = 240;
     static constexpr int ScreenHeight = 160;
     static constexpr std::size_t FramebufferSize = static_cast<std::size_t>(ScreenWidth) * static_cast<std::size_t>(ScreenHeight);
@@ -32,7 +30,6 @@ public:
 
     void setInputState(const InputState& input);
     void runFrame();
-    void setFrameObserver(FrameObserver observer);
     void stepInstruction();
 
     [[nodiscard]] const std::array<u16, FramebufferSize>& framebuffer() const;
@@ -58,7 +55,6 @@ public:
 private:
     struct Impl;
     Impl* impl_ = nullptr;
-    FrameObserver frameObserver_;
 };
 
 } // namespace gb::gba

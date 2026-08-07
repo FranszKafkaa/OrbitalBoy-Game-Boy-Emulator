@@ -2,7 +2,6 @@
 
 #include <array>
 #include <cstdint>
-#include <functional>
 #include <string>
 #include <vector>
 
@@ -41,7 +40,6 @@ struct CompatibilityProfile {
 
 class System {
 public:
-    using FrameObserver = std::function<void()>;
     struct FrameProfile {
         std::uint64_t totalNs = 0;
         std::uint64_t cpuNs = 0;
@@ -83,7 +81,6 @@ public:
 
     void reset();
     void runFrame(bool renderFrame = true);
-    void setFrameObserver(FrameObserver observer);
     void runInstructions(int instructionCount);
     void setInputState(const InputState& input);
 
@@ -114,7 +111,6 @@ private:
     std::uint64_t frameMemoryNs_ = 0;
     std::uint64_t frameStepPpuNs_ = 0;
     std::uint64_t frameApuNs_ = 0;
-    FrameObserver frameObserver_;
 };
 
 } // namespace gb::gba
