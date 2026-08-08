@@ -27,7 +27,7 @@ option(GBEMU_BUILD_EXPERIMENTAL_GBA "Build the in-house experimental GBA core an
 option(GBEMU_ENABLE_RETROACHIEVEMENTS "Build RetroAchievements support for GB/GBC/GBA" ON)
 set(RCHEEVOS_ROOT "" CACHE PATH "Root directory of an external rcheevos installation")
 option(GBEMU_FETCH_RCHEEVOS "Download rcheevos automatically into the build directory when no external installation is supplied" ON)
-set(GBEMU_RCHEEVOS_VERSION "v11.2.0" CACHE STRING "Pinned rcheevos release used by FetchContent")
+set(GBEMU_RCHEEVOS_VERSION "v12.4.0" CACHE STRING "Pinned rcheevos release used by FetchContent")
 
 if (GBEMU_ENABLE_GBA)
     find_path(MGBA_INCLUDE_DIR mgba/core/core.h)
@@ -235,12 +235,15 @@ if (GBEMU_ENABLE_RETROACHIEVEMENTS)
                 ${rcheevos_SOURCE_DIR}/src/rcheevos/trigger.c
                 ${rcheevos_SOURCE_DIR}/src/rcheevos/value.c
                 ${rcheevos_SOURCE_DIR}/src/rhash/hash.c
-                ${rcheevos_SOURCE_DIR}/src/rhash/hash_rom.c
+                ${rcheevos_SOURCE_DIR}/src/rhash/aes.c
+                ${rcheevos_SOURCE_DIR}/src/rhash/cdreader.c
                 ${rcheevos_SOURCE_DIR}/src/rhash/md5.c
+                ${rcheevos_SOURCE_DIR}/src/rurl/url.c
             )
             add_library(rcheevos STATIC ${RCHEEVOS_SOURCES})
             target_include_directories(rcheevos PUBLIC
                 ${rcheevos_SOURCE_DIR}/include
+                ${rcheevos_SOURCE_DIR}/src
                 PRIVATE ${rcheevos_SOURCE_DIR}/src/rcheevos
             )
             target_compile_definitions(rcheevos PRIVATE
