@@ -236,10 +236,17 @@ if (GBEMU_ENABLE_RETROACHIEVEMENTS)
                 ${rcheevos_SOURCE_DIR}/src/rcheevos/value.c
                 ${rcheevos_SOURCE_DIR}/src/rhash/hash.c
                 ${rcheevos_SOURCE_DIR}/src/rhash/aes.c
-                ${rcheevos_SOURCE_DIR}/src/rhash/cdreader.c
+                ${rcheevos_SOURCE_DIR}/src/rhash/hash_rom.c
                 ${rcheevos_SOURCE_DIR}/src/rhash/md5.c
                 ${rcheevos_SOURCE_DIR}/src/rurl/url.c
             )
+            set(RCHEEVOS_EXISTING_SOURCES)
+            foreach(RCHEEVOS_SOURCE IN LISTS RCHEEVOS_SOURCES)
+                if (EXISTS "${RCHEEVOS_SOURCE}")
+                    list(APPEND RCHEEVOS_EXISTING_SOURCES "${RCHEEVOS_SOURCE}")
+                endif()
+            endforeach()
+            set(RCHEEVOS_SOURCES ${RCHEEVOS_EXISTING_SOURCES})
             add_library(rcheevos STATIC ${RCHEEVOS_SOURCES})
             target_include_directories(rcheevos PUBLIC
                 ${rcheevos_SOURCE_DIR}/include
