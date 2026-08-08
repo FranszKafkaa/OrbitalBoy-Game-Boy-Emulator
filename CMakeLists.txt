@@ -209,6 +209,49 @@ if (GBEMU_ENABLE_RETROACHIEVEMENTS)
             set(RCHEEVOS_LINK_TARGET rcheevos)
         elseif (TARGET rcheevos_static)
             set(RCHEEVOS_LINK_TARGET rcheevos_static)
+        else()
+            set(RCHEEVOS_SOURCES
+                ${rcheevos_SOURCE_DIR}/src/rc_compat.c
+                ${rcheevos_SOURCE_DIR}/src/rc_client.c
+                ${rcheevos_SOURCE_DIR}/src/rc_util.c
+                ${rcheevos_SOURCE_DIR}/src/rc_version.c
+                ${rcheevos_SOURCE_DIR}/src/rapi/rc_api_common.c
+                ${rcheevos_SOURCE_DIR}/src/rapi/rc_api_editor.c
+                ${rcheevos_SOURCE_DIR}/src/rapi/rc_api_info.c
+                ${rcheevos_SOURCE_DIR}/src/rapi/rc_api_runtime.c
+                ${rcheevos_SOURCE_DIR}/src/rapi/rc_api_user.c
+                ${rcheevos_SOURCE_DIR}/src/rcheevos/alloc.c
+                ${rcheevos_SOURCE_DIR}/src/rcheevos/condition.c
+                ${rcheevos_SOURCE_DIR}/src/rcheevos/condset.c
+                ${rcheevos_SOURCE_DIR}/src/rcheevos/consoleinfo.c
+                ${rcheevos_SOURCE_DIR}/src/rcheevos/format.c
+                ${rcheevos_SOURCE_DIR}/src/rcheevos/lboard.c
+                ${rcheevos_SOURCE_DIR}/src/rcheevos/memref.c
+                ${rcheevos_SOURCE_DIR}/src/rcheevos/operand.c
+                ${rcheevos_SOURCE_DIR}/src/rcheevos/rc_validate.c
+                ${rcheevos_SOURCE_DIR}/src/rcheevos/richpresence.c
+                ${rcheevos_SOURCE_DIR}/src/rcheevos/runtime.c
+                ${rcheevos_SOURCE_DIR}/src/rcheevos/runtime_progress.c
+                ${rcheevos_SOURCE_DIR}/src/rcheevos/trigger.c
+                ${rcheevos_SOURCE_DIR}/src/rcheevos/value.c
+                ${rcheevos_SOURCE_DIR}/src/rhash/hash.c
+                ${rcheevos_SOURCE_DIR}/src/rhash/hash_rom.c
+                ${rcheevos_SOURCE_DIR}/src/rhash/md5.c
+            )
+            add_library(rcheevos STATIC ${RCHEEVOS_SOURCES})
+            target_include_directories(rcheevos PUBLIC
+                ${rcheevos_SOURCE_DIR}/include
+                PRIVATE ${rcheevos_SOURCE_DIR}/src/rcheevos
+            )
+            target_compile_definitions(rcheevos PRIVATE
+                RC_DISABLE_LUA=1
+                RC_CLIENT_SUPPORTS_HASH=1
+                RC_HASH_NO_DISC=1
+                RC_HASH_NO_ZIP=1
+                RC_HASH_NO_ENCRYPTED=1
+            )
+            set_target_properties(rcheevos PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES)
+            set(RCHEEVOS_LINK_TARGET rcheevos)
         endif()
     endif()
     if (NOT RCHEEVOS_LINK_TARGET AND (NOT RCHEEVOS_INCLUDE_DIR OR NOT RCHEEVOS_LIBRARY))
